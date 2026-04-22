@@ -28,7 +28,7 @@ echo "Start time : $(date)"
 echo "Working dir: $(pwd)"
 echo ""
 
-srun python train.py
+srun --cpu-bind=none python train.py
 
 echo ""
 echo "End time: $(date)"
