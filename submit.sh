@@ -1,0 +1,36 @@
+#!/bin/bash --login
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
+#SBATCH --job-name=dctnn_baseline
+#SBATCH --time=24:00:00
+#SBATCH --qos=gpu
+#SBATCH --partition=gpu_cuda
+#SBATCH --gres=gpu:a100:1
+#SBATCH --account='a_ai_collab'
+#SBATCH -o logs/slurm-%j.output
+#SBATCH -e logs/slurm-%j.error
+
+# ---- Environment ----
+module load cuda/11.8
+module load python/3.8
+
+# Activate your conda or venv environment
+# conda activate <your-env-name>
+# source <your-venv>/bin/activate
+
+# ---- Run ----
+cd "$SLURM_SUBMIT_DIR"
+mkdir -p logs
+
+echo "Job ID     : $SLURM_JOB_ID"
+echo "Node       : $SLURMD_NODENAME"
+echo "Start time : $(date)"
+echo "Working dir: $(pwd)"
+echo ""
+
+srun python train.py
+
+echo ""
+echo "End time: $(date)"

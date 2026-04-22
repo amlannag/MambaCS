@@ -28,7 +28,7 @@ class ExperimentConfig:
     name: str = "baseline"
 
     # Root directory where all experiment folders are created
-    output_dir: str = "experiments"
+    output_dir: str = "../Experiments"
 
     # Set to a checkpoint path (e.g. "experiments/dctnn_baseline/latest.pth")
     # to resume a stopped run; leave as None to start fresh
@@ -42,7 +42,7 @@ class ExperimentConfig:
 @dataclass
 class DataConfig:
     # Folder of fully sampled MRI images (PNG / TIFF / NPY / NIfTI)
-    data_dir: str = "/path/to/your/mri/images"
+    data_dir: str = "/scratch/user/uqanag/OASIS/keras_png_slices_train"
 
     # Folder containing mask_R4.png, mask_R6.png, mask_R8.png
     mask_dir: str = "masks"
