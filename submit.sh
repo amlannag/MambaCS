@@ -13,12 +13,10 @@
 #SBATCH -e logs/slurm-%j.error
 
 # ---- Environment ----
-module load cuda/11.8
-module load python/3.8
-
-# Activate your conda or venv environment
-# conda activate <your-env-name>
-# source <your-venv>/bin/activate
+module load cuda/11.8.0
+module load miniforge/24.11.3-0
+source $ROOTMINIFORGE/etc/profile.d/conda.sh
+conda activate mambacs
 
 # ---- Run ----
 cd "$SLURM_SUBMIT_DIR"
