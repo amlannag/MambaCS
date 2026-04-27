@@ -25,10 +25,6 @@ conda activate mambacs
 cd "$SLURM_SUBMIT_DIR"
 mkdir -p logs
 
-# Rename the job to match prefix_name from train_config.py
-EXP_NAME=$(python -c "from train_config import cfg; print(f'{cfg.experiment.prefix}_{cfg.experiment.name}')")
-scontrol update JobId=$SLURM_JOB_ID JobName=$EXP_NAME
-
 echo "Job ID     : $SLURM_JOB_ID"
 echo "Node       : $SLURMD_NODENAME"
 echo "Start time : $(date)"
