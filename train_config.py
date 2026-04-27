@@ -25,7 +25,7 @@ class ExperimentConfig:
     prefix: str = "dctnn"
 
     # Descriptive name for this specific run (e.g. "R4only", "lr1e3", "baseline")
-    name: str = "baseline"
+    name: str = "baseline_8x"
 
     # Root directory where all experiment folders are created
     output_dir: str = "../Experiments"
@@ -46,20 +46,15 @@ class DataConfig:
 
     # Folder containing mask_R4.png, mask_R6.png, mask_R8.png
     mask_dir: str = "masks"
-
     # All images are resized to image_size x image_size
     image_size: int = 320
-
     # 1 for greyscale MRI, 2 for complex (real + imag channels)
     num_channels: int = 1
-
     # Which acceleration factors to randomly draw from during training
     # Available masks must exist in mask_dir for each value listed here
-    acceleration_factors: List[int] = field(default_factory=lambda: [4, 6, 8])
-
+    acceleration_factors: List[int] = field(default_factory=lambda: [8])
     # Fraction of the dataset held out for validation
     val_fraction: float = 0.1
-
     # Seed used for the train / val split (keeps the split reproducible)
     seed: int = 42
 
@@ -91,18 +86,13 @@ class ModelConfig:
 @dataclass
 class TrainingConfig:
     epochs: int = 100
-
     # batch_size > 1 is supported; all samples in a batch share one random mask
     batch_size: int = 1
-
     # Peak learning rate for Adam
     lr: float = 1e-4
-
     weight_decay: float = 1e-5
-
     # DataLoader worker processes (set to 0 on Windows or for debugging)
     num_workers: int = 4
-
     # Max gradient norm for clipping (helps transformer training stability)
     grad_clip: float = 1.0
 

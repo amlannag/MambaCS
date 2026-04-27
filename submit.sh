@@ -12,6 +12,9 @@
 #SBATCH -o logs/slurm-%j.output
 #SBATCH -e logs/slurm-%j.error
 
+# ---- WandB ----
+export WANDB_API_KEY=''
+
 # ---- Environment ----
 module load cuda/11.8.0
 module load miniforge/24.11.3-0

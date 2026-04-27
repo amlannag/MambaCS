@@ -295,19 +295,18 @@ def plot_summary(results, accel, exp_dir, pdf):
 # Main
 # ---------------------------------------------------------------------------
 
-def main():
-    args    = parse_args()
-    exp_dir = os.path.abspath(args.exp_dir)
+def run_inference(exp_dir, num_images=5, accel=4, split='val'):
+    exp_dir = os.path.abspath(exp_dir)
 
     if not os.path.isdir(exp_dir):
-        sys.exit(f"ERROR: experiment directory does not exist: {exp_dir}")
+        raise FileNotFoundError(f"Experiment directory does not exist: {exp_dir}")
 
-    print(f"Experiment dir : {exp_dir}")
+    print(f"\n{'='*60}")
+    print(f"Running inference on: {exp_dir}")
+    print(f"{'='*60}")
 
     # ---- Config ----
     config_path = os.path.join(exp_dir, 'config.json')
-    if not os.path.exists(config_path):
-        sys.exit(f"ERROR: config.json not found in {exp_dir}")
     with open(config_path) as f:
         cfg_dict = json.load(f)
 
@@ -317,8 +316,6 @@ def main():
 
     # ---- Metrics ----
     metrics_path = os.path.join(exp_dir, 'metrics.json')
-    if not os.path.exists(metrics_path):
-        sys.exit(f"ERROR: metrics.json not found in {exp_dir}")
     with open(metrics_path) as f:
         metrics = json.load(f)
     print(f"Metrics        : {len(metrics)} epochs logged")
@@ -329,9 +326,6 @@ def main():
 
     # ---- Model ----
     best_path = os.path.join(exp_dir, 'best_model.pth')
-    if not os.path.exists(best_path):
-        sys.exit(f"ERROR: best_model.pth not found in {exp_dir}")
-
     model = build_model_from_config(cfg_dict).to(device)
     ckpt  = torch.load(best_path, map_location=device)
     model.load_state_dict(ckpt['model'])
@@ -347,40 +341,37 @@ def main():
     # ---- Mask ----
     script_dir = os.path.dirname(os.path.abspath(__file__))
     mask_dir   = os.path.join(script_dir, cfg_dict['data']['mask_dir'])
-    mask_path  = os.path.join(mask_dir, f'mask_R{args.accel}.png')
+    mask_path  = os.path.join(mask_dir, f'mask_R{accel}.png')
     if not os.path.exists(mask_path):
-        sys.exit(f"ERROR: mask not found: {mask_path}")
+        raise FileNotFoundError(f"Mask not found: {mask_path}")
     mask = load_mask(mask_path, N).to(device)
-    print(f"Mask           : R={args.accel}, shape={tuple(mask.shape)}")
+    print(f"Mask           : R={accel}, shape={tuple(mask.shape)}")
 
     # ---- Dataset ----
     data_dir     = cfg_dict['data']['data_dir']
     val_fraction = cfg_dict['data'].get('val_fraction', 0.1)
     seed         = cfg_dict['data'].get('seed', 42)
 
-    dataset    = MRIDataset(data_dir, N=N, split=args.split,
+    dataset    = MRIDataset(data_dir, N=N, split=split,
                             val_fraction=val_fraction, seed=seed)
-    num_images = min(args.num_images, len(dataset))
+    num_images = min(num_images, len(dataset))
     indices    = np.linspace(0, len(dataset) - 1, num_images, dtype=int)
-    print(f"Dataset        : {len(dataset)} images in '{args.split}' split")
+    print(f"Dataset        : {len(dataset)} images in '{split}' split")
     print(f"Visualising    : {num_images} images\n")
 
     # ---- Generate PDF ----
     pdf_path = os.path.join(exp_dir, 'inference_results.pdf')
-
-    results = []
+    results  = []
 
     with PdfPages(pdf_path) as pdf:
 
-        # Page 1 — training curves
         print("Plotting training metrics...")
         plot_metrics(metrics, pdf)
 
-        # Pages 2+ — per-image results
         for page_idx, dataset_idx in enumerate(indices):
             print(f"  Image {page_idx + 1}/{num_images}  (dataset index {int(dataset_idx)})")
 
-            gt = dataset[int(dataset_idx)].unsqueeze(0).to(device)  # [1, 1, N, N]
+            gt = dataset[int(dataset_idx)].unsqueeze(0).to(device)
 
             with torch.no_grad():
                 zf_image, kspace_us = simulate_undersampling(gt, mask, num_channels)
@@ -397,25 +388,26 @@ def main():
             plot_image_results(
                 gt.cpu(), zf_image.cpu(), recon.cpu(),
                 kspace_gt.cpu(), kspace_us.cpu(), kspace_recon.cpu(),
-                page_idx, args.accel, pdf,
+                page_idx, accel, pdf,
             )
 
-        # Final page — summary table
-        plot_summary(results, args.accel, exp_dir, pdf)
+        plot_summary(results, accel, exp_dir, pdf)
 
-        # PDF metadata
-        d         = pdf.infodict()
+        d           = pdf.infodict()
         d['Title']  = f'DcTNN Inference — {os.path.basename(exp_dir)}'
         d['Author'] = 'inference.py'
 
     print(f"\nPDF saved to: {pdf_path}")
-
-    # Print summary to stdout
     print("\n--- Summary ---")
     for i, r in enumerate(results):
         print(f"  Image {i+1}: PSNR={r['psnr']:.3f} dB  MSE={r['mse']:.2e}")
     print(f"  Mean  : PSNR={np.mean([r['psnr'] for r in results]):.3f} dB  "
           f"MSE={np.mean([r['mse'] for r in results]):.2e}")
+
+
+def main():
+    args = parse_args()
+    run_inference(args.exp_dir, args.num_images, args.accel, args.split)
 
 
 if __name__ == '__main__':

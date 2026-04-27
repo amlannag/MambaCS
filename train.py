@@ -20,11 +20,13 @@ import time
 import numpy as np
 import torch
 import torch.nn as nn
+import wandb
 from torch.utils.data import DataLoader
 
 from DcTNN.tnn import cascadeNet, axVIT, patchVIT
 from dc.dc import FFT_DC, fft_2d, ifft_2d
 from dataset import MRIDataset, load_mask
+from inference import run_inference
 from train_config import cfg
 
 
@@ -177,6 +179,12 @@ def main():
     with open(config_path, 'w') as f:
         json.dump(config_to_dict(cfg), f, indent=2)
 
+    wandb.init(
+        project=cfg.experiment.prefix,
+        name=cfg.experiment.name,
+        config=config_to_dict(cfg),
+    )
+
     print(f"Experiment : {cfg.experiment.prefix}_{cfg.experiment.name}")
     print(f"Output dir : {out_dir}")
     print(f"Device     : {device}")
@@ -257,15 +265,16 @@ def main():
               f"LR: {lr:.2e}  |  "
               f"{elapsed:.1f}s")
 
-        # Append metrics for this epoch
-        append_metrics(metrics_path, {
+        metrics = {
             'epoch':      epoch + 1,
             'train_loss': round(train_loss, 6),
             'val_loss':   round(val_loss,   6),
             'val_psnr':   round(val_psnr,   4),
             'lr':         lr,
             'time_s':     round(elapsed, 1),
-        })
+        }
+        append_metrics(metrics_path, metrics)
+        wandb.log(metrics, step=epoch + 1)
 
         # Save best weights
         if val_loss < best_val_loss:
@@ -289,7 +298,12 @@ def main():
             'best_val_loss': best_val_loss,
         }, latest_path)
 
+    wandb.finish()
     print(f"\nTraining complete.  Outputs saved to: {out_dir}")
+
+    # ---- Inference ----
+    for R in [4, 6, 8]:
+        run_inference(out_dir, num_images=5, accel=R, split='val')
 
 
 if __name__ == '__main__':
