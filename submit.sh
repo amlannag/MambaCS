@@ -31,7 +31,7 @@ echo "Start time : $(date)"
 echo "Working dir: $(pwd)"
 echo ""
 
-unset SLURM_MEM_PER_GPU
+unset SLURM_MEM_PER_GPU SLURM_MEM_PER_CPU SLURM_MEM_PER_NODE
 srun --cpu-bind=none python train.py
 
 echo ""
