@@ -35,8 +35,8 @@ from train_config import cfg
 # ---------------------------------------------------------------------------
 
 def experiment_dir(cfg):
-    folder = f"{cfg.experiment.prefix}_{cfg.experiment.name}"
-    return os.path.join(cfg.experiment.output_dir, folder)
+    folder = f"{cfg.prefix}_{cfg.name}"
+    return os.path.join(cfg.output_dir, folder)
 
 
 def psnr(pred, target, max_val=1.0):
@@ -47,14 +47,12 @@ def psnr(pred, target, max_val=1.0):
 
 
 def config_to_dict(cfg):
-    """Recursively convert nested dataclasses to a plain dict for JSON serialisation."""
     if dataclasses.is_dataclass(cfg):
         return {k: config_to_dict(v) for k, v in dataclasses.asdict(cfg).items()}
     return cfg
 
 
 def append_metrics(path, record):
-    """Append one epoch record to metrics.json (creates the file on first call)."""
     history = []
     if os.path.exists(path):
         with open(path) as f:
@@ -68,30 +66,40 @@ def append_metrics(path, record):
 # Model factory
 # ---------------------------------------------------------------------------
 
+ENCODER_ARGS = {
+    "axial": lambda cfg: (
+        axVIT,
+        dict(layerNo=cfg.layer_no, numCh=cfg.num_channels, d_model=None,
+             nhead=cfg.nhead_axial, num_encoder_layers=cfg.num_encoder_layers,
+             dim_feedforward=None)
+    ),
+    "kaleidoscope": lambda cfg: (
+        patchVIT,
+        dict(patch_size=cfg.patch_size, kaleidoscope=True, layerNo=cfg.layer_no,
+             numCh=cfg.num_channels, nhead=cfg.nhead_patch,
+             num_encoder_layers=cfg.num_encoder_layers,
+             dim_feedforward=None, d_model=None)
+    ),
+    "patch": lambda cfg: (
+        patchVIT,
+        dict(patch_size=cfg.patch_size, kaleidoscope=False, layerNo=cfg.layer_no,
+             numCh=cfg.num_channels, nhead=cfg.nhead_patch,
+             num_encoder_layers=cfg.num_encoder_layers,
+             dim_feedforward=None, d_model=None)
+    ),
+}
+
+
 def build_model(cfg):
-    m = cfg.model
-    d = cfg.data
+    enc_list, enc_args = [], []
+    for name in cfg.encoders:
+        if name not in ENCODER_ARGS:
+            raise ValueError(f"Unknown encoder '{name}'. Choose from: {list(ENCODER_ARGS)}")
+        cls, args = ENCODER_ARGS[name](cfg)
+        enc_list.append(cls)
+        enc_args.append(args)
 
-    patch_args = dict(patch_size=m.patch_size, kaleidoscope=False, layerNo=m.layer_no,
-                      numCh=d.num_channels, nhead=m.nhead_patch,
-                      num_encoder_layers=m.num_encoder_layers,
-                      dim_feedforward=None, d_model=None)
-    kd_args    = dict(patch_size=m.patch_size, kaleidoscope=True,  layerNo=m.layer_no,
-                      numCh=d.num_channels, nhead=m.nhead_patch,
-                      num_encoder_layers=m.num_encoder_layers,
-                      dim_feedforward=None, d_model=None)
-    ax_args    = dict(layerNo=m.layer_no, numCh=d.num_channels, d_model=None,
-                      nhead=m.nhead_axial,
-                      num_encoder_layers=m.num_encoder_layers,
-                      dim_feedforward=None)
-
-    return cascadeNet(
-        d.image_size,
-        [axVIT,    patchVIT, patchVIT],
-        [ax_args, kd_args,  patch_args],
-        FFT_DC,
-        m.learned_lambda,
-    )
+    return cascadeNet(cfg.image_size, enc_list, enc_args, FFT_DC, cfg.learned_lambda)
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +114,7 @@ def simulate_undersampling(gt_batch, mask, norm='ortho'):
     """
     kspace_full = fft_2d(gt_batch)
     kspace_us   = kspace_full * mask
-    zf_image    = ifft_2d(kspace_us, norm=norm)[:, 0:cfg.data.num_channels, :, :]
+    zf_image    = ifft_2d(kspace_us, norm=norm)[:, 0:cfg.num_channels, :, :]
     return zf_image, kspace_us
 
 
@@ -130,7 +138,7 @@ def train_one_epoch(model, loader, masks, optimizer, criterion, device):
         recon = model(zf_image, kspace_us, mask)
         loss  = criterion(recon, gt)
         loss.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.training.grad_clip)
+        nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.grad_clip)
         optimizer.step()
 
         total_loss += loss.item()
@@ -175,42 +183,42 @@ def main():
     best_path    = os.path.join(out_dir, 'best_model.pth')
     latest_path  = os.path.join(out_dir, 'latest.pth')
 
-    # Save config snapshot so the run is always reproducible
     with open(config_path, 'w') as f:
         json.dump(config_to_dict(cfg), f, indent=2)
 
     wandb.init(
-        project=cfg.experiment.prefix,
-        name=cfg.experiment.name,
+        project=cfg.prefix,
+        name=cfg.name,
         config=config_to_dict(cfg),
     )
 
-    print(f"Experiment : {cfg.experiment.prefix}_{cfg.experiment.name}")
+    print(f"Experiment : {cfg.prefix}_{cfg.name}")
+    print(f"Encoders   : {cfg.encoders}")
     print(f"Output dir : {out_dir}")
     print(f"Device     : {device}")
 
     # ---- Masks ----
     masks = {}
-    for R in cfg.data.acceleration_factors:
-        path = os.path.join(cfg.data.mask_dir, f'mask_R{R}.png')
+    for R in cfg.acceleration_factors:
+        path = os.path.join(cfg.mask_dir, f'mask_R{R}.png')
         if not os.path.exists(path):
             raise FileNotFoundError(f"Mask not found: {path}")
-        masks[R] = load_mask(path, cfg.data.image_size)
+        masks[R] = load_mask(path, cfg.image_size)
     print(f"Masks      : R = {list(masks.keys())}")
 
     # ---- Datasets ----
-    train_ds = MRIDataset(cfg.data.data_dir, N=cfg.data.image_size,
-                          split='train', val_fraction=cfg.data.val_fraction,
-                          seed=cfg.data.seed)
-    val_ds   = MRIDataset(cfg.data.data_dir, N=cfg.data.image_size,
-                          split='val',   val_fraction=cfg.data.val_fraction,
-                          seed=cfg.data.seed)
+    train_ds = MRIDataset(cfg.data_dir, N=cfg.image_size,
+                          split='train', val_fraction=cfg.val_fraction,
+                          seed=cfg.seed)
+    val_ds   = MRIDataset(cfg.data_dir, N=cfg.image_size,
+                          split='val',   val_fraction=cfg.val_fraction,
+                          seed=cfg.seed)
 
-    train_loader = DataLoader(train_ds, batch_size=cfg.training.batch_size,
-                              shuffle=True,  num_workers=cfg.training.num_workers,
+    train_loader = DataLoader(train_ds, batch_size=cfg.batch_size,
+                              shuffle=True,  num_workers=cfg.num_workers,
                               pin_memory=True)
-    val_loader   = DataLoader(val_ds,   batch_size=cfg.training.batch_size,
-                              shuffle=False, num_workers=cfg.training.num_workers,
+    val_loader   = DataLoader(val_ds,   batch_size=cfg.batch_size,
+                              shuffle=False, num_workers=cfg.num_workers,
                               pin_memory=True)
 
     print(f"Train / Val: {len(train_ds)} / {len(val_ds)} samples")
@@ -222,12 +230,12 @@ def main():
 
     # ---- Optimiser / scheduler / loss ----
     optimizer = torch.optim.Adam(model.parameters(),
-                                 lr=cfg.training.lr,
-                                 weight_decay=cfg.training.weight_decay)
+                                 lr=cfg.lr,
+                                 weight_decay=cfg.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        T_max=cfg.training.epochs,
-        eta_min=cfg.training.lr * 1e-2,
+        T_max=cfg.epochs,
+        eta_min=cfg.lr * 1e-2,
     )
     criterion = nn.L1Loss()
 
@@ -235,19 +243,18 @@ def main():
     start_epoch   = 0
     best_val_loss = float('inf')
 
-    resume_path = cfg.experiment.resume
-    if resume_path and os.path.exists(resume_path):
-        ckpt = torch.load(resume_path, map_location=device)
+    if cfg.resume and os.path.exists(cfg.resume):
+        ckpt = torch.load(cfg.resume, map_location=device)
         model.load_state_dict(ckpt['model'])
         optimizer.load_state_dict(ckpt['optimizer'])
         scheduler.load_state_dict(ckpt['scheduler'])
         start_epoch   = ckpt['epoch'] + 1
         best_val_loss = ckpt.get('best_val_loss', float('inf'))
-        print(f"Resumed from epoch {start_epoch}  ({resume_path})")
+        print(f"Resumed from epoch {start_epoch}  ({cfg.resume})")
 
     # ---- Training loop ----
     print()
-    for epoch in range(start_epoch, cfg.training.epochs):
+    for epoch in range(start_epoch, cfg.epochs):
         t0 = time.time()
 
         train_loss         = train_one_epoch(model, train_loader, masks,
@@ -258,7 +265,7 @@ def main():
         lr      = scheduler.get_last_lr()[0]
         elapsed = time.time() - t0
 
-        print(f"Epoch {epoch+1:03d}/{cfg.training.epochs}  |  "
+        print(f"Epoch {epoch+1:03d}/{cfg.epochs}  |  "
               f"Train L1: {train_loss:.4f}  |  "
               f"Val L1: {val_loss:.4f}  |  "
               f"Val PSNR: {val_psnr:.2f} dB  |  "
@@ -273,10 +280,12 @@ def main():
             'lr':         lr,
             'time_s':     round(elapsed, 1),
         }
+        if model.lamb is not False:
+            for i, lv in enumerate(model.lamb):
+                metrics[f'lambda_{i}'] = round(lv.item(), 6)
         append_metrics(metrics_path, metrics)
         wandb.log(metrics, step=epoch + 1)
 
-        # Save best weights
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save({
@@ -289,7 +298,6 @@ def main():
             }, best_path)
             print(f"  -> Best model saved  (val_loss={best_val_loss:.4f})")
 
-        # Save latest checkpoint (for resuming)
         torch.save({
             'epoch':         epoch,
             'model':         model.state_dict(),
@@ -301,7 +309,6 @@ def main():
     wandb.finish()
     print(f"\nTraining complete.  Outputs saved to: {out_dir}")
 
-    # ---- Inference ----
     for R in [4, 6, 8]:
         run_inference(out_dir, num_images=5, accel=R, split='val')
 
