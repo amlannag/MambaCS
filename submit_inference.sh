@@ -48,6 +48,7 @@ echo "Images       : $NUM_IMAGES"
 echo "Split        : $SPLIT"
 echo ""
 
+unset SLURM_MEM_PER_GPU
 srun --cpu-bind=none python inference.py \
     --exp_dir    "$EXP_DIR"    \
     --num_images "$NUM_IMAGES" \
