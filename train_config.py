@@ -13,19 +13,19 @@ Submit all experiments as separate SLURM jobs:
 
 EXPERIMENTS = [
     {
-        "prefix": "experiment",
+        "prefix": "PosEmbed",
         "name": "APE_baseline",
         "pos_emb_type": "APE",
         "encoders": ["patch", "patch", "patch"],
     },
     {
-        "prefix": "experiment",
+        "prefix": "PosEmbed",
         "name": "RopeAxial",
         "pos_emb_type": "Rope-Axial",
         "rope_theta": 100.0,
     },
     {
-        "prefix": "experiment",
+        "prefix": "PosEmbed",
         "name": "RopeMixed",
         "pos_emb_type": "Rope-Mixed",
         "rope_theta": 10.0,

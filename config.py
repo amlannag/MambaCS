@@ -22,7 +22,7 @@ class Config:
     # ---------------------------------------------------------------------------
 
     # Short label for the project / paper section (e.g. "ablation", "dctnn")
-    prefix: str = "PatchOnly"
+    prefix: str = "MambaCS"
 
     # Descriptive name for this specific run (e.g. "R4only", "lr1e3", "baseline")
     name: str = "8x_acceleration"

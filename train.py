@@ -209,8 +209,8 @@ def main():
         json.dump(config_to_dict(cfg), f, indent=2)
 
     wandb.init(
-        project=cfg.prefix,
-        name=cfg.name,
+        project="MambaCS",
+        name=f"{cfg.prefix}_{cfg.name}",
         config=config_to_dict(cfg),
     )
 
