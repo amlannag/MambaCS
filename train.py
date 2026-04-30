@@ -1,8 +1,8 @@
 """
 Training pipeline for DcTNN MRI reconstruction.
 
-Configure everything in train_config.py, then run:
-    python train.py
+Define experiments in train_config.py, then run:
+    python train.py --exp_idx <N>
 
 All outputs are written to:
     {output_dir}/{prefix}_{name}/
@@ -12,6 +12,7 @@ All outputs are written to:
         metrics.json      — per-epoch metrics
 """
 
+import argparse
 import dataclasses
 import json
 import os
@@ -27,7 +28,25 @@ from DcTNN.tnn import cascadeNet, axVIT, patchVIT
 from dc.dc import FFT_DC, fft_2d, ifft_2d
 from dataset import MRIDataset, load_mask
 from inference import run_inference
-from train_config import cfg
+from config import Config
+from train_config import EXPERIMENTS
+
+
+def build_cfg(exp_idx: int) -> Config:
+    cfg = Config()
+    overrides = EXPERIMENTS[exp_idx]
+    for key, val in overrides.items():
+        if not hasattr(cfg, key):
+            raise ValueError(f"Unknown config key '{key}' in EXPERIMENTS[{exp_idx}]")
+        setattr(cfg, key, val)
+    return cfg
+
+
+_parser = argparse.ArgumentParser()
+_parser.add_argument('--exp_idx', type=int, default=0)
+_args = _parser.parse_args()
+cfg = build_cfg(_args.exp_idx)
+print(f"Experiment {_args.exp_idx}: {cfg.prefix}_{cfg.name}")
 
 
 # ---------------------------------------------------------------------------
@@ -71,21 +90,24 @@ ENCODER_ARGS = {
         axVIT,
         dict(layerNo=cfg.layer_no, numCh=cfg.num_channels, d_model=None,
              nhead=cfg.nhead_axial, num_encoder_layers=cfg.num_encoder_layers,
-             dim_feedforward=None)
+             dim_feedforward=None, pos_emb_type=cfg.pos_emb_type,
+             rope_theta=cfg.rope_theta, rope_mixed_rotate=cfg.rope_mixed_rotate)
     ),
     "kaleidoscope": lambda cfg: (
         patchVIT,
         dict(patch_size=cfg.patch_size, kaleidoscope=True, layerNo=cfg.layer_no,
              numCh=cfg.num_channels, nhead=cfg.nhead_patch,
              num_encoder_layers=cfg.num_encoder_layers,
-             dim_feedforward=None, d_model=None)
+             dim_feedforward=None, d_model=None, pos_emb_type=cfg.pos_emb_type,
+             rope_theta=cfg.rope_theta, rope_mixed_rotate=cfg.rope_mixed_rotate)
     ),
     "patch": lambda cfg: (
         patchVIT,
         dict(patch_size=cfg.patch_size, kaleidoscope=False, layerNo=cfg.layer_no,
              numCh=cfg.num_channels, nhead=cfg.nhead_patch,
              num_encoder_layers=cfg.num_encoder_layers,
-             dim_feedforward=None, d_model=None)
+             dim_feedforward=None, d_model=None, pos_emb_type=cfg.pos_emb_type,
+             rope_theta=cfg.rope_theta, rope_mixed_rotate=cfg.rope_mixed_rotate)
     ),
 }
 

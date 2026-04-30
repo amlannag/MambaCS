@@ -31,8 +31,10 @@ echo "Start time : $(date)"
 echo "Working dir: $(pwd)"
 echo ""
 
+EXP_IDX="${EXP_IDX:-0}"
+
 unset SLURM_MEM_PER_GPU SLURM_MEM_PER_CPU SLURM_MEM_PER_NODE
-srun --cpu-bind=none python train.py
+srun --cpu-bind=none python train.py --exp_idx "$EXP_IDX"
 
 echo ""
 echo "End time: $(date)"
