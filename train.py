@@ -1,15 +1,5 @@
 """
-Training pipeline for DcTNN MRI reconstruction.
-
-Define experiments in train_config.py, then run:
-    python train.py --exp_idx <N>
-
-All outputs are written to:
-    {output_dir}/{prefix}_{name}/
-        config.json       — config snapshot
-        best_model.pth    — weights at best validation loss
-        latest.pth        — latest checkpoint (resume from here)
-        metrics.json      — per-epoch metrics
+Training pipeline for Mamba Compressed Sensing MRI reconstruction.
 """
 
 import argparse
@@ -33,6 +23,8 @@ from train_config import EXPERIMENTS
 
 
 def build_cfg(exp_idx: int) -> Config:
+    """
+    Builds a config object by applying overrides from EXPERIMENTS[exp_idx] to the default Config."""
     cfg = Config()
     overrides = EXPERIMENTS[exp_idx]
     for key, val in overrides.items():
@@ -48,7 +40,6 @@ _args = _parser.parse_args()
 cfg = build_cfg(_args.exp_idx)
 print(f"Experiment {_args.exp_idx}: {cfg.prefix}_{cfg.name}")
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -57,19 +48,23 @@ def experiment_dir(cfg):
     folder = f"{cfg.prefix}_{cfg.name}"
     return os.path.join(cfg.output_dir, folder)
 
-
 def psnr(pred, target, max_val=1.0):
+    """
+    Calculate the Peak Signal-to-Noise Ratio (PSNR) between prediction and target.
+    """
     mse = torch.mean((pred - target) ** 2)
     if mse == 0:
         return torch.tensor(float('inf'))
     return 20.0 * torch.log10(torch.tensor(max_val, device=pred.device) / torch.sqrt(mse))
 
-
 def config_to_dict(cfg):
+    """
+    Convert a config object to a dictionary.
+    This is used for saving the config as JSON and logging to wandb."""
+
     if dataclasses.is_dataclass(cfg):
         return {k: config_to_dict(v) for k, v in dataclasses.asdict(cfg).items()}
     return cfg
-
 
 def append_metrics(path, record):
     history = []
@@ -82,7 +77,7 @@ def append_metrics(path, record):
 
 
 # ---------------------------------------------------------------------------
-# Model factory
+# Model Construction Using Configs
 # ---------------------------------------------------------------------------
 
 ENCODER_ARGS = {
@@ -123,11 +118,9 @@ def build_model(cfg):
 
     return cascadeNet(cfg.image_size, enc_list, enc_args, FFT_DC, cfg.learned_lambda)
 
-
 # ---------------------------------------------------------------------------
 # k-space simulation
 # ---------------------------------------------------------------------------
-
 def simulate_undersampling(gt_batch, mask, norm='ortho'):
     """
     gt_batch : [B, 1, N, N]

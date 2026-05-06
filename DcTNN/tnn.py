@@ -302,6 +302,7 @@ class imageEncoder(nn.Module):
             x = self.dropout(x)
             x = self.encoder(x, src_mask)
         elif self.pos_emb_type == "Rope-Axial":
+
             x = self.dropout(x)
             freqs_cis = self.freqs_cis.to(x.device)
             for layer in self.layers:
@@ -313,6 +314,7 @@ class imageEncoder(nn.Module):
                 x = layer(x, all_freqs[i])
 
         x = self.mlp_head(x)
+        
         return x
 
 

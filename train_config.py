@@ -13,22 +13,9 @@ Submit all experiments as separate SLURM jobs:
 
 EXPERIMENTS = [
     {
-        "prefix": "PosEmbed",
-        "name": "APE_baseline",
+        "prefix": "Koaleidoscope",
+        "name": "_baseline",
         "pos_emb_type": "APE",
-        "encoders": ["patch", "patch", "patch"],
-    },
-    {
-        "prefix": "PosEmbed",
-        "name": "RopeAxial",
-        "pos_emb_type": "Rope-Axial",
-        "rope_theta": 100.0,
-    },
-    {
-        "prefix": "PosEmbed",
-        "name": "RopeMixed",
-        "pos_emb_type": "Rope-Mixed",
-        "rope_theta": 10.0,
-        "rope_mixed_rotate": True,
-    },
+        "encoders": ["kaleidoscope", "kaleidoscope", "kaleidoscope"],
+    }
 ]

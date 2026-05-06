@@ -89,10 +89,8 @@ class Config:
     # Training hyperparameters
     # ---------------------------------------------------------------------------
 
-    epochs: int = 100
-
-    batch_size: int = 1
-
+    epochs: int = 400
+    batch_size: int = 16
     lr: float = 1e-4
     weight_decay: float = 1e-5
     num_workers: int = 4
