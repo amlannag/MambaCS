@@ -15,11 +15,12 @@ import wandb
 from torch.utils.data import DataLoader
 
 from DcTNN.tnn import cascadeNet, axVIT, patchVIT
-from dc.dc import FFT_DC, fft_2d, ifft_2d
+from dc.dc import FFT_DC, KSpace_DC, fft_2d, ifft_2d
 from dataset import MRIDataset, load_mask
 from inference import run_inference
 from config import Config
 from train_config import EXPERIMENTS
+from lambda_scheduler import LambdaScheduler
 
 
 def build_cfg(exp_idx: int) -> Config:
@@ -113,10 +114,15 @@ def build_model(cfg):
         if name not in ENCODER_ARGS:
             raise ValueError(f"Unknown encoder '{name}'. Choose from: {list(ENCODER_ARGS)}")
         cls, args = ENCODER_ARGS[name](cfg)
+        if cfg.k_space_learning:
+            args['numCh'] = 2   # encoders receive [B, 2, N, N] k-space input
         enc_list.append(cls)
         enc_args.append(args)
 
-    return cascadeNet(cfg.image_size, enc_list, enc_args, FFT_DC, cfg.learned_lambda)
+    dc_func = KSpace_DC if cfg.k_space_learning else FFT_DC
+    use_learned_lamb = cfg.lambda_schedule == "none"
+    return cascadeNet(cfg.image_size, enc_list, enc_args, dc_func,
+                      use_learned_lamb, k_space_learning=cfg.k_space_learning)
 
 # ---------------------------------------------------------------------------
 # k-space simulation
@@ -267,10 +273,19 @@ def main():
         best_val_loss = ckpt.get('best_val_loss', float('inf'))
         print(f"Resumed from epoch {start_epoch}  ({cfg.resume})")
 
+    # ---- Lambda scheduler (if active) ----
+    lamb_sched = None
+    if cfg.lambda_schedule != "none":
+        lamb_sched = LambdaScheduler(cfg.lambda_schedule, cfg.lambda_start,
+                                     cfg.lambda_end, cfg.epochs)
+
     # ---- Training loop ----
     print()
     for epoch in range(start_epoch, cfg.epochs):
         t0 = time.time()
+
+        if lamb_sched is not None:
+            model.set_scheduled_lamb(lamb_sched.get_lambda(epoch))
 
         train_loss         = train_one_epoch(model, train_loader, masks,
                                              optimizer, criterion, device)
@@ -298,6 +313,8 @@ def main():
         if model.lamb is not False:
             for i, lv in enumerate(model.lamb):
                 metrics[f'lambda_{i}'] = round(lv.item(), 6)
+        elif lamb_sched is not None:
+            metrics['lambda_scheduled'] = round(model.scheduled_lamb, 6)
         append_metrics(metrics_path, metrics)
         wandb.log(metrics, step=epoch + 1)
 

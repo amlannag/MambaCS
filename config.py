@@ -77,6 +77,12 @@ class Config:
     layer_no: int = 1
     num_encoder_layers: int = 2
     learned_lambda: bool = True
+    k_space_learning: bool = False
+
+    # Lambda schedule: "none" uses learned lambda; "cosine"/"linear"/"constant" use a schedule
+    lambda_schedule: str = "none"
+    lambda_start: float = 1.0
+    lambda_end: float = 0.1
 
     # Positional embedding type: "APE" | "Rope-Axial" | "Rope-Mixed"
     pos_emb_type: str = "APE"

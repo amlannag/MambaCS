@@ -179,29 +179,41 @@ class cascadeNet(nn.Module):
         dcFunc (function)           -       Contains the data consistency function to be used in recon
         lamb (bool)                 -       Whether or not to use a leanred data consistency parameter
     """
-    def __init__(self, N, encList, encArgs, dcFunc=FFT_DC, lamb=True):
+    def __init__(self, N, encList, encArgs, dcFunc=FFT_DC, lamb=True, k_space_learning=False):
         super(cascadeNet, self).__init__()
         if lamb:
             self.lamb = nn.Parameter(torch.ones(len(encList)) * 0.5)
         else:
             self.lamb = False
+        self.scheduled_lamb = None
         self.N = N
         self.dcFunc = dcFunc
+        self.k_space_learning = k_space_learning
 
         transformers = []
         for i, enc in enumerate(encList):
             transformers.append(enc(N, **encArgs[i]))
         self.transformers = nn.ModuleList(transformers)
 
+    def set_scheduled_lamb(self, value):
+        self.scheduled_lamb = value
+
     def forward(self, xPrev, y, sampleMask):
         im = xPrev
+        if self.k_space_learning:
+            im = fft_2d(im)             # [B, 1, N, N] → [B, 2, N, N]
         for i, transformer in enumerate(self.transformers):
             im_denoise = transformer(im)
             im = im + im_denoise
-            if self.lamb is False:
-                im = self.dcFunc(im, y, sampleMask, None)
+            if self.lamb is not False:
+                lamb_i = self.lamb[i]               # learned per-stage
+            elif self.scheduled_lamb is not None:
+                lamb_i = self.scheduled_lamb        # scheduled scalar
             else:
-                im = self.dcFunc(im, y, sampleMask, self.lamb[i])
+                lamb_i = None                       # hard replacement
+            im = self.dcFunc(im, y, sampleMask, lamb_i)
+        if self.k_space_learning:
+            im = ifft_2d(im)[:, 0:1, :, :]   # [B, 2, N, N] → [B, 1, N, N]
         return im
 
 

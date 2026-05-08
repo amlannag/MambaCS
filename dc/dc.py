@@ -75,3 +75,24 @@ def FFT_DC(x, y, mask, lamb, norm='ortho'):
 
     # Return masked image
     return z
+
+
+"""
+Data consistency for k-space learning mode.
+Input x is already in k-space [B, 2, H, W] — no FFT/IFFT needed.
+"""
+def KSpace_DC(x, y, mask, lamb, norm='ortho'):
+    cy = y.permute(0, 2, 3, 1).contiguous()
+    cy = torch.view_as_complex(cy)
+
+    z = x.permute(0, 2, 3, 1).contiguous()
+    z = torch.view_as_complex(z)
+
+    if lamb is None:
+        z = (1 - mask) * z + mask * cy
+    else:
+        z = (1 - mask) * z + mask * (z + lamb * cy) / (1 + lamb)
+
+    z = torch.view_as_real(z)       # [B, H, W, 2]
+    z = z.permute(0, 3, 1, 2)       # [B, 2, H, W]
+    return z

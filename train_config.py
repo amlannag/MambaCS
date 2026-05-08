@@ -13,9 +13,34 @@ Submit all experiments as separate SLURM jobs:
 
 EXPERIMENTS = [
     {
-        "prefix": "Koaleidoscope",
-        "name": "_baseline",
+        "prefix": "KSpace",
+        "name": "patch",
+        "pos_emb_type": "APE",
+        "encoders": ["patch", "patch", "patch"],
+        "k_space_learning": True,
+    },
+    {
+        "prefix": "KSpace",
+        "name": "kaleidoscope",
         "pos_emb_type": "APE",
         "encoders": ["kaleidoscope", "kaleidoscope", "kaleidoscope"],
-    }
+        "k_space_learning": True,
+    },
+    {
+        "prefix": "KSpace",
+        "name": "axial",
+        "pos_emb_type": "APE",
+        "encoders": ["axial", "axial", "axial"],
+        "k_space_learning": True,
+    },
+    {
+        "prefix": "Lambda_Schedule",
+        "name": "patch_cosine",
+        "pos_emb_type": "APE",
+        "encoders": ["patch", "patch", "patch"],
+        "lambda_schedule": "cosine",
+        "lambda_start": 1.0,
+        "lambda_end": 0.01,
+        "epochs": 800,
+    },
 ]
