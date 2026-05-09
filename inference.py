@@ -32,6 +32,19 @@ from dataset import MRIDataset, load_mask
 
 
 # ---------------------------------------------------------------------------
+# Batch experiment list
+# Each entry: {"exp_dir": "<path>", "accel": <int>, "num_images": <int>}
+# ---------------------------------------------------------------------------
+
+EXPERIMENTS = [
+    {"exp_dir": "../Experiments/KSpace_patch",               "accel": 8, "num_images": 5},
+    {"exp_dir": "../Experiments/KSpace_kaleidoscope",        "accel": 8, "num_images": 5},
+    {"exp_dir": "../Experiments/KSpace_axial",               "accel": 8, "num_images": 5},
+    {"exp_dir": "../Experiments/Lambda_Schedule_patch_cosine", "accel": 8, "num_images": 5},
+]
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -41,9 +54,13 @@ def parse_args():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        '--exp_dir', type=str, required=True,
+        '--exp_dir', type=str, default=None,
         help='Path to the experiment directory '
              '(must contain config.json, best_model.pth, metrics.json).',
+    )
+    parser.add_argument(
+        '--all', action='store_true',
+        help='Run residual reports for all experiments listed in EXPERIMENTS.',
     )
     parser.add_argument(
         '--num_images', type=int, default=5,
@@ -292,6 +309,148 @@ def plot_summary(results, accel, exp_dir, pdf):
 
 
 # ---------------------------------------------------------------------------
+# Residual report
+# ---------------------------------------------------------------------------
+
+def plot_residual_page(gt, zf_image, recon, kspace_us, kspace_recon, img_idx, accel, pdf):
+    """2×3 panel: undersampled image/kspace, reconstructed image/kspace, residual map + histogram."""
+    gt_np    = to_image(gt)
+    zf_np    = to_image(zf_image)
+    recon_np = to_image(recon)
+    residual = recon_np - gt_np
+
+    ks_us_np    = to_kspace_log(kspace_us)
+    ks_recon_np = to_kspace_log(kspace_recon)
+
+    psnr_val = psnr_numpy(recon_np, gt_np)
+    mse_val  = float(np.mean(residual ** 2))
+
+    fig, axes = plt.subplots(2, 3, figsize=(18, 11))
+    fig.suptitle(
+        f'Image {img_idx + 1}  —  R={accel}  |  PSNR = {psnr_val:.2f} dB  |  MSE = {mse_val:.2e}',
+        fontsize=13, fontweight='bold',
+    )
+
+    vmax = gt_np.max()
+
+    # Row 0: spatial
+    axes[0, 0].imshow(zf_np,    cmap='gray', vmin=0, vmax=vmax, origin='upper')
+    axes[0, 0].set_title(f'Undersampled Image  (R={accel})', fontsize=10)
+    axes[0, 0].axis('off')
+
+    axes[0, 1].imshow(recon_np, cmap='gray', vmin=0, vmax=vmax, origin='upper')
+    axes[0, 1].set_title('Reconstructed Image', fontsize=10)
+    axes[0, 1].axis('off')
+
+    abs_max = np.max(np.abs(residual))
+    im_res = axes[0, 2].imshow(residual, cmap='RdBu_r', vmin=-abs_max, vmax=abs_max, origin='upper')
+    axes[0, 2].set_title('Residual Map  (Recon − GT)', fontsize=10)
+    axes[0, 2].axis('off')
+    plt.colorbar(im_res, ax=axes[0, 2], fraction=0.046, pad=0.04)
+
+    # Row 1: k-space + histogram
+    axes[1, 0].imshow(ks_us_np,    cmap='inferno', origin='upper')
+    axes[1, 0].set_title('Undersampled K-space  (log|·|)', fontsize=10)
+    axes[1, 0].axis('off')
+
+    axes[1, 1].imshow(ks_recon_np, cmap='inferno', origin='upper')
+    axes[1, 1].set_title('Reconstructed K-space  (log|·|)', fontsize=10)
+    axes[1, 1].axis('off')
+
+    axes[1, 2].hist(residual.ravel(), bins=80, color='steelblue', edgecolor='none', alpha=0.85)
+    axes[1, 2].axvline(0, color='red', linewidth=1.5, linestyle='--')
+    axes[1, 2].set_xlabel('Residual value')
+    axes[1, 2].set_ylabel('Count')
+    axes[1, 2].set_title('Residual Distribution', fontsize=10)
+    axes[1, 2].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    pdf.savefig(fig, bbox_inches='tight')
+    plt.close(fig)
+
+
+def generate_residual_report(exp_dir, accel=8, num_images=5, split='val'):
+    """Generate residual-focused PDF for one experiment and save it inside exp_dir."""
+    exp_dir = os.path.abspath(exp_dir)
+    if not os.path.isdir(exp_dir):
+        print(f"  [SKIP] Directory not found: {exp_dir}")
+        return
+
+    print(f"\n{'='*60}")
+    print(f"Residual report: {exp_dir}")
+    print(f"{'='*60}")
+
+    config_path = os.path.join(exp_dir, 'config.json')
+    best_path   = os.path.join(exp_dir, 'best_model.pth')
+    for p in (config_path, best_path):
+        if not os.path.exists(p):
+            print(f"  [SKIP] Missing file: {p}")
+            return
+
+    with open(config_path) as f:
+        cfg_dict = json.load(f)
+
+    N            = cfg_dict['data']['image_size']
+    num_channels = cfg_dict['data']['num_channels']
+    device       = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    model = build_model_from_config(cfg_dict).to(device)
+    ckpt  = torch.load(best_path, map_location=device)
+    model.load_state_dict(ckpt['model'])
+    model.eval()
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    mask_path  = os.path.join(script_dir, cfg_dict['data']['mask_dir'], f'mask_R{accel}.png')
+    if not os.path.exists(mask_path):
+        print(f"  [SKIP] Mask not found: {mask_path}")
+        return
+    mask = load_mask(mask_path, N).to(device)
+
+    data_dir     = cfg_dict['data']['data_dir']
+    val_fraction = cfg_dict['data'].get('val_fraction', 0.1)
+    seed         = cfg_dict['data'].get('seed', 42)
+    dataset      = MRIDataset(data_dir, N=N, split=split,
+                              val_fraction=val_fraction, seed=seed)
+    num_images   = min(num_images, len(dataset))
+    indices      = np.linspace(0, len(dataset) - 1, num_images, dtype=int)
+
+    pdf_path = os.path.join(exp_dir, 'residual_report.pdf')
+    with PdfPages(pdf_path) as pdf:
+        d           = pdf.infodict()
+        d['Title']  = f'Residual Report — {os.path.basename(exp_dir)}'
+        d['Author'] = 'inference.py'
+
+        for page_idx, dataset_idx in enumerate(indices):
+            print(f"  Image {page_idx + 1}/{num_images}")
+            gt = dataset[int(dataset_idx)].unsqueeze(0).to(device)
+
+            with torch.no_grad():
+                zf_image, kspace_us = simulate_undersampling(gt, mask, num_channels)
+                recon               = model(zf_image, kspace_us, mask)
+                kspace_recon        = fft_2d(recon)
+
+            plot_residual_page(
+                gt.cpu(), zf_image.cpu(), recon.cpu(),
+                kspace_us.cpu(), kspace_recon.cpu(),
+                page_idx, accel, pdf,
+            )
+
+    print(f"  Saved: {pdf_path}")
+
+
+def run_all_experiments(split='val'):
+    """Run generate_residual_report for every entry in EXPERIMENTS."""
+    for entry in EXPERIMENTS:
+        generate_residual_report(
+            exp_dir    = entry['exp_dir'],
+            accel      = entry.get('accel', 8),
+            num_images = entry.get('num_images', 5),
+            split      = split,
+        )
+    print("\nAll done.")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -407,7 +566,10 @@ def run_inference(exp_dir, num_images=5, accel=4, split='val'):
 
 def main():
     args = parse_args()
-    run_inference(args.exp_dir, args.num_images, args.accel, args.split)
+    if args.all:
+        run_all_experiments(split=args.split)
+    else:
+        run_inference(args.exp_dir, args.num_images, args.accel, args.split)
 
 
 if __name__ == '__main__':
