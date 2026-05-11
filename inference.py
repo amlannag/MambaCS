@@ -78,6 +78,27 @@ def parse_args():
 
 
 # ---------------------------------------------------------------------------
+# Config normalisation
+# ---------------------------------------------------------------------------
+
+_DATA_KEYS  = {'data_dir', 'mask_dir', 'image_size', 'num_channels',
+               'acceleration_factors', 'val_fraction', 'seed'}
+_MODEL_KEYS = {'encoders', 'patch_size', 'nhead_patch', 'nhead_axial',
+               'layer_no', 'num_encoder_layers', 'learned_lambda',
+               'k_space_learning', 'lambda_schedule', 'lambda_start',
+               'lambda_end', 'pos_emb_type', 'rope_theta', 'rope_mixed_rotate'}
+
+def normalise_cfg(cfg_dict):
+    """Accept both flat configs (saved by train.py) and nested configs."""
+    if 'data' in cfg_dict and 'model' in cfg_dict:
+        return cfg_dict
+    return {
+        'data':  {k: cfg_dict[k] for k in _DATA_KEYS  if k in cfg_dict},
+        'model': {k: cfg_dict[k] for k in _MODEL_KEYS if k in cfg_dict},
+    }
+
+
+# ---------------------------------------------------------------------------
 # Model
 # ---------------------------------------------------------------------------
 
@@ -388,7 +409,7 @@ def generate_residual_report(exp_dir, accel=8, num_images=5, split='val'):
             return
 
     with open(config_path) as f:
-        cfg_dict = json.load(f)
+        cfg_dict = normalise_cfg(json.load(f))
 
     N            = cfg_dict['data']['image_size']
     num_channels = cfg_dict['data']['num_channels']
@@ -467,7 +488,7 @@ def run_inference(exp_dir, num_images=5, accel=4, split='val'):
     # ---- Config ----
     config_path = os.path.join(exp_dir, 'config.json')
     with open(config_path) as f:
-        cfg_dict = json.load(f)
+        cfg_dict = normalise_cfg(json.load(f))
 
     N            = cfg_dict['data']['image_size']
     num_channels = cfg_dict['data']['num_channels']
