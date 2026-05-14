@@ -64,7 +64,7 @@ def FFT_DC(x, y, mask, lamb, norm='ortho'):
     # Perform data consistency 
     if lamb is None:
         # Replace Fourier measurements
-        z = (1 - mask) * z + mask * y
+        z = (1 - mask) * z + mask * cy
     else:
         # Weighted average of the collected and reconstructed points
         z = (1 - mask) * z + mask * (z + lamb * cy) / (1 + lamb)
