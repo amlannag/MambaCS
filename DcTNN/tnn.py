@@ -188,7 +188,14 @@ class cascadeNet(nn.Module):
         self.scheduled_lamb = None
         self.N = N
         self.dcFunc = dcFunc
-        self.k_space_learning = k_space_learning
+
+        # k_space_learning: bool (all stages same) or list[bool] (per-stage)
+        if isinstance(k_space_learning, (list, tuple)):
+            assert len(k_space_learning) == len(encList), \
+                "k_space_learning list length must match number of encoders"
+            self._k_space_list = list(k_space_learning)
+        else:
+            self._k_space_list = [bool(k_space_learning)] * len(encList)
 
         transformers = []
         for i, enc in enumerate(encList):
@@ -199,21 +206,27 @@ class cascadeNet(nn.Module):
         self.scheduled_lamb = value
 
     def forward(self, xPrev, y, sampleMask):
-        im = xPrev
-        if self.k_space_learning:
-            im = fft_2d(im)             # [B, 1, N, N] → [B, 2, N, N]
+        im = xPrev  # always image space [B, C, H, W] entering each stage
         for i, transformer in enumerate(self.transformers):
-            im_denoise = transformer(im)
-            im = im + im_denoise
-            if self.lamb is not False:
-                lamb_i = self.lamb[i]               # learned per-stage
-            elif self.scheduled_lamb is not None:
-                lamb_i = self.scheduled_lamb        # scheduled scalar
+            use_kspace = self._k_space_list[i]
+            im_in = fft_2d(im) if use_kspace else im   # [B, 2, H, W] or [B, C, H, W]
+
+            im_denoise = transformer(im_in)
+            im_out = im_in + im_denoise
+
+            # Convert back to image space before DC
+            if use_kspace:
+                im = ifft_2d(im_out)[:, 0:1, :, :]    # [B, 1, H, W]
             else:
-                lamb_i = None                       # hard replacement
+                im = im_out
+
+            if self.lamb is not False:
+                lamb_i = self.lamb[i]
+            elif self.scheduled_lamb is not None:
+                lamb_i = self.scheduled_lamb
+            else:
+                lamb_i = None
             im = self.dcFunc(im, y, sampleMask, lamb_i)
-        if self.k_space_learning:
-            im = ifft_2d(im)[:, 0:1, :, :]   # [B, 2, N, N] → [B, 1, N, N]
         return im
 
 

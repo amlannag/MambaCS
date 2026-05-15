@@ -77,7 +77,8 @@ class Config:
     layer_no: int = 1
     num_encoder_layers: int = 2
     learned_lambda: bool = True
-    k_space_learning: bool = False
+    # bool → all stages same; List[bool] → per-stage (must match len(encoders))
+    k_space_learning: object = False
 
     # Lambda schedule: "none" uses learned lambda; "cosine"/"linear"/"constant" use a schedule
     lambda_schedule: str = "none"

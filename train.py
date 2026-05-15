@@ -109,20 +109,28 @@ ENCODER_ARGS = {
 
 
 def build_model(cfg):
+    ksl = cfg.k_space_learning
+    # Normalise to a per-stage list of bools
+    if isinstance(ksl, (list, tuple)):
+        k_space_list = list(ksl)
+    else:
+        k_space_list = [bool(ksl)] * len(cfg.encoders)
+
     enc_list, enc_args = [], []
-    for name in cfg.encoders:
+    for i, name in enumerate(cfg.encoders):
         if name not in ENCODER_ARGS:
             raise ValueError(f"Unknown encoder '{name}'. Choose from: {list(ENCODER_ARGS)}")
         cls, args = ENCODER_ARGS[name](cfg)
-        if cfg.k_space_learning:
-            args['numCh'] = 2   # encoders receive [B, 2, N, N] k-space input
+        if k_space_list[i]:
+            args['numCh'] = 2   # encoder receives [B, 2, N, N] k-space input
         enc_list.append(cls)
         enc_args.append(args)
 
-    dc_func = KSpace_DC if cfg.k_space_learning else FFT_DC
+    # DC always runs in image space; KSpace_DC only needed if every stage is k-space
+    dc_func = KSpace_DC if all(k_space_list) else FFT_DC
     use_learned_lamb = cfg.lambda_schedule == "none"
     return cascadeNet(cfg.image_size, enc_list, enc_args, dc_func,
-                      use_learned_lamb, k_space_learning=cfg.k_space_learning)
+                      use_learned_lamb, k_space_learning=k_space_list)
 
 # ---------------------------------------------------------------------------
 # k-space simulation
