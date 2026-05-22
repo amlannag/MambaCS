@@ -1,7 +1,7 @@
 import time
 import numpy as np
-from DcTNN.tnn import * 
-from dc.dc import *
+from DcTNN.model import *
+from DcTNN.dc import *
 from phantominator import shepp_logan
 from PIL import Image, ImageOps
 import matplotlib.pyplot as plt

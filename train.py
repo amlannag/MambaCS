@@ -14,8 +14,8 @@ import torch.nn as nn
 import wandb
 from torch.utils.data import DataLoader
 
-from DcTNN.tnn import cascadeNet, axVIT, patchVIT
-from dc.dc import FFT_DC, KSpace_DC, fft_2d, ifft_2d
+from DcTNN.model import cascadeNet, axVIT, patchVIT
+from DcTNN.dc import fft_2d, ifft_2d
 from dataset import MRIDataset, load_mask
 from inference import run_inference
 from config import Config
@@ -126,10 +126,8 @@ def build_model(cfg):
         enc_list.append(cls)
         enc_args.append(args)
 
-    # DC always runs in image space; KSpace_DC only needed if every stage is k-space
-    dc_func = KSpace_DC if all(k_space_list) else FFT_DC
     use_learned_lamb = cfg.lambda_schedule == "none"
-    return cascadeNet(cfg.image_size, enc_list, enc_args, dc_func,
+    return cascadeNet(cfg.image_size, enc_list, enc_args,
                       use_learned_lamb, k_space_learning=k_space_list)
 
 # ---------------------------------------------------------------------------

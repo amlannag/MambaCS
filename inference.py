@@ -26,8 +26,8 @@ from matplotlib.backends.backend_pdf import PdfPages
 # Ensure imports resolve regardless of where this script is called from
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from DcTNN.tnn import cascadeNet, axVIT, patchVIT
-from dc.dc import FFT_DC, fft_2d, ifft_2d
+from DcTNN.model import cascadeNet, axVIT, patchVIT
+from DcTNN.dc import fft_2d, ifft_2d
 from dataset import MRIDataset, load_mask
 
 
@@ -102,36 +102,52 @@ def normalise_cfg(cfg_dict):
 # Model
 # ---------------------------------------------------------------------------
 
+_ENCODER_MAP = {
+    'axial':        lambda m, ch: (axVIT,    dict(layerNo=m['layer_no'], numCh=ch, d_model=None,
+                                                   nhead=m['nhead_axial'],
+                                                   num_encoder_layers=m['num_encoder_layers'],
+                                                   dim_feedforward=None,
+                                                   pos_emb_type=m.get('pos_emb_type', 'APE'),
+                                                   rope_theta=m.get('rope_theta', 100.0),
+                                                   rope_mixed_rotate=m.get('rope_mixed_rotate', True))),
+    'kaleidoscope': lambda m, ch: (patchVIT, dict(patch_size=m['patch_size'], kaleidoscope=True,
+                                                   layerNo=m['layer_no'], numCh=ch,
+                                                   nhead=m['nhead_patch'],
+                                                   num_encoder_layers=m['num_encoder_layers'],
+                                                   dim_feedforward=None, d_model=None,
+                                                   pos_emb_type=m.get('pos_emb_type', 'APE'),
+                                                   rope_theta=m.get('rope_theta', 100.0),
+                                                   rope_mixed_rotate=m.get('rope_mixed_rotate', True))),
+    'patch':        lambda m, ch: (patchVIT, dict(patch_size=m['patch_size'], kaleidoscope=False,
+                                                   layerNo=m['layer_no'], numCh=ch,
+                                                   nhead=m['nhead_patch'],
+                                                   num_encoder_layers=m['num_encoder_layers'],
+                                                   dim_feedforward=None, d_model=None,
+                                                   pos_emb_type=m.get('pos_emb_type', 'APE'),
+                                                   rope_theta=m.get('rope_theta', 100.0),
+                                                   rope_mixed_rotate=m.get('rope_mixed_rotate', True))),
+}
+
+
 def build_model_from_config(cfg_dict):
     m = cfg_dict['model']
     d = cfg_dict['data']
 
-    patch_args = dict(
-        patch_size=m['patch_size'], kaleidoscope=False, layerNo=m['layer_no'],
-        numCh=d['num_channels'], nhead=m['nhead_patch'],
-        num_encoder_layers=m['num_encoder_layers'],
-        dim_feedforward=None, d_model=None,
-    )
-    kd_args = dict(
-        patch_size=m['patch_size'], kaleidoscope=True, layerNo=m['layer_no'],
-        numCh=d['num_channels'], nhead=m['nhead_patch'],
-        num_encoder_layers=m['num_encoder_layers'],
-        dim_feedforward=None, d_model=None,
-    )
-    ax_args = dict(
-        layerNo=m['layer_no'], numCh=d['num_channels'], d_model=None,
-        nhead=m['nhead_axial'],
-        num_encoder_layers=m['num_encoder_layers'],
-        dim_feedforward=None,
-    )
+    ksl = m.get('k_space_learning', False)
+    encoders = m.get('encoders', ['axial', 'kaleidoscope', 'patch'])
+    k_space_list = list(ksl) if isinstance(ksl, (list, tuple)) else [bool(ksl)] * len(encoders)
 
-    return cascadeNet(
-        d['image_size'],
-        [axVIT,    patchVIT, patchVIT],
-        [ax_args,  kd_args,  patch_args],
-        FFT_DC,
-        m['learned_lambda'],
-    )
+    enc_list, enc_args = [], []
+    for i, name in enumerate(encoders):
+        # k-space stages receive 2-channel complex input; image stages use config num_channels
+        ch = 2 if k_space_list[i] else d['num_channels']
+        cls, args = _ENCODER_MAP[name](m, ch)
+        enc_list.append(cls)
+        enc_args.append(args)
+
+    use_learned_lamb = m.get('lambda_schedule', 'none') == 'none'
+    return cascadeNet(d['image_size'], enc_list, enc_args,
+                      use_learned_lamb, k_space_learning=k_space_list)
 
 
 # ---------------------------------------------------------------------------

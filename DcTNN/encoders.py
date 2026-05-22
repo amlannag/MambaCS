@@ -1,21 +1,11 @@
-"""
-Creates generic vision transformers.
-
-Author: Marlon Ernesto Bran Lorenzana
-Date: February 15, 2022
-"""
-
 import torch
-from dc.dc import *
 from einops.layers.torch import Rearrange
 from torch import nn
 from rope_vit import (apply_rotary_emb, compute_axial_cis, compute_mixed_cis,
                       init_random_2d_freqs, init_t_xy)
 
-# Helpers
 def pair(t):
     return t if isinstance(t, tuple) else (t, t)
-
 
 # ---------------------------------------------------------------------------
 # RoPE attention and encoder layer
@@ -61,6 +51,214 @@ class RoPETransformerEncoderLayer(nn.Module):
     def forward(self, x, freqs_cis, **kwargs):
         x = x + self.drop(self.attn(self.norm1(x), freqs_cis))
         x = x + self.drop(self.ff(self.norm2(x)))
+        return x
+
+
+# ---------------------------------------------------------------------------
+# Encoder implementations
+# ---------------------------------------------------------------------------
+
+class imageEncoder(nn.Module):
+    """
+    Standard Encoder that utilizes image patches or kaleidoscope tokens.
+    """
+    def __init__(self, image_size, patch_size, numCh=1, kaleidoscope=False, d_model=512, nhead=8,
+                num_layers=6, dim_feedforward=2048, dropout=0.1, activation='relu', layer_norm_eps=1e-05,
+                batch_first=True, device=None, dtype=None, norm=None,
+                pos_emb_type="APE", rope_theta=100.0, rope_mixed_rotate=True):
+        super().__init__()
+
+        self.pos_emb_type = pos_emb_type
+        self.d_model = d_model
+        self.nhead = nhead
+
+        image_height, image_width = pair(image_size)
+        patch_height, patch_width = pair(patch_size)
+
+        assert image_height % patch_height == 0 and image_width % patch_width == 0, \
+            'Image dimensions must be divisible by the patch size.'
+
+        num_patches = (image_height // patch_height) * (image_width // patch_width)
+        patch_dim = patch_height * patch_width * numCh
+
+        # Token embedding
+        if kaleidoscope:
+            self.to_embedding = nn.Sequential(
+                Rearrange('b c (k1 h) (k2 w) -> b (h w) (k1 k2 c)', k1=patch_height, k2=patch_width),
+                nn.Linear(patch_dim, d_model)
+            )
+            self.from_embedding = Rearrange('b (h w) (k1 k2 c) -> b c (k1 h) (k2 w)',
+                                            k1=patch_height, k2=patch_width,
+                                            h=image_height // patch_height, c=numCh)
+        else:
+            self.to_embedding = nn.Sequential(
+                Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1=patch_height, p2=patch_width),
+                nn.Linear(patch_dim, d_model),
+            )
+            self.from_embedding = Rearrange('b (h w) (p1 p2 c) -> b c (h p1) (w p2)',
+                                            c=numCh, h=image_height // patch_height,
+                                            p1=patch_height, p2=patch_width)
+
+        self.mlp_head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, patch_dim),
+            self.from_embedding,
+        )
+        self.dropout = nn.Dropout(dropout)
+
+        grid_h = image_height // patch_height
+        grid_w = image_width // patch_width
+
+        if pos_emb_type == "APE":
+            self.encoder = nn.TransformerEncoder(
+                nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation,
+                                           layer_norm_eps, batch_first, device, dtype),
+                num_layers, norm=norm)
+            self.pos_embedding = nn.Parameter(torch.randn(1, num_patches, d_model))
+
+        elif pos_emb_type == "Rope-Axial":
+            head_dim = d_model // nhead
+            freqs_cis = compute_axial_cis(dim=head_dim, end_x=grid_w, end_y=grid_h, theta=rope_theta)
+            self.register_buffer('freqs_cis', freqs_cis)
+            self.layers = nn.ModuleList([
+                RoPETransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation, layer_norm_eps)
+                for _ in range(num_layers)
+            ])
+
+        elif pos_emb_type == "Rope-Mixed":
+            head_dim = d_model // nhead
+            freqs = torch.stack([
+                init_random_2d_freqs(dim=head_dim, num_heads=nhead, theta=rope_theta, rotate=rope_mixed_rotate)
+                for _ in range(num_layers)
+            ], dim=1).view(2, num_layers, -1)
+            self.freqs = nn.Parameter(freqs.clone())
+            t_x, t_y = init_t_xy(end_x=grid_w, end_y=grid_h)
+            self.register_buffer('freqs_t_x', t_x)
+            self.register_buffer('freqs_t_y', t_y)
+            self.layers = nn.ModuleList([
+                RoPETransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation, layer_norm_eps)
+                for _ in range(num_layers)
+            ])
+
+        else:
+            raise ValueError(f"Unknown pos_emb_type '{pos_emb_type}'. Choose from: APE, Rope-Axial, Rope-Mixed")
+
+    def forward(self, img, src_mask=None):
+        x = self.to_embedding(img)
+
+        if self.pos_emb_type == "APE":
+            x = x + self.pos_embedding
+            x = self.dropout(x)
+            x = self.encoder(x, src_mask)
+        elif self.pos_emb_type == "Rope-Axial":
+            x = self.dropout(x)
+            freqs_cis = self.freqs_cis.to(x.device)
+            for layer in self.layers:
+                x = layer(x, freqs_cis)
+        elif self.pos_emb_type == "Rope-Mixed":
+            x = self.dropout(x)
+            all_freqs = compute_mixed_cis(self.freqs, self.freqs_t_x, self.freqs_t_y, self.nhead)
+            for i, layer in enumerate(self.layers):
+                x = layer(x, all_freqs[i])
+
+        x = self.mlp_head(x)
+        return x
+
+
+class axialEncoder(nn.Module):
+    """
+    Standard Encoder that utilizes axial attention (separate row and column transformers).
+    """
+    def __init__(self, image_size, numCh=1, d_model=512, nhead=8, num_layers=6, dim_feedforward=None,
+                    dropout=0.1, activation='relu', layer_norm_eps=1e-05, batch_first=True,
+                    device=None, dtype=None, norm=None,
+                    pos_emb_type="APE", rope_theta=100.0):
+        super().__init__()
+
+        self.pos_emb_type = pos_emb_type
+        self.d_model = d_model
+
+        image_height, image_width = pair(image_size)
+
+        self.to_horizontal_embedding = nn.Sequential(
+            Rearrange('b c h w -> b h (w c)'),
+            nn.Linear(image_width * numCh, d_model)
+        )
+        self.to_vertical_embedding = nn.Sequential(
+            Rearrange('b c h w -> b w (h c)'),
+            nn.Linear(image_height * numCh, d_model)
+        )
+        self.horizontal_mlp_head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, image_width * numCh),
+            Rearrange('b h (w c) -> b c h w', c=numCh)
+        )
+        self.vertical_mlp_head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, image_height * numCh),
+            Rearrange('b w (h c) -> b c h w', c=numCh)
+        )
+        self.dropout = nn.Dropout(dropout)
+
+        numLayers = max(num_layers // 2, 1)
+
+        if pos_emb_type == "APE":
+            encoderLayer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout,
+                                                      activation, layer_norm_eps, batch_first,
+                                                      device, dtype)
+            self.horizontalEncoder = nn.TransformerEncoder(encoderLayer, numLayers, norm=norm)
+            self.verticalEncoder = nn.TransformerEncoder(encoderLayer, numLayers, norm=norm)
+            self.horizontal_pos_embedding = nn.Parameter(torch.randn(1, image_width, d_model))
+            self.vertical_pos_embedding = nn.Parameter(torch.randn(1, image_height, d_model))
+
+        elif pos_emb_type in ("Rope-Axial", "Rope-Mixed"):
+            head_dim = d_model // nhead
+            freqs_h = compute_axial_cis(dim=head_dim, end_x=image_width, end_y=1, theta=rope_theta)
+            freqs_v = compute_axial_cis(dim=head_dim, end_x=image_height, end_y=1, theta=rope_theta)
+            self.register_buffer('freqs_cis_h', freqs_h)
+            self.register_buffer('freqs_cis_v', freqs_v)
+
+            def make_layer():
+                return RoPETransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout,
+                                                   activation, layer_norm_eps)
+            self.h_layers = nn.ModuleList([make_layer() for _ in range(numLayers)])
+            self.v_layers = nn.ModuleList([make_layer() for _ in range(numLayers)])
+
+        else:
+            raise ValueError(f"Unknown pos_emb_type '{pos_emb_type}'. Choose from: APE, Rope-Axial, Rope-Mixed")
+
+    def forward(self, img, src_mask=None, src_key_padding_mask=None):
+        x = img
+
+        if self.pos_emb_type == "APE":
+            x = self.to_horizontal_embedding(x)
+            x = x + self.horizontal_pos_embedding
+            x = self.dropout(x)
+            x = self.horizontalEncoder(x, src_mask, src_key_padding_mask)
+            x = self.horizontal_mlp_head(x)
+
+            x = self.to_vertical_embedding(x)
+            x = x + self.vertical_pos_embedding
+            x = self.dropout(x)
+            x = self.verticalEncoder(x, src_mask, src_key_padding_mask)
+            x = self.vertical_mlp_head(x)
+
+        else:
+            freqs_h = self.freqs_cis_h.to(img.device)
+            freqs_v = self.freqs_cis_v.to(img.device)
+
+            x = self.to_horizontal_embedding(x)
+            x = self.dropout(x)
+            for layer in self.h_layers:
+                x = layer(x, freqs_h)
+            x = self.horizontal_mlp_head(x)
+
+            x = self.to_vertical_embedding(x)
+            x = self.dropout(x)
+            for layer in self.v_layers:
+                x = layer(x, freqs_v)
+            x = self.vertical_mlp_head(x)
+
         return x
 
 
@@ -166,274 +364,3 @@ class axVIT(nn.Module):
         for i in range(self.layerNo):
             im = self.transformers[i](im)
         return im
-
-
-class cascadeNet(nn.Module):
-    """
-    Defines a TNN that cascades denoising networks and applies data consistency.
-    Args:
-        N (int)                     -       Image Size
-        encList (array)             -       Should contain denoising network
-        encArgs (array)             -       Contains dictionaries with args for encoders in encList
-        dcFunc (function)           -       Contains the data consistency function to be used in recon
-        lamb (bool)                 -       Whether or not to use a leanred data consistency parameter
-    """
-    def __init__(self, N, encList, encArgs, dcFunc=FFT_DC, lamb=True, k_space_learning=False):
-        super(cascadeNet, self).__init__()
-        if lamb:
-            self.lamb = nn.Parameter(torch.ones(len(encList)) * 0.5)
-        else:
-            self.lamb = False
-        self.scheduled_lamb = None
-        self.N = N
-        self.dcFunc = dcFunc
-
-        # k_space_learning: bool (all stages same) or list[bool] (per-stage)
-        if isinstance(k_space_learning, (list, tuple)):
-            assert len(k_space_learning) == len(encList), \
-                "k_space_learning list length must match number of encoders"
-            self._k_space_list = list(k_space_learning)
-        else:
-            self._k_space_list = [bool(k_space_learning)] * len(encList)
-
-        transformers = []
-        for i, enc in enumerate(encList):
-            transformers.append(enc(N, **encArgs[i]))
-        self.transformers = nn.ModuleList(transformers)
-
-    def set_scheduled_lamb(self, value):
-        self.scheduled_lamb = value
-
-    def forward(self, xPrev, y, sampleMask):
-        im = xPrev  # always image space [B, C, H, W] entering each stage
-        for i, transformer in enumerate(self.transformers):
-            use_kspace = self._k_space_list[i]
-            im_in = fft_2d(im) if use_kspace else im   # [B, 2, H, W] or [B, C, H, W]
-
-            im_denoise = transformer(im_in)
-            im_out = im_in + im_denoise
-
-            # Convert back to image space before DC
-            if use_kspace:
-                im = ifft_2d(im_out)[:, 0:1, :, :]    # [B, 1, H, W]
-            else:
-                im = im_out
-
-            if self.lamb is not False:
-                lamb_i = self.lamb[i]
-            elif self.scheduled_lamb is not None:
-                lamb_i = self.scheduled_lamb
-            else:
-                lamb_i = None
-            im = self.dcFunc(im, y, sampleMask, lamb_i)
-        return im
-
-
-# ---------------------------------------------------------------------------
-# Encoder implementations
-# ---------------------------------------------------------------------------
-
-class imageEncoder(nn.Module):
-    """
-    Standard Encoder that utilizes image patches or kaleidoscope tokens.
-    """
-    def __init__(self, image_size, patch_size, numCh=1, kaleidoscope=False, d_model=512, nhead=8,
-                num_layers=6, dim_feedforward=2048, dropout=0.1, activation='relu', layer_norm_eps=1e-05,
-                batch_first=True, device=None, dtype=None, norm=None,
-                pos_emb_type="APE", rope_theta=100.0, rope_mixed_rotate=True):
-        super().__init__()
-
-        self.pos_emb_type = pos_emb_type
-        self.d_model = d_model
-        self.nhead = nhead
-
-        image_height, image_width = pair(image_size)
-        patch_height, patch_width = pair(patch_size)
-
-        assert image_height % patch_height == 0 and image_width % patch_width == 0, \
-            'Image dimensions must be divisible by the patch size.'
-
-        num_patches = (image_height // patch_height) * (image_width // patch_width)
-        patch_dim = patch_height * patch_width * numCh
-
-        # Token embedding
-        if kaleidoscope:
-            self.to_embedding = nn.Sequential(
-                Rearrange('b c (k1 h) (k2 w) -> b (h w) (k1 k2 c)', k1=patch_height, k2=patch_width),
-                nn.Linear(patch_dim, d_model)
-            )
-            self.from_embedding = Rearrange('b (h w) (k1 k2 c) -> b c (k1 h) (k2 w)',
-                                            k1=patch_height, k2=patch_width,
-                                            h=image_height // patch_height, c=numCh)
-        else:
-            self.to_embedding = nn.Sequential(
-                Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1=patch_height, p2=patch_width),
-                nn.Linear(patch_dim, d_model),
-            )
-            self.from_embedding = Rearrange('b (h w) (p1 p2 c) -> b c (h p1) (w p2)',
-                                            c=numCh, h=image_height // patch_height,
-                                            p1=patch_height, p2=patch_width)
-
-        self.mlp_head = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, patch_dim),
-            self.from_embedding,
-        )
-        self.dropout = nn.Dropout(dropout)
-
-        grid_h = image_height // patch_height
-        grid_w = image_width // patch_width
-
-        if pos_emb_type == "APE":
-            self.encoder = nn.TransformerEncoder(
-                nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation,
-                                           layer_norm_eps, batch_first, device, dtype),
-                num_layers, norm=norm)
-            self.pos_embedding = nn.Parameter(torch.randn(1, num_patches, d_model))
-
-        elif pos_emb_type == "Rope-Axial":
-            head_dim = d_model // nhead
-            freqs_cis = compute_axial_cis(dim=head_dim, end_x=grid_w, end_y=grid_h, theta=rope_theta)
-            self.register_buffer('freqs_cis', freqs_cis)
-            self.layers = nn.ModuleList([
-                RoPETransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation, layer_norm_eps)
-                for _ in range(num_layers)
-            ])
-
-        elif pos_emb_type == "Rope-Mixed":
-            head_dim = d_model // nhead
-            freqs = torch.stack([
-                init_random_2d_freqs(dim=head_dim, num_heads=nhead, theta=rope_theta, rotate=rope_mixed_rotate)
-                for _ in range(num_layers)
-            ], dim=1).view(2, num_layers, -1)
-            self.freqs = nn.Parameter(freqs.clone())
-            t_x, t_y = init_t_xy(end_x=grid_w, end_y=grid_h)
-            self.register_buffer('freqs_t_x', t_x)
-            self.register_buffer('freqs_t_y', t_y)
-            self.layers = nn.ModuleList([
-                RoPETransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation, layer_norm_eps)
-                for _ in range(num_layers)
-            ])
-
-        else:
-            raise ValueError(f"Unknown pos_emb_type '{pos_emb_type}'. Choose from: APE, Rope-Axial, Rope-Mixed")
-
-    def forward(self, img, src_mask=None):
-        x = self.to_embedding(img)
-
-        if self.pos_emb_type == "APE":
-            x = x + self.pos_embedding
-            x = self.dropout(x)
-            x = self.encoder(x, src_mask)
-        elif self.pos_emb_type == "Rope-Axial":
-
-            x = self.dropout(x)
-            freqs_cis = self.freqs_cis.to(x.device)
-            for layer in self.layers:
-                x = layer(x, freqs_cis)
-        elif self.pos_emb_type == "Rope-Mixed":
-            x = self.dropout(x)
-            all_freqs = compute_mixed_cis(self.freqs, self.freqs_t_x, self.freqs_t_y, self.nhead)
-            for i, layer in enumerate(self.layers):
-                x = layer(x, all_freqs[i])
-
-        x = self.mlp_head(x)
-        
-        return x
-
-
-class axialEncoder(nn.Module):
-    """
-    Standard Encoder that utilizes axial attention (separate row and column transformers).
-    """
-    def __init__(self, image_size, numCh=1, d_model=512, nhead=8, num_layers=6, dim_feedforward=None,
-                    dropout=0.1, activation='relu', layer_norm_eps=1e-05, batch_first=True,
-                    device=None, dtype=None, norm=None,
-                    pos_emb_type="APE", rope_theta=100.0):
-        super().__init__()
-
-        self.pos_emb_type = pos_emb_type
-        self.d_model = d_model
-
-        image_height, image_width = pair(image_size)
-
-        self.to_horizontal_embedding = nn.Sequential(
-            Rearrange('b c h w -> b h (w c)'),
-            nn.Linear(image_width * numCh, d_model)
-        )
-        self.to_vertical_embedding = nn.Sequential(
-            Rearrange('b c h w -> b w (h c)'),
-            nn.Linear(image_height * numCh, d_model)
-        )
-        self.horizontal_mlp_head = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, image_width * numCh),
-            Rearrange('b h (w c) -> b c h w', c=numCh)
-        )
-        self.vertical_mlp_head = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, image_height * numCh),
-            Rearrange('b w (h c) -> b c h w', c=numCh)
-        )
-        self.dropout = nn.Dropout(dropout)
-
-        numLayers = max(num_layers // 2, 1)
-
-        if pos_emb_type == "APE":
-            encoderLayer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout,
-                                                      activation, layer_norm_eps, batch_first,
-                                                      device, dtype)
-            self.horizontalEncoder = nn.TransformerEncoder(encoderLayer, numLayers, norm=norm)
-            self.verticalEncoder = nn.TransformerEncoder(encoderLayer, numLayers, norm=norm)
-            self.horizontal_pos_embedding = nn.Parameter(torch.randn(1, image_width, d_model))
-            self.vertical_pos_embedding = nn.Parameter(torch.randn(1, image_height, d_model))
-
-        elif pos_emb_type in ("Rope-Axial", "Rope-Mixed"):
-            head_dim = d_model // nhead
-            freqs_h = compute_axial_cis(dim=head_dim, end_x=image_width, end_y=1, theta=rope_theta)
-            freqs_v = compute_axial_cis(dim=head_dim, end_x=image_height, end_y=1, theta=rope_theta)
-            self.register_buffer('freqs_cis_h', freqs_h)
-            self.register_buffer('freqs_cis_v', freqs_v)
-
-            def make_layer():
-                return RoPETransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout,
-                                                   activation, layer_norm_eps)
-            self.h_layers = nn.ModuleList([make_layer() for _ in range(numLayers)])
-            self.v_layers = nn.ModuleList([make_layer() for _ in range(numLayers)])
-
-        else:
-            raise ValueError(f"Unknown pos_emb_type '{pos_emb_type}'. Choose from: APE, Rope-Axial, Rope-Mixed")
-
-    def forward(self, img, src_mask=None, src_key_padding_mask=None):
-        x = img
-
-        if self.pos_emb_type == "APE":
-            x = self.to_horizontal_embedding(x)
-            x = x + self.horizontal_pos_embedding
-            x = self.dropout(x)
-            x = self.horizontalEncoder(x, src_mask, src_key_padding_mask)
-            x = self.horizontal_mlp_head(x)
-
-            x = self.to_vertical_embedding(x)
-            x = x + self.vertical_pos_embedding
-            x = self.dropout(x)
-            x = self.verticalEncoder(x, src_mask, src_key_padding_mask)
-            x = self.vertical_mlp_head(x)
-
-        else:
-            freqs_h = self.freqs_cis_h.to(img.device)
-            freqs_v = self.freqs_cis_v.to(img.device)
-
-            x = self.to_horizontal_embedding(x)
-            x = self.dropout(x)
-            for layer in self.h_layers:
-                x = layer(x, freqs_h)
-            x = self.horizontal_mlp_head(x)
-
-            x = self.to_vertical_embedding(x)
-            x = self.dropout(x)
-            for layer in self.v_layers:
-                x = layer(x, freqs_v)
-            x = self.vertical_mlp_head(x)
-
-        return x
