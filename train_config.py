@@ -12,23 +12,10 @@ Submit all experiments as separate SLURM jobs:
 """
 
 EXPERIMENTS = [
-    # --- RoPE positional embedding ablations ---
     {
         "prefix": "RoPE",
-        "name": "kaleidoscope_rope_axial",
-        "encoders": ["kaleidoscope", "kaleidoscope", "kaleidoscope"],
-        "pos_emb_type": "Rope-Axial",
-    },
-    {
-        "prefix": "RoPE",
-        "name": "kaleidoscope_rope_mixed",
-        "encoders": ["kaleidoscope", "kaleidoscope", "kaleidoscope"],
+        "name": "patch_rope_mixed",
+        "encoders": ["patch", "patch", "patch"],
         "pos_emb_type": "Rope-Mixed",
-    },
-    {
-        "prefix": "RoPE",
-        "name": "axial_rope_axial",
-        "encoders": ["axial", "axial", "axial"],
-        "pos_emb_type": "Rope-Axial",
     },
 ]
