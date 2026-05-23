@@ -1,6 +1,6 @@
 import time
 import numpy as np
-from DcTNN.model import *
+from DcTNN.model import cascadeNet, patchVIT, axVIT, kaleidoscopeVIT, patchEncoder, axialEncoder, kaleidoscopeEncoder
 from DcTNN.dc import *
 from phantominator import shepp_logan
 from PIL import Image, ImageOps
@@ -44,11 +44,11 @@ dim_feedforward = None
 
 # Define the dictionaries of parameter values
 patchArgs = {"patch_size": patchSize, "kaleidoscope": False, "layerNo": layerNo, "numCh": numCh, "nhead": nhead_patch, "num_encoder_layers": num_encoder_layers, "dim_feedforward": dim_feedforward, "d_model": d_model_patch}
-kdArgs = {"patch_size": patchSize, "kaleidoscope": True, "layerNo": layerNo, "numCh": numCh, "nhead": nhead_patch, "num_encoder_layers": num_encoder_layers, "dim_feedforward": dim_feedforward, "d_model": d_model_patch}
+kdArgs = {"patch_size": patchSize, "layerNo": layerNo, "numCh": numCh, "nhead": nhead_patch, "num_encoder_layers": num_encoder_layers, "dim_feedforward": dim_feedforward, "d_model": d_model_patch}
 axArgs = {"layerNo": layerNo, "numCh": numCh, "d_model": d_model_axial, "nhead": nhead_axial, "num_encoder_layers": num_encoder_layers, "dim_feedforward": dim_feedforward}
 
 # Define the array of encoders
-encList = [axVIT, patchVIT, patchVIT]
+encList = [axVIT, kaleidoscopeVIT, patchVIT]
 # Define the array of dictionaries
 encArgs = [axArgs, kdArgs, patchArgs]
 

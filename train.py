@@ -14,13 +14,13 @@ import torch.nn as nn
 import wandb
 from torch.utils.data import DataLoader
 
-from DcTNN.model import cascadeNet, axVIT, patchVIT
+from DcTNN.model import cascadeNet, axVIT, patchVIT, kaleidoscopeVIT
 from DcTNN.dc import fft_2d, ifft_2d
 from dataset import MRIDataset, load_mask
 from inference import run_inference
 from config import Config
 from train_config import EXPERIMENTS
-from lambda_scheduler import LambdaScheduler
+from DcTNN.lambda_scheduler import LambdaScheduler
 
 
 def build_cfg(exp_idx: int) -> Config:
@@ -90,8 +90,8 @@ ENCODER_ARGS = {
              rope_theta=cfg.rope_theta, rope_mixed_rotate=cfg.rope_mixed_rotate)
     ),
     "kaleidoscope": lambda cfg: (
-        patchVIT,
-        dict(patch_size=cfg.patch_size, kaleidoscope=True, layerNo=cfg.layer_no,
+        kaleidoscopeVIT,
+        dict(patch_size=cfg.patch_size, layerNo=cfg.layer_no,
              numCh=cfg.num_channels, nhead=cfg.nhead_patch,
              num_encoder_layers=cfg.num_encoder_layers,
              dim_feedforward=None, d_model=None, pos_emb_type=cfg.pos_emb_type,
