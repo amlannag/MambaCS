@@ -12,32 +12,23 @@ Submit all experiments as separate SLURM jobs:
 """
 
 EXPERIMENTS = [
+    # --- RoPE positional embedding ablations ---
     {
-        "prefix": "LambdaSchedule",
-        "name": "cosine_end1p00",
-        "lambda_schedule": "cosine",
-        "lambda_start": 1.0,
-        "lambda_end": 1.0,
+        "prefix": "RoPE",
+        "name": "kaleidoscope_rope_axial",
+        "encoders": ["kaleidoscope", "kaleidoscope", "kaleidoscope"],
+        "pos_emb_type": "Rope-Axial",
     },
     {
-        "prefix": "LambdaSchedule",
-        "name": "cosine_end0p75",
-        "lambda_schedule": "cosine",
-        "lambda_start": 1.0,
-        "lambda_end": 0.75,
+        "prefix": "RoPE",
+        "name": "kaleidoscope_rope_mixed",
+        "encoders": ["kaleidoscope", "kaleidoscope", "kaleidoscope"],
+        "pos_emb_type": "Rope-Mixed",
     },
     {
-        "prefix": "LambdaSchedule",
-        "name": "cosine_end0p50",
-        "lambda_schedule": "cosine",
-        "lambda_start": 1.0,
-        "lambda_end": 0.5,
-    },
-    {
-        "prefix": "LambdaSchedule",
-        "name": "cosine_end0p25",
-        "lambda_schedule": "cosine",
-        "lambda_start": 1.0,
-        "lambda_end": 0.25,
+        "prefix": "RoPE",
+        "name": "axial_rope_axial",
+        "encoders": ["axial", "axial", "axial"],
+        "pos_emb_type": "Rope-Axial",
     },
 ]
