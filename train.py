@@ -14,7 +14,7 @@ import torch.nn as nn
 import wandb
 from torch.utils.data import DataLoader
 
-from DcTNN.model import cascadeNet, axVIT, patchVIT, kaleidoscopeVIT
+from DcTNN.model import cascadeNet, axVIT, TokenVIT
 from DcTNN.dc import fft_2d, ifft_2d
 from dataset import MRIDataset, load_mask
 from inference import run_inference
@@ -90,16 +90,16 @@ ENCODER_ARGS = {
              rope_theta=cfg.rope_theta, rope_mixed_rotate=cfg.rope_mixed_rotate)
     ),
     "kaleidoscope": lambda cfg: (
-        kaleidoscopeVIT,
-        dict(patch_size=cfg.patch_size, layerNo=cfg.layer_no,
+        TokenVIT,
+        dict(patch_size=cfg.patch_size, tokenizer_type="kaleidoscope", layerNo=cfg.layer_no,
              numCh=cfg.num_channels, nhead=cfg.nhead_patch,
              num_encoder_layers=cfg.num_encoder_layers,
              dim_feedforward=None, d_model=None, pos_emb_type=cfg.pos_emb_type,
              rope_theta=cfg.rope_theta, rope_mixed_rotate=cfg.rope_mixed_rotate)
     ),
     "patch": lambda cfg: (
-        patchVIT,
-        dict(patch_size=cfg.patch_size, kaleidoscope=False, layerNo=cfg.layer_no,
+        TokenVIT,
+        dict(patch_size=cfg.patch_size, tokenizer_type="patch", layerNo=cfg.layer_no,
              numCh=cfg.num_channels, nhead=cfg.nhead_patch,
              num_encoder_layers=cfg.num_encoder_layers,
              dim_feedforward=None, d_model=None, pos_emb_type=cfg.pos_emb_type,

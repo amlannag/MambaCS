@@ -7,7 +7,6 @@ https://github.com/meta-llama/codellama/blob/main/llama/model.py
 """
 
 import torch
-import torch.nn as nn
 
 def init_t_xy(end_x: int, end_y: int):
     """
@@ -111,55 +110,3 @@ def apply_rotary_emb(xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor
     xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
     
     return xq_out.type_as(xq).to(xq.device), xk_out.type_as(xk).to(xk.device)
-
-
-
-
-# ---------------------------------------------------------------------------
-# RoPE-based attention and transformer encoder layer
-# ---------------------------------------------------------------------------
-
-
-
-
-class RoPEAttention(nn.Module):
-    def __init__(self, d_model, nhead, dropout=0.0):
-        super().__init__()
-        self.nhead = nhead
-        self.head_dim = d_model // nhead
-        self.scale = self.head_dim ** -0.5
-        self.qkv = nn.Linear(d_model, 3 * d_model)
-        self.proj = nn.Linear(d_model, d_model)
-        self.attn_drop = nn.Dropout(dropout)
-
-    def forward(self, x, freqs_cis):
-        B, N, C = x.shape
-        qkv = self.qkv(x).reshape(B, N, 3, self.nhead, self.head_dim).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]
-        q, k = apply_rotary_emb(q, k, freqs_cis=freqs_cis)
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
-        return self.proj(x)
-
-
-class RoPETransformerEncoderLayer(nn.Module):
-    def __init__(self, d_model, nhead, dim_feedforward, dropout, activation, layer_norm_eps):
-        super().__init__()
-        self.attn = RoPEAttention(d_model, nhead, dropout)
-        act = nn.ReLU() if activation == 'relu' else nn.GELU()
-        self.ff = nn.Sequential(
-            nn.Linear(d_model, dim_feedforward), act,
-            nn.Dropout(dropout),
-            nn.Linear(dim_feedforward, d_model),
-            nn.Dropout(dropout),
-        )
-        self.norm1 = nn.LayerNorm(d_model, eps=layer_norm_eps)
-        self.norm2 = nn.LayerNorm(d_model, eps=layer_norm_eps)
-        self.drop = nn.Dropout(dropout)
-
-    def forward(self, x, freqs_cis, **kwargs):
-        x = x + self.drop(self.attn(self.norm1(x), freqs_cis))
-        x = x + self.drop(self.ff(self.norm2(x)))
-        return x

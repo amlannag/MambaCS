@@ -1,11 +1,11 @@
 import torch
 from torch import nn
 from .dc import FFT_DC, KSpace_DC, fft_2d
-from .vit import patchVIT, axVIT, kaleidoscopeVIT
-from .encoders import patchEncoder, axialEncoder, kaleidoscopeEncoder
+from .vit import TokenVIT, axVIT
+from .encoders import TokenEncoder, axialEncoder
 
 # Re-export all public classes so callers can import from DcTNN.model
-__all__ = ['cascadeNet', 'patchVIT', 'axVIT', 'kaleidoscopeVIT', 'patchEncoder', 'axialEncoder', 'kaleidoscopeEncoder']
+__all__ = ['cascadeNet', 'TokenVIT', 'axVIT', 'TokenEncoder', 'axialEncoder']
 
 
 class cascadeNet(nn.Module):
