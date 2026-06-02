@@ -38,8 +38,11 @@ class Config:
     # Data
     # ---------------------------------------------------------------------------
 
-    # Folder of fully sampled MRI images (PNG / TIFF / NPY / NIfTI)
-    data_dir: str = "/scratch/user/uqanag/OASIS/keras_png_slices_train"
+    # Folder of .h5 MRI files (fastMRI format, one file per scan)
+    data_dir: str = "/scratch/user/uqanag/fastMRI/keras_png_slices_train"
+
+    # HDF5 dataset key for raw k-space within each .h5 file
+    kspace_key: str = "kspace"
 
     # Folder containing mask_R4.png, mask_R6.png, mask_R8.png
     mask_dir: str = "masks"
@@ -77,15 +80,14 @@ class Config:
     layer_no: int = 1
     num_encoder_layers: int = 2
     learned_lambda: bool = True
-    # bool → all stages same; List[bool] → per-stage (must match len(encoders))
-    k_space_learning: object = False
+    # True → model operates in k-space (default); False → image domain
+    k_space_learning: bool = True
 
-    # Lambda schedule: "none" uses learned lambda; "cosine"/"linear"/"constant" use a schedule
     lambda_schedule: str = "none"
     lambda_start: float = 1.0
     lambda_end: float = 0.1
 
-    # Positional embedding type: "APE" | "Rope-Axial" | "Rope-Mixed"
+
     pos_emb_type: str = "APE"
     # Base frequency for RoPE (ignored when pos_emb_type == "APE")
     rope_theta: float = 100.0

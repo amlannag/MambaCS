@@ -1,0 +1,141 @@
+import copy
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from .rope_vit import apply_rotary_emb, apply_rotary_emb_complex
+from .util import FeedForward, ComplexLayerNorm, ComplexDropout, get_attention, _COMPLEX_ATTN_TYPES
+
+# ---------------------------------------------------------------------------
+# Attention classes
+# ---------------------------------------------------------------------------
+
+class BaseAttention(nn.Module):
+    """
+    Shared base for all attention variants.
+    Subclasses implement _attend(q, k, v) with their specific scoring strategy.
+    Pass dtype=torch.cfloat for complex-valued subclasses.
+    """
+    def __init__(self, d_model, nhead, dropout=0.0, freqs_cis=None, dtype=None):
+        super().__init__()
+        self.nhead = nhead
+        self.head_dim = d_model // nhead
+        self.scale = self.head_dim ** -0.5
+        self.qkv = nn.Linear(d_model, 3 * d_model, dtype=dtype)
+        self.proj = nn.Linear(d_model, d_model, dtype=dtype)
+        self.attn_drop = nn.Dropout(dropout)
+        self.use_rope = freqs_cis is not None
+        if self.use_rope:
+            self.register_buffer('freqs_cis', freqs_cis)
+
+    def _apply_rope(self, q, k):
+        freqs = self.freqs_cis.to(q.device)
+        if q.is_complex():
+            return apply_rotary_emb_complex(q, k, freqs_cis=freqs)
+        return apply_rotary_emb(q, k, freqs_cis=freqs)
+
+    def _attend(self, q, k, v):
+        raise NotImplementedError
+
+    def forward(self, x):
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.nhead, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        if self.use_rope:
+            q, k = self._apply_rope(q, k)
+        x = self._attend(q, k, v).transpose(1, 2).reshape(B, N, C)
+        return self.proj(x)
+
+
+class MultiHeadAttention(BaseAttention):
+    def __init__(self, d_model, nhead, dropout=0.0, freqs_cis=None):
+        super().__init__(d_model, nhead, dropout, freqs_cis, dtype=None)
+
+    def _attend(self, q, k, v):
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = self.attn_drop(attn.softmax(dim=-1))
+        return attn @ v
+
+
+class ComplexMultiHeadAttention(BaseAttention):
+    """
+    Inspired by the complex attention implementation done in
+    "Efficient Complex-Valued Vision Transformers for MRI Classification Directly
+    from k-Space" and equation 11 from "Building Blocks for Complex-Valued Transformer Architectures".
+    Hermitian inner product with complex softmax.
+    """
+    def __init__(self, d_model, nhead, dropout=0.0, freqs_cis=None):
+        super().__init__(d_model, nhead, dropout, freqs_cis, dtype=torch.cfloat)
+
+    def _attend(self, q, k, v):
+        attn = torch.matmul(q, k.transpose(-2, -1).conj()) * self.scale
+        attn = torch.complex(F.softmax(attn.real, dim=-1), F.softmax(attn.imag, dim=-1))
+        attn = self.attn_drop(attn)
+        return torch.matmul(attn, v)
+
+
+class RealValuedAttention(BaseAttention):
+    """
+    Similar to equation 8: Complex Valued Dot Product Attention in
+    "Building Blocks for Complex-Valued Transformer Architectures".
+    Real-valued scores from Hermitian inner product, complex output.
+    """
+    def __init__(self, d_model, nhead, dropout=0.0, freqs_cis=None):
+        super().__init__(d_model, nhead, dropout, freqs_cis, dtype=torch.cfloat)
+
+    def _attend(self, q, k, v):
+        attn = self.attn_drop(F.softmax(
+            torch.matmul(q, k.transpose(-2, -1).conj()).real * self.scale, dim=-1))
+        return torch.complex(torch.matmul(attn, v.real), torch.matmul(attn, v.imag))
+
+
+class PhaseAwareAttention(BaseAttention):
+    """
+    Inspired by "HOLOGRAPHIC TRANSFORMERS FOR COMPLEX-VALUED SIGNAL PROCESSING:
+    INTEGRATING PHASE INTERFERENCE INTO SELF-ATTENTION".
+    Phase-damped cosine similarity scores with coherent superposition output.
+    """
+    def __init__(self, d_model, nhead, dropout=0.0, alpha=1.0, eps=1e-8, freqs_cis=None):
+        super().__init__(d_model, nhead, dropout, freqs_cis, dtype=torch.cfloat)
+        self.eps = eps
+        self.alpha = nn.Parameter(torch.tensor(float(alpha)))
+
+    def _attend(self, q, k, v):
+        corr = torch.matmul(q, k.transpose(-2, -1).conj())
+        q_norm = q.abs().pow(2).sum(-1).sqrt()
+        k_norm = k.abs().pow(2).sum(-1).sqrt()
+        denom = q_norm.unsqueeze(-1) * k_norm.unsqueeze(-2) + self.eps
+        dphi = torch.angle(corr)
+        W = (corr.real / denom * self.scale) * torch.exp(-self.alpha * dphi.abs())
+        A = self.attn_drop(F.softmax(W, dim=-1))
+        return torch.matmul(A * torch.exp(1j * dphi), v)
+
+
+# ---------------------------------------------------------------------------
+# Encoder layer and stack
+# ---------------------------------------------------------------------------
+
+class TransformerEncoderLayer(nn.Module):
+    def __init__(self, d_model, nhead, dim_feedforward, dropout, activation, layer_norm_eps,
+                 freqs_cis=None, attn_type="standard"):
+        super().__init__()
+        is_complex = attn_type in _COMPLEX_ATTN_TYPES
+        self.attn = get_attention(attn_type, d_model, nhead, dropout, freqs_cis)
+        self.ff = FeedForward(d_model, dim_feedforward, dropout, activation, is_complex)
+        if is_complex:
+            self.norm1 = ComplexLayerNorm(d_model)
+            self.norm2 = ComplexLayerNorm(d_model)
+            self.drop = ComplexDropout(dropout)
+        else:
+            self.norm1 = nn.LayerNorm(d_model, eps=layer_norm_eps)
+            self.norm2 = nn.LayerNorm(d_model, eps=layer_norm_eps)
+            self.drop = nn.Dropout(dropout)
+
+    def forward(self, x):
+        x = x + self.drop(self.attn(self.norm1(x)))
+        x = x + self.drop(self.ff(self.norm2(x)))
+        return x
+
+
+class TransformerEncoder(nn.Sequential):
+    def __init__(self, encoder_layer, num_layers):
+        super().__init__(*[copy.deepcopy(encoder_layer) for _ in range(num_layers)])

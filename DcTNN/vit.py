@@ -46,7 +46,7 @@ class TokenVIT(BaseVIT):
     def __init__(self, N, patch_size=16, tokenizer_type="patch", layerNo=2, numCh=1, d_model=None,
                     nhead=8, num_encoder_layers=2, dim_feedforward=None, dropout=0.1, activation='relu',
                     layer_norm_eps=1e-05, batch_first=True, device=None, dtype=None,
-                    pos_emb_type="APE", rope_theta=100.0, rope_mixed_rotate=True):
+                    pos_emb_type="APE", rope_theta=100.0, rope_mixed_rotate=True, attn_type="standard"):
         if d_model is None:
             d_model = patch_size * patch_size * numCh
         if dim_feedforward is None:
@@ -54,7 +54,8 @@ class TokenVIT(BaseVIT):
         transformers = nn.ModuleList([
             TokenEncoder(N, patch_size, numCh, tokenizer_type, d_model, nhead, num_encoder_layers,
                          dim_feedforward, dropout, activation, layer_norm_eps, batch_first, device, dtype,
-                         pos_emb_type=pos_emb_type, rope_theta=rope_theta, rope_mixed_rotate=rope_mixed_rotate)
+                         pos_emb_type=pos_emb_type, rope_theta=rope_theta, rope_mixed_rotate=rope_mixed_rotate,
+                         attn_type=attn_type)
             for _ in range(layerNo)
         ])
         super().__init__(N, layerNo, numCh, transformers)
@@ -82,7 +83,7 @@ class axVIT(BaseVIT):
     def __init__(self, N, layerNo=2, numCh=1, d_model=None, nhead=8, num_encoder_layers=2,
                     dim_feedforward=None, dropout=0.1, activation='relu',
                     layer_norm_eps=1e-05, batch_first=True, device=None, dtype=None,
-                    pos_emb_type="APE", rope_theta=100.0, rope_mixed_rotate=True):
+                    pos_emb_type="APE", rope_theta=100.0, rope_mixed_rotate=True, attn_type="standard"):
         if d_model is None:
             d_model = N * numCh
         if dim_feedforward is None:
@@ -90,7 +91,7 @@ class axVIT(BaseVIT):
         transformers = nn.ModuleList([
             axialEncoder(N, numCh, d_model, nhead, num_encoder_layers, dim_feedforward,
                          dropout, activation, layer_norm_eps, batch_first, device, dtype,
-                         pos_emb_type=pos_emb_type, rope_theta=rope_theta)
+                         pos_emb_type=pos_emb_type, rope_theta=rope_theta, attn_type=attn_type)
             for _ in range(layerNo)
         ])
         super().__init__(N, layerNo, numCh, transformers)

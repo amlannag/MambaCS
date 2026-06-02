@@ -88,6 +88,44 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
     return freqs_cis.view(*shape)
 
 
+def compute_axial_cis_complex(dim: int, end_x: int, end_y: int, theta: float = 100.0):
+    """
+    Compute axial RoPE frequencies for complex-valued Q/K tensors.
+    Produces freqs_cis of shape (end_x * end_y, dim) — one rotation per complex element,
+    so no folding of real pairs is needed before application.
+    dim must be divisible by 2.
+    """
+    freq = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+    t_x, t_y = init_t_xy(end_x, end_y)
+    freqs_x = torch.polar(torch.ones_like(torch.outer(t_x, freq)), torch.outer(t_x, freq))
+    freqs_y = torch.polar(torch.ones_like(torch.outer(t_y, freq)), torch.outer(t_y, freq))
+    return torch.cat([freqs_x, freqs_y], dim=-1)
+
+
+def compute_mixed_cis_complex(dim: int, end_x: int, end_y: int, theta: float = 100.0):
+    """
+    Compute mixed RoPE frequencies for complex-valued Q/K tensors.
+    Produces freqs_cis of shape (end_x * end_y, dim).
+    dim must be divisible by 1 (no folding required).
+    """
+    freq = 1.0 / (theta ** (torch.arange(0, dim).float() / dim))
+    t_x, t_y = init_t_xy(end_x, end_y)
+    freqs_x = torch.outer(t_x, freq)
+    freqs_y = torch.outer(t_y, freq)
+    return torch.polar(torch.ones_like(freqs_x), freqs_x + freqs_y)
+
+
+def apply_rotary_emb_complex(xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor):
+    """
+    Apply RoPE to complex-valued Q and K tensors.
+    No folding required — each element is already complex, so rotation is a direct multiply.
+    xq, xk: (batch_size, num_heads, seq_len, head_dim) as cfloat
+    freqs_cis: (seq_len, head_dim) as cfloat
+    """
+    freqs_cis = reshape_for_broadcast(freqs_cis, xq)
+    return (xq * freqs_cis).to(xq.device), (xk * freqs_cis).to(xk.device)
+
+
 def apply_rotary_emb(xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor):
     """
     Apply RoPE to the query and key tensors.

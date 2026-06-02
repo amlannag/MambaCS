@@ -16,7 +16,7 @@ from torch.utils.data import DataLoader
 
 from DcTNN.model import cascadeNet, axVIT, TokenVIT
 from DcTNN.dc import fft_2d, ifft_2d
-from dataset import MRIDataset, load_mask
+from dataset import H5MRIDataset
 from inference import run_inference
 from config import Config
 from train_config import EXPERIMENTS
@@ -109,61 +109,89 @@ ENCODER_ARGS = {
 
 
 def build_model(cfg):
-    ksl = cfg.k_space_learning
-    # Normalise to a per-stage list of bools
-    if isinstance(ksl, (list, tuple)):
-        k_space_list = list(ksl)
-    else:
-        k_space_list = [bool(ksl)] * len(cfg.encoders)
+    numCh = 2 if cfg.k_space_learning else 1   # k-space=2ch, image=1ch
 
     enc_list, enc_args = [], []
-    for i, name in enumerate(cfg.encoders):
+    for name in cfg.encoders:
         if name not in ENCODER_ARGS:
             raise ValueError(f"Unknown encoder '{name}'. Choose from: {list(ENCODER_ARGS)}")
         cls, args = ENCODER_ARGS[name](cfg)
-        if k_space_list[i]:
-            args['numCh'] = 2   # encoder receives [B, 2, N, N] k-space input
+        args['numCh'] = numCh
         enc_list.append(cls)
         enc_args.append(args)
 
     use_learned_lamb = cfg.lambda_schedule == "none"
     return cascadeNet(cfg.image_size, enc_list, enc_args,
-                      use_learned_lamb, k_space_learning=k_space_list)
+                      use_learned_lamb, k_space_learning=cfg.k_space_learning)
 
 # ---------------------------------------------------------------------------
 # k-space simulation
 # ---------------------------------------------------------------------------
-def simulate_undersampling(gt_batch, mask, norm='ortho'):
+def simulate_undersampling(kspace_full, mask, k_space_learning=True):
     """
-    gt_batch : [B, 1, N, N]
-    mask     : [N, N]
-    returns  : zf_image [B, 1, N, N],  kspace_us [B, 2, N, N]
+    kspace_full     : [B, 2, N, N]  fully sampled k-space (real+imag)
+    mask            : [N, N]
+    k_space_learning: bool — controls domain of model_input and gt_norm
+
+    Returns:
+        model_input  [B, 2, N, N] norm undersampled k-space  (k_space=True)
+                     [B, 1, N, N] norm zero-filled image      (k_space=False)
+        kspace_norm  [B, 2, N, N] norm undersampled k-space  (DC reference, always)
+        gt_norm      [B, 2, N, N] norm fully sampled k-space  (k_space=True)
+                     [B, 1, N, N] norm fully sampled image    (k_space=False)
+        norm_stats   dict: 'mean' [B,1,1,1], 'std' [B,1,1,1]
     """
-    kspace_full = fft_2d(gt_batch)
-    kspace_us   = kspace_full * mask
-    zf_image    = ifft_2d(kspace_us, norm=norm)[:, 0:cfg.num_channels, :, :]
-    return zf_image, kspace_us
+    kspace_us = kspace_full * mask
+    img_us    = ifft_2d(kspace_us)                        # [B, 2, N, N]
+    real      = img_us[:, 0:1]
+    mean      = real.mean(dim=(-2, -1), keepdim=True)
+    std       = real.std(dim=(-2, -1), keepdim=True).clamp(min=1e-8)
+
+    img_norm         = img_us.clone()
+    img_norm[:, 0:1] = (real - mean) / std
+    kspace_norm = fft_2d(img_norm)                        # [B, 2, N, N]
+
+    if k_space_learning:
+        model_input = kspace_norm
+        img_gt_full         = ifft_2d(kspace_full)
+        img_gt_norm         = img_gt_full.clone()
+        img_gt_norm[:, 0:1] = (img_gt_full[:, 0:1] - mean) / std
+        gt_norm = fft_2d(img_gt_norm)                     # [B, 2, N, N]
+    else:
+        model_input = img_norm[:, 0:1]                    # [B, 1, N, N]
+        gt_norm = (ifft_2d(kspace_full)[:, 0:1] - mean) / std
+
+    return model_input, kspace_norm, gt_norm, {'mean': mean, 'std': std}
+
+
+def generate_column_mask(N, R, device):
+    """Randomly sample N//R columns; returns a [N, N] float32 mask."""
+    cols = torch.randperm(N, device=device)[:N // R]
+    mask = torch.zeros(N, N, device=device)
+    mask[:, cols] = 1.0
+    return mask
 
 
 # ---------------------------------------------------------------------------
 # Epoch helpers
 # ---------------------------------------------------------------------------
 
-def train_one_epoch(model, loader, masks, optimizer, criterion, device):
+def train_one_epoch(model, loader, accel_factors, image_size, optimizer, criterion, device):
     model.train()
-    mask_list  = list(masks.values())
     total_loss = 0.0
 
-    for gt in loader:
-        gt   = gt.to(device)
-        mask = mask_list[np.random.randint(len(mask_list))].to(device)
+    for kspace_full in loader:
+        kspace_full = kspace_full.to(device)
+        R    = accel_factors[np.random.randint(len(accel_factors))]
+        mask = generate_column_mask(image_size, R, device)
 
         with torch.no_grad():
-            zf_image, kspace_us = simulate_undersampling(gt, mask)
+            model_input, kspace_norm, gt_norm, _ = simulate_undersampling(
+                kspace_full, mask, cfg.k_space_learning)
 
         optimizer.zero_grad()
-        recon = model(zf_image, kspace_us, mask)
-        loss  = criterion(recon, gt)
+        recon = model(model_input, kspace_norm, mask)
+        loss  = criterion(recon, gt_norm)
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.grad_clip)
         optimizer.step()
@@ -174,21 +202,22 @@ def train_one_epoch(model, loader, masks, optimizer, criterion, device):
 
 
 @torch.no_grad()
-def validate(model, loader, masks, criterion, device):
+def validate(model, loader, accel_factors, image_size, criterion, device):
     model.eval()
-    mask_list  = list(masks.values())
     total_loss = 0.0
     total_psnr = 0.0
 
-    for gt in loader:
-        gt   = gt.to(device)
-        mask = mask_list[np.random.randint(len(mask_list))].to(device)
+    for kspace_full in loader:
+        kspace_full = kspace_full.to(device)
+        R    = accel_factors[np.random.randint(len(accel_factors))]
+        mask = generate_column_mask(image_size, R, device)
 
-        zf_image, kspace_us = simulate_undersampling(gt, mask)
-        recon = model(zf_image, kspace_us, mask)
+        model_input, kspace_norm, gt_norm, _ = simulate_undersampling(
+            kspace_full, mask, cfg.k_space_learning)
+        recon = model(model_input, kspace_norm, mask)
 
-        total_loss += criterion(recon, gt).item()
-        total_psnr += psnr(recon, gt).item()
+        total_loss += criterion(recon, gt_norm).item()
+        total_psnr += psnr(recon, gt_norm).item()
 
     n = len(loader)
     return total_loss / n, total_psnr / n
@@ -224,22 +253,15 @@ def main():
     print(f"Output dir : {out_dir}")
     print(f"Device     : {device}")
 
-    # ---- Masks ----
-    masks = {}
-    for R in cfg.acceleration_factors:
-        path = os.path.join(cfg.mask_dir, f'mask_R{R}.png')
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Mask not found: {path}")
-        masks[R] = load_mask(path, cfg.image_size)
-    print(f"Masks      : R = {list(masks.keys())}")
+    print(f"Accel      : R = {cfg.acceleration_factors}  ({cfg.image_size // cfg.acceleration_factors[0]} cols sampled for R={cfg.acceleration_factors[0]})")
 
     # ---- Datasets ----
-    train_ds = MRIDataset(cfg.data_dir, N=cfg.image_size,
-                          split='train', val_fraction=cfg.val_fraction,
-                          seed=cfg.seed)
-    val_ds   = MRIDataset(cfg.data_dir, N=cfg.image_size,
-                          split='val',   val_fraction=cfg.val_fraction,
-                          seed=cfg.seed)
+    train_ds = H5MRIDataset(cfg.data_dir, N=cfg.image_size,
+                            split='train', val_fraction=cfg.val_fraction,
+                            seed=cfg.seed, kspace_key=cfg.kspace_key)
+    val_ds   = H5MRIDataset(cfg.data_dir, N=cfg.image_size,
+                            split='val',   val_fraction=cfg.val_fraction,
+                            seed=cfg.seed, kspace_key=cfg.kspace_key)
 
     train_loader = DataLoader(train_ds, batch_size=cfg.batch_size,
                               shuffle=True,  num_workers=cfg.num_workers,
@@ -264,7 +286,9 @@ def main():
         T_max=cfg.epochs,
         eta_min=cfg.lr * 1e-2,
     )
-    criterion = nn.L1Loss()
+    def criterion(recon, target):
+        """Mean |recon - target|^2 over all elements (complex-aware squared loss)."""
+        return ((recon - target) ** 2).mean()
 
     # ---- Resume ----
     start_epoch   = 0
@@ -293,9 +317,10 @@ def main():
         if lamb_sched is not None:
             model.set_scheduled_lamb(lamb_sched.get_lambda(epoch))
 
-        train_loss         = train_one_epoch(model, train_loader, masks,
-                                             optimizer, criterion, device)
-        val_loss, val_psnr = validate(model, val_loader, masks, criterion, device)
+        train_loss         = train_one_epoch(model, train_loader, cfg.acceleration_factors,
+                                             cfg.image_size, optimizer, criterion, device)
+        val_loss, val_psnr = validate(model, val_loader, cfg.acceleration_factors,
+                                      cfg.image_size, criterion, device)
         scheduler.step()
 
         lr      = scheduler.get_last_lr()[0]

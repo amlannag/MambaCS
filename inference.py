@@ -26,9 +26,9 @@ from matplotlib.backends.backend_pdf import PdfPages
 # Ensure imports resolve regardless of where this script is called from
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from DcTNN.model import cascadeNet, axVIT, patchVIT
+from DcTNN.model import cascadeNet, axVIT, TokenVIT
 from DcTNN.dc import fft_2d, ifft_2d
-from dataset import MRIDataset, load_mask
+from dataset import H5MRIDataset
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +82,7 @@ def parse_args():
 # ---------------------------------------------------------------------------
 
 _DATA_KEYS  = {'data_dir', 'mask_dir', 'image_size', 'num_channels',
-               'acceleration_factors', 'val_fraction', 'seed'}
+               'acceleration_factors', 'val_fraction', 'seed', 'kspace_key'}
 _MODEL_KEYS = {'encoders', 'patch_size', 'nhead_patch', 'nhead_axial',
                'layer_no', 'num_encoder_layers', 'learned_lambda',
                'k_space_learning', 'lambda_schedule', 'lambda_start',
@@ -110,7 +110,7 @@ _ENCODER_MAP = {
                                                    pos_emb_type=m.get('pos_emb_type', 'APE'),
                                                    rope_theta=m.get('rope_theta', 100.0),
                                                    rope_mixed_rotate=m.get('rope_mixed_rotate', True))),
-    'kaleidoscope': lambda m, ch: (patchVIT, dict(patch_size=m['patch_size'], kaleidoscope=True,
+    'kaleidoscope': lambda m, ch: (TokenVIT, dict(patch_size=m['patch_size'], tokenizer_type='kaleidoscope',
                                                    layerNo=m['layer_no'], numCh=ch,
                                                    nhead=m['nhead_patch'],
                                                    num_encoder_layers=m['num_encoder_layers'],
@@ -118,7 +118,7 @@ _ENCODER_MAP = {
                                                    pos_emb_type=m.get('pos_emb_type', 'APE'),
                                                    rope_theta=m.get('rope_theta', 100.0),
                                                    rope_mixed_rotate=m.get('rope_mixed_rotate', True))),
-    'patch':        lambda m, ch: (patchVIT, dict(patch_size=m['patch_size'], kaleidoscope=False,
+    'patch':        lambda m, ch: (TokenVIT, dict(patch_size=m['patch_size'], tokenizer_type='patch',
                                                    layerNo=m['layer_no'], numCh=ch,
                                                    nhead=m['nhead_patch'],
                                                    num_encoder_layers=m['num_encoder_layers'],
@@ -133,32 +133,56 @@ def build_model_from_config(cfg_dict):
     m = cfg_dict['model']
     d = cfg_dict['data']
 
-    ksl = m.get('k_space_learning', False)
+    k_space_learning = bool(m.get('k_space_learning', True))
     encoders = m.get('encoders', ['axial', 'kaleidoscope', 'patch'])
-    k_space_list = list(ksl) if isinstance(ksl, (list, tuple)) else [bool(ksl)] * len(encoders)
+    numCh = 2 if k_space_learning else 1
 
     enc_list, enc_args = [], []
-    for i, name in enumerate(encoders):
-        # k-space stages receive 2-channel complex input; image stages use config num_channels
-        ch = 2 if k_space_list[i] else d['num_channels']
-        cls, args = _ENCODER_MAP[name](m, ch)
+    for name in encoders:
+        cls, args = _ENCODER_MAP[name](m, numCh)
         enc_list.append(cls)
         enc_args.append(args)
 
     use_learned_lamb = m.get('lambda_schedule', 'none') == 'none'
     return cascadeNet(d['image_size'], enc_list, enc_args,
-                      use_learned_lamb, k_space_learning=k_space_list)
+                      use_learned_lamb, k_space_learning=k_space_learning)
 
 
 # ---------------------------------------------------------------------------
 # Undersampling (local copy so we do not depend on cfg global in train.py)
 # ---------------------------------------------------------------------------
 
-def simulate_undersampling(gt_batch, mask, num_channels=1, norm='ortho'):
-    kspace_full = fft_2d(gt_batch)
-    kspace_us   = kspace_full * mask
-    zf_image    = ifft_2d(kspace_us, norm=norm)[:, 0:num_channels, :, :]
-    return zf_image, kspace_us
+def generate_column_mask(N, R, device):
+    """Randomly sample N//R columns; returns a [N, N] float32 mask."""
+    cols = torch.randperm(N, device=device)[:N // R]
+    mask = torch.zeros(N, N, device=device)
+    mask[:, cols] = 1.0
+    return mask
+
+
+def simulate_undersampling(kspace_full, mask, k_space_learning=True):
+    """Mirrors train.py simulate_undersampling exactly."""
+    kspace_us = kspace_full * mask
+    img_us    = ifft_2d(kspace_us)
+    real      = img_us[:, 0:1]
+    mean      = real.mean(dim=(-2, -1), keepdim=True)
+    std       = real.std(dim=(-2, -1), keepdim=True).clamp(min=1e-8)
+
+    img_norm         = img_us.clone()
+    img_norm[:, 0:1] = (real - mean) / std
+    kspace_norm = fft_2d(img_norm)
+
+    if k_space_learning:
+        model_input = kspace_norm
+        img_gt_full         = ifft_2d(kspace_full)
+        img_gt_norm         = img_gt_full.clone()
+        img_gt_norm[:, 0:1] = (img_gt_full[:, 0:1] - mean) / std
+        gt_norm = fft_2d(img_gt_norm)
+    else:
+        model_input = img_norm[:, 0:1]
+        gt_norm = (ifft_2d(kspace_full)[:, 0:1] - mean) / std
+
+    return model_input, kspace_norm, gt_norm, {'mean': mean, 'std': std}
 
 
 # ---------------------------------------------------------------------------
@@ -427,27 +451,24 @@ def generate_residual_report(exp_dir, accel=8, num_images=5, split='val'):
     with open(config_path) as f:
         cfg_dict = normalise_cfg(json.load(f))
 
-    N            = cfg_dict['data']['image_size']
-    num_channels = cfg_dict['data']['num_channels']
-    device       = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    N                = cfg_dict['data']['image_size']
+    k_space_learning = bool(cfg_dict['model'].get('k_space_learning', True))
+    device           = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     model = build_model_from_config(cfg_dict).to(device)
     ckpt  = torch.load(best_path, map_location=device)
     model.load_state_dict(ckpt['model'])
     model.eval()
 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    mask_path  = os.path.join(script_dir, cfg_dict['data']['mask_dir'], f'mask_R{accel}.png')
-    if not os.path.exists(mask_path):
-        print(f"  [SKIP] Mask not found: {mask_path}")
-        return
-    mask = load_mask(mask_path, N).to(device)
+    mask = generate_column_mask(N, accel, device)
 
     data_dir     = cfg_dict['data']['data_dir']
     val_fraction = cfg_dict['data'].get('val_fraction', 0.1)
     seed         = cfg_dict['data'].get('seed', 42)
-    dataset      = MRIDataset(data_dir, N=N, split=split,
-                              val_fraction=val_fraction, seed=seed)
+    kspace_key   = cfg_dict['data'].get('kspace_key', 'kspace')
+    dataset      = H5MRIDataset(data_dir, N=N, split=split,
+                                val_fraction=val_fraction, seed=seed,
+                                kspace_key=kspace_key)
     num_images   = min(num_images, len(dataset))
     indices      = np.linspace(0, len(dataset) - 1, num_images, dtype=int)
 
@@ -459,15 +480,26 @@ def generate_residual_report(exp_dir, accel=8, num_images=5, split='val'):
 
         for page_idx, dataset_idx in enumerate(indices):
             print(f"  Image {page_idx + 1}/{num_images}")
-            gt = dataset[int(dataset_idx)].unsqueeze(0).to(device)
+            kspace_full = dataset[int(dataset_idx)].unsqueeze(0).to(device)
 
             with torch.no_grad():
-                zf_image, kspace_us = simulate_undersampling(gt, mask, num_channels)
-                recon               = model(zf_image, kspace_us, mask)
-                kspace_recon        = fft_2d(recon)
+                model_input, kspace_norm, gt_norm, norm_stats = simulate_undersampling(
+                    kspace_full, mask, k_space_learning)
+                recon_norm = model(model_input, kspace_norm, mask)
+
+            mean, std    = norm_stats['mean'], norm_stats['std']
+            kspace_us    = kspace_full * mask
+            gt_img       = ifft_2d(kspace_full)[:, 0:1]
+            if k_space_learning:
+                recon_img = ifft_2d(recon_norm)[:, 0:1] * std + mean
+                zf_image  = ifft_2d(kspace_norm)[:, 0:1] * std + mean
+            else:
+                recon_img = recon_norm * std + mean
+                zf_image  = model_input * std + mean
+            kspace_recon = fft_2d(recon_img)
 
             plot_residual_page(
-                gt.cpu(), zf_image.cpu(), recon.cpu(),
+                gt_img.cpu(), zf_image.cpu(), recon.cpu(),
                 kspace_us.cpu(), kspace_recon.cpu(),
                 page_idx, accel, pdf,
             )
@@ -506,9 +538,9 @@ def run_inference(exp_dir, num_images=5, accel=4, split='val'):
     with open(config_path) as f:
         cfg_dict = normalise_cfg(json.load(f))
 
-    N            = cfg_dict['data']['image_size']
-    num_channels = cfg_dict['data']['num_channels']
-    print(f"Config         : image_size={N}, num_channels={num_channels}")
+    N                = cfg_dict['data']['image_size']
+    k_space_learning = bool(cfg_dict['model'].get('k_space_learning', True))
+    print(f"Config         : image_size={N}, k_space_learning={k_space_learning}")
 
     # ---- Metrics ----
     metrics_path = os.path.join(exp_dir, 'metrics.json')
@@ -535,24 +567,21 @@ def run_inference(exp_dir, num_images=5, accel=4, split='val'):
           f"val_psnr={best_val_psnr:.2f} dB)")
 
     # ---- Mask ----
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    mask_dir   = os.path.join(script_dir, cfg_dict['data']['mask_dir'])
-    mask_path  = os.path.join(mask_dir, f'mask_R{accel}.png')
-    if not os.path.exists(mask_path):
-        raise FileNotFoundError(f"Mask not found: {mask_path}")
-    mask = load_mask(mask_path, N).to(device)
-    print(f"Mask           : R={accel}, shape={tuple(mask.shape)}")
+    mask = generate_column_mask(N, accel, device)
+    print(f"Mask           : R={accel}, {N // accel} cols sampled, shape={tuple(mask.shape)}")
 
     # ---- Dataset ----
     data_dir     = cfg_dict['data']['data_dir']
     val_fraction = cfg_dict['data'].get('val_fraction', 0.1)
     seed         = cfg_dict['data'].get('seed', 42)
+    kspace_key   = cfg_dict['data'].get('kspace_key', 'kspace')
 
-    dataset    = MRIDataset(data_dir, N=N, split=split,
-                            val_fraction=val_fraction, seed=seed)
+    dataset    = H5MRIDataset(data_dir, N=N, split=split,
+                              val_fraction=val_fraction, seed=seed,
+                              kspace_key=kspace_key)
     num_images = min(num_images, len(dataset))
     indices    = np.linspace(0, len(dataset) - 1, num_images, dtype=int)
-    print(f"Dataset        : {len(dataset)} images in '{split}' split")
+    print(f"Dataset        : {len(dataset)} slices in '{split}' split")
     print(f"Visualising    : {num_images} images\n")
 
     # ---- Generate PDF ----
@@ -567,23 +596,33 @@ def run_inference(exp_dir, num_images=5, accel=4, split='val'):
         for page_idx, dataset_idx in enumerate(indices):
             print(f"  Image {page_idx + 1}/{num_images}  (dataset index {int(dataset_idx)})")
 
-            gt = dataset[int(dataset_idx)].unsqueeze(0).to(device)
+            kspace_full = dataset[int(dataset_idx)].unsqueeze(0).to(device)
 
             with torch.no_grad():
-                zf_image, kspace_us = simulate_undersampling(gt, mask, num_channels)
-                recon               = model(zf_image, kspace_us, mask)
-                kspace_gt           = fft_2d(gt)
-                kspace_recon        = fft_2d(recon)
+                model_input, kspace_norm, gt_norm, norm_stats = simulate_undersampling(
+                    kspace_full, mask, k_space_learning)
+                recon_norm = model(model_input, kspace_norm, mask)
 
-            gt_np    = to_image(gt.cpu())
+            mean, std    = norm_stats['mean'], norm_stats['std']
+            kspace_us    = kspace_full * mask
+            gt_img       = ifft_2d(kspace_full)[:, 0:1]
+            if k_space_learning:
+                recon_img = ifft_2d(recon_norm)[:, 0:1] * std + mean
+                zf_image  = ifft_2d(kspace_norm)[:, 0:1] * std + mean
+            else:
+                recon_img = recon_norm * std + mean
+                zf_image  = model_input * std + mean
+            kspace_recon = fft_2d(recon_img)
+
+            gt_np    = to_image(gt_img.cpu())
             recon_np = to_image(recon.cpu())
             mse_val  = float(np.mean((recon_np - gt_np) ** 2))
             psnr_val = psnr_numpy(recon_np, gt_np)
             results.append({'psnr': psnr_val, 'mse': mse_val})
 
             plot_image_results(
-                gt.cpu(), zf_image.cpu(), recon.cpu(),
-                kspace_gt.cpu(), kspace_us.cpu(), kspace_recon.cpu(),
+                gt_img.cpu(), zf_image.cpu(), recon.cpu(),
+                kspace_full.cpu(), kspace_us.cpu(), kspace_recon.cpu(),
                 page_idx, accel, pdf,
             )
 

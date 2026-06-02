@@ -5,3 +5,5 @@ wandb/
 slurm-*.out
 *.out
 CLAUDE.md
+file1000001.h5
+src/
