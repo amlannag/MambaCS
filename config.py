@@ -37,7 +37,7 @@ class Config:
 
     # Folder of validation .h5 MRI files. When set, validation is loaded
     # directly from this directory instead of splitting data_dir.
-    val_data_dir: Optional[str] = None
+    val_data_dir: Optional[str] = "/scratch/user/uqanag/fastmri/singlecoil_val"
 
     # HDF5 dataset key for raw k-space within each .h5 file
     kspace_key: str = "kspace"
