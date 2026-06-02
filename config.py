@@ -20,14 +20,8 @@ class Config:
     # ---------------------------------------------------------------------------
     # Experiment identity
     # ---------------------------------------------------------------------------
-
-    # Short label for the project / paper section (e.g. "ablation", "dctnn")
     prefix: str = "MambaCS"
-
-    # Descriptive name for this specific run (e.g. "R4only", "lr1e3", "baseline")
     name: str = "8x_acceleration"
-
-    # Root directory where all experiment folders are created
     output_dir: str = "../Experiments"
 
     # Set to a checkpoint path (e.g. "../Experiments/dctnn_baseline/latest.pth")
@@ -39,7 +33,7 @@ class Config:
     # ---------------------------------------------------------------------------
 
     # Folder of .h5 MRI files (fastMRI format, one file per scan)
-    data_dir: str = "/scratch/user/uqanag/fastMRI/keras_png_slices_train"
+    data_dir: str = "/scratch/user/uqanag/fastmri/singlecoil_train"
 
     # HDF5 dataset key for raw k-space within each .h5 file
     kspace_key: str = "kspace"
@@ -89,6 +83,9 @@ class Config:
 
 
     pos_emb_type: str = "APE"
+    # Attention implementation used inside transformer blocks.
+    # Options: "standard", "complex", "real_valued", "phase_aware"
+    attn_type: str = "complex"
     # Base frequency for RoPE (ignored when pos_emb_type == "APE")
     rope_theta: float = 100.0
     # Randomly rotate initial 2D frequencies in Rope-Mixed (ignored otherwise)

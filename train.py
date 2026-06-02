@@ -17,7 +17,6 @@ from torch.utils.data import DataLoader
 from DcTNN.model import cascadeNet, axVIT, TokenVIT
 from DcTNN.dc import fft_2d, ifft_2d
 from dataset import H5MRIDataset
-from inference import run_inference
 from config import Config
 from train_config import EXPERIMENTS
 from DcTNN.lambda_scheduler import LambdaScheduler
@@ -87,7 +86,8 @@ ENCODER_ARGS = {
         dict(layerNo=cfg.layer_no, numCh=cfg.num_channels, d_model=None,
              nhead=cfg.nhead_axial, num_encoder_layers=cfg.num_encoder_layers,
              dim_feedforward=None, pos_emb_type=cfg.pos_emb_type,
-             rope_theta=cfg.rope_theta, rope_mixed_rotate=cfg.rope_mixed_rotate)
+             rope_theta=cfg.rope_theta, rope_mixed_rotate=cfg.rope_mixed_rotate,
+             attn_type=cfg.attn_type)
     ),
     "kaleidoscope": lambda cfg: (
         TokenVIT,
@@ -95,7 +95,8 @@ ENCODER_ARGS = {
              numCh=cfg.num_channels, nhead=cfg.nhead_patch,
              num_encoder_layers=cfg.num_encoder_layers,
              dim_feedforward=None, d_model=None, pos_emb_type=cfg.pos_emb_type,
-             rope_theta=cfg.rope_theta, rope_mixed_rotate=cfg.rope_mixed_rotate)
+             rope_theta=cfg.rope_theta, rope_mixed_rotate=cfg.rope_mixed_rotate,
+             attn_type=cfg.attn_type)
     ),
     "patch": lambda cfg: (
         TokenVIT,
@@ -103,7 +104,8 @@ ENCODER_ARGS = {
              numCh=cfg.num_channels, nhead=cfg.nhead_patch,
              num_encoder_layers=cfg.num_encoder_layers,
              dim_feedforward=None, d_model=None, pos_emb_type=cfg.pos_emb_type,
-             rope_theta=cfg.rope_theta, rope_mixed_rotate=cfg.rope_mixed_rotate)
+             rope_theta=cfg.rope_theta, rope_mixed_rotate=cfg.rope_mixed_rotate,
+             attn_type=cfg.attn_type)
     ),
 }
 
@@ -371,10 +373,6 @@ def main():
 
     wandb.finish()
     print(f"\nTraining complete.  Outputs saved to: {out_dir}")
-
-    for R in [4, 6, 8]:
-        run_inference(out_dir, num_images=5, accel=R, split='val')
-
 
 if __name__ == '__main__':
     main()

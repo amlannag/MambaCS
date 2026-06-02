@@ -51,6 +51,7 @@ class cascadeNet(nn.Module):
         """
         x = xPrev
         for i, transformer in enumerate(self.transformers):
+            
             if self.lamb is not False:
                 lamb_i = self.lamb[i]
             elif self.scheduled_lamb is not None:

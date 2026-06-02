@@ -2,20 +2,32 @@
 Experiment definitions for DcTNN training.
 
 Each entry in EXPERIMENTS is a dict of Config field overrides.
-Any key not listed falls back to the Config class default (defined in config.py).
-
-Run a specific experiment:
-    python train.py --exp_idx <N>
-
-Submit all experiments as separate SLURM jobs:
-    bash launch.sh
+Any key not listed falls back to the Config class default in config.py.
 """
 
 EXPERIMENTS = [
     {
-        "prefix": "RoPE",
-        "name": "patch_rope_mixed",
+        "prefix": "FullComplex",
+        "name": "patch_rope_axial",
         "encoders": ["patch", "patch", "patch"],
-        "pos_emb_type": "Rope-Mixed",
+        "k_space_learning": True,
+        "pos_emb_type": "Rope-Axial",
+        "attn_type": "complex",
+    },
+    {
+        "prefix": "FullComplex",
+        "name": "axial_rope_axial",
+        "encoders": ["axial", "axial", "axial"],
+        "k_space_learning": True,
+        "pos_emb_type": "Rope-Axial",
+        "attn_type": "complex",
+    },
+    {
+        "prefix": "FullComplex",
+        "name": "kaleidoscope_rope_axial",
+        "encoders": ["kaleidoscope", "kaleidoscope", "kaleidoscope"],
+        "k_space_learning": True,
+        "pos_emb_type": "Rope-Axial",
+        "attn_type": "complex",
     },
 ]

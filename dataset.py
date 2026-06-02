@@ -3,20 +3,6 @@ import h5py
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-from PIL import Image, ImageOps
-import torch.nn.functional as F
-
-
-def load_mask(path, N):
-    mask = np.array(ImageOps.grayscale(Image.open(path))).astype(np.float32)
-    mask = np.fft.ifftshift(mask) / np.max(np.abs(mask))
-
-    if mask.shape[0] != N or mask.shape[1] != N:
-        t = torch.tensor(mask).unsqueeze(0).unsqueeze(0)
-        t = F.interpolate(t, size=(N, N), mode='nearest')
-        mask = t.squeeze().numpy()
-
-    return torch.tensor(mask, dtype=torch.float)
 
 
 def center_crop_kspace(kspace, N):
