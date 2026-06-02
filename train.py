@@ -14,12 +14,11 @@ import torch.nn as nn
 import wandb
 from torch.utils.data import DataLoader
 
-from DcTNN.model import cascadeNet, axVIT, TokenVIT
-from DcTNN.dc import fft_2d, ifft_2d
 from dataset import H5MRIDataset
 from config import Config
 from train_config import EXPERIMENTS
 from DcTNN.lambda_scheduler import LambdaScheduler
+from train_utils import build_model, generate_column_mask, psnr, resolve_data_dirs, simulate_undersampling
 
 
 def build_cfg(exp_idx: int) -> Config:
@@ -52,7 +51,7 @@ def psnr(pred, target, max_val=1.0):
     """
     Calculate the Peak Signal-to-Noise Ratio (PSNR) between prediction and target.
     """
-    mse = torch.mean((pred - target) ** 2)
+    mse = torch.mean(torch.abs(pred - target) ** 2)
     if mse == 0:
         return torch.tensor(float('inf'))
     return 20.0 * torch.log10(torch.tensor(max_val, device=pred.device) / torch.sqrt(mse))
@@ -74,104 +73,6 @@ def append_metrics(path, record):
     history.append(record)
     with open(path, 'w') as f:
         json.dump(history, f, indent=2)
-
-
-# ---------------------------------------------------------------------------
-# Model Construction Using Configs
-# ---------------------------------------------------------------------------
-
-ENCODER_ARGS = {
-    "axial": lambda cfg: (
-        axVIT,
-        dict(layerNo=cfg.layer_no, numCh=cfg.num_channels, d_model=None,
-             nhead=cfg.nhead_axial, num_encoder_layers=cfg.num_encoder_layers,
-             dim_feedforward=None, pos_emb_type=cfg.pos_emb_type,
-             rope_theta=cfg.rope_theta, rope_mixed_rotate=cfg.rope_mixed_rotate,
-             attn_type=cfg.attn_type)
-    ),
-    "kaleidoscope": lambda cfg: (
-        TokenVIT,
-        dict(patch_size=cfg.patch_size, tokenizer_type="kaleidoscope", layerNo=cfg.layer_no,
-             numCh=cfg.num_channels, nhead=cfg.nhead_patch,
-             num_encoder_layers=cfg.num_encoder_layers,
-             dim_feedforward=None, d_model=None, pos_emb_type=cfg.pos_emb_type,
-             rope_theta=cfg.rope_theta, rope_mixed_rotate=cfg.rope_mixed_rotate,
-             attn_type=cfg.attn_type)
-    ),
-    "patch": lambda cfg: (
-        TokenVIT,
-        dict(patch_size=cfg.patch_size, tokenizer_type="patch", layerNo=cfg.layer_no,
-             numCh=cfg.num_channels, nhead=cfg.nhead_patch,
-             num_encoder_layers=cfg.num_encoder_layers,
-             dim_feedforward=None, d_model=None, pos_emb_type=cfg.pos_emb_type,
-             rope_theta=cfg.rope_theta, rope_mixed_rotate=cfg.rope_mixed_rotate,
-             attn_type=cfg.attn_type)
-    ),
-}
-
-
-def build_model(cfg):
-    numCh = 2 if cfg.k_space_learning else 1   # k-space=2ch, image=1ch
-
-    enc_list, enc_args = [], []
-    for name in cfg.encoders:
-        if name not in ENCODER_ARGS:
-            raise ValueError(f"Unknown encoder '{name}'. Choose from: {list(ENCODER_ARGS)}")
-        cls, args = ENCODER_ARGS[name](cfg)
-        args['numCh'] = numCh
-        enc_list.append(cls)
-        enc_args.append(args)
-
-    use_learned_lamb = cfg.lambda_schedule == "none"
-    return cascadeNet(cfg.image_size, enc_list, enc_args,
-                      use_learned_lamb, k_space_learning=cfg.k_space_learning)
-
-# ---------------------------------------------------------------------------
-# k-space simulation
-# ---------------------------------------------------------------------------
-def simulate_undersampling(kspace_full, mask, k_space_learning=True):
-    """
-    kspace_full     : [B, 2, N, N]  fully sampled k-space (real+imag)
-    mask            : [N, N]
-    k_space_learning: bool — controls domain of model_input and gt_norm
-
-    Returns:
-        model_input  [B, 2, N, N] norm undersampled k-space  (k_space=True)
-                     [B, 1, N, N] norm zero-filled image      (k_space=False)
-        kspace_norm  [B, 2, N, N] norm undersampled k-space  (DC reference, always)
-        gt_norm      [B, 2, N, N] norm fully sampled k-space  (k_space=True)
-                     [B, 1, N, N] norm fully sampled image    (k_space=False)
-        norm_stats   dict: 'mean' [B,1,1,1], 'std' [B,1,1,1]
-    """
-    kspace_us = kspace_full * mask
-    img_us    = ifft_2d(kspace_us)                        # [B, 2, N, N]
-    real      = img_us[:, 0:1]
-    mean      = real.mean(dim=(-2, -1), keepdim=True)
-    std       = real.std(dim=(-2, -1), keepdim=True).clamp(min=1e-8)
-
-    img_norm         = img_us.clone()
-    img_norm[:, 0:1] = (real - mean) / std
-    kspace_norm = fft_2d(img_norm)                        # [B, 2, N, N]
-
-    if k_space_learning:
-        model_input = kspace_norm
-        img_gt_full         = ifft_2d(kspace_full)
-        img_gt_norm         = img_gt_full.clone()
-        img_gt_norm[:, 0:1] = (img_gt_full[:, 0:1] - mean) / std
-        gt_norm = fft_2d(img_gt_norm)                     # [B, 2, N, N]
-    else:
-        model_input = img_norm[:, 0:1]                    # [B, 1, N, N]
-        gt_norm = (ifft_2d(kspace_full)[:, 0:1] - mean) / std
-
-    return model_input, kspace_norm, gt_norm, {'mean': mean, 'std': std}
-
-
-def generate_column_mask(N, R, device):
-    """Randomly sample N//R columns; returns a [N, N] float32 mask."""
-    cols = torch.randperm(N, device=device)[:N // R]
-    mask = torch.zeros(N, N, device=device)
-    mask[:, cols] = 1.0
-    return mask
 
 
 # ---------------------------------------------------------------------------
@@ -258,12 +159,11 @@ def main():
     print(f"Accel      : R = {cfg.acceleration_factors}  ({cfg.image_size // cfg.acceleration_factors[0]} cols sampled for R={cfg.acceleration_factors[0]})")
 
     # ---- Datasets ----
-    train_ds = H5MRIDataset(cfg.data_dir, N=cfg.image_size,
-                            split='train', val_fraction=cfg.val_fraction,
-                            seed=cfg.seed, kspace_key=cfg.kspace_key)
-    val_ds   = H5MRIDataset(cfg.data_dir, N=cfg.image_size,
-                            split='val',   val_fraction=cfg.val_fraction,
-                            seed=cfg.seed, kspace_key=cfg.kspace_key)
+    train_data_dir, val_data_dir = resolve_data_dirs(cfg)
+    train_ds = H5MRIDataset(train_data_dir, N=cfg.image_size,
+                            kspace_key=cfg.kspace_key)
+    val_ds   = H5MRIDataset(val_data_dir, N=cfg.image_size,
+                            kspace_key=cfg.kspace_key)
 
     train_loader = DataLoader(train_ds, batch_size=cfg.batch_size,
                               shuffle=True,  num_workers=cfg.num_workers,
@@ -272,7 +172,9 @@ def main():
                               shuffle=False, num_workers=cfg.num_workers,
                               pin_memory=True)
 
-    print(f"Train / Val: {len(train_ds)} / {len(val_ds)} samples")
+    print(f"Train dir   : {train_data_dir}")
+    print(f"Val dir     : {val_data_dir}")
+    print(f"Train / Val : {len(train_ds)} / {len(val_ds)} samples")
 
     # ---- Model ----
     model    = build_model(cfg).to(device)
@@ -289,8 +191,8 @@ def main():
         eta_min=cfg.lr * 1e-2,
     )
     def criterion(recon, target):
-        """Mean |recon - target|^2 over all elements (complex-aware squared loss)."""
-        return ((recon - target) ** 2).mean()
+        """Mean squared magnitude error over all elements."""
+        return torch.mean(torch.abs(recon - target) ** 2)
 
     # ---- Resume ----
     start_epoch   = 0

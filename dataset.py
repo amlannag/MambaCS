@@ -1,6 +1,5 @@
 import os
 import h5py
-import numpy as np
 import torch
 from torch.utils.data import Dataset
 
@@ -17,22 +16,15 @@ class H5MRIDataset(Dataset):
     """
     Loads k-space slices from .h5 MRI files (fastMRI format).
     Each file contains kspace of shape (num_slices, H, W) complex64.
-    Returns one center-cropped slice as [2, N, N] float32 (real + imag channels).
-
-    Train/val split is at the file level to prevent data leakage between
-    adjacent slices from the same scan.
+    Returns one center-cropped slice as [1, N, N] complex64.
 
     Args:
         data_dir (str):       Directory containing .h5 files
         N (int):              Output spatial size — k-space is center-cropped to N×N
-        split (str):          'train' or 'val'
-        val_fraction (float): Fraction of files held out for validation
-        seed (int):           Reproducibility seed for the file-level split
         kspace_key (str):     HDF5 dataset key for raw k-space (default: 'kspace')
     """
 
-    def __init__(self, data_dir, N=320, split='train', val_fraction=0.1, seed=42,
-                 kspace_key='kspace'):
+    def __init__(self, data_dir, N=320, kspace_key='kspace'):
         self.N = N
         self.kspace_key = kspace_key
 
@@ -44,17 +36,8 @@ class H5MRIDataset(Dataset):
         if not h5_files:
             raise ValueError(f"No .h5 files found in {data_dir}")
 
-        rng = np.random.RandomState(seed)
-        file_indices = rng.permutation(len(h5_files))
-        n_val = max(1, int(len(h5_files) * val_fraction))
-
-        if split == 'val':
-            chosen_files = [h5_files[i] for i in file_indices[:n_val]]
-        else:
-            chosen_files = [h5_files[i] for i in file_indices[n_val:]]
-
         self.index = []
-        for fpath in chosen_files:
+        for fpath in h5_files:
             with h5py.File(fpath, 'r') as f:
                 num_slices = f[kspace_key].shape[0]
             self.index.extend((fpath, s) for s in range(num_slices))
@@ -67,6 +50,4 @@ class H5MRIDataset(Dataset):
         with h5py.File(fpath, 'r') as f:
             kspace = f[self.kspace_key][s]            # (H, W) complex64
         kspace = center_crop_kspace(kspace, self.N)   # (N, N) complex64
-        real = torch.tensor(kspace.real, dtype=torch.float32)
-        imag = torch.tensor(kspace.imag, dtype=torch.float32)
-        return torch.stack([real, imag], dim=0)       # [2, N, N]
+        return torch.tensor(kspace, dtype=torch.complex64).unsqueeze(0)  # [1, N, N]

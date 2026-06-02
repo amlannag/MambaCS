@@ -32,26 +32,27 @@ class Config:
     # Data
     # ---------------------------------------------------------------------------
 
-    # Folder of .h5 MRI files (fastMRI format, one file per scan)
+    # Folder of training .h5 MRI files (fastMRI format, one file per scan)
     data_dir: str = "/scratch/user/uqanag/fastmri/singlecoil_train"
+
+    # Folder of validation .h5 MRI files. When set, validation is loaded
+    # directly from this directory instead of splitting data_dir.
+    val_data_dir: Optional[str] = None
 
     # HDF5 dataset key for raw k-space within each .h5 file
     kspace_key: str = "kspace"
 
-    # Folder containing mask_R4.png, mask_R6.png, mask_R8.png
-    mask_dir: str = "masks"
-
     # All images are resized to image_size x image_size
     image_size: int = 320
 
-    # 1 for greyscale MRI, 2 for complex (real + imag channels)
+    # Number of complex-valued image/k-space channels. Keep this at 1 for the
+    # current complex-valued pipeline.
     num_channels: int = 1
 
     # Which acceleration factors to randomly draw from during training
-    # Available masks must exist in mask_dir for each value listed here
     acceleration_factors: List[int] = field(default_factory=lambda: [8])
 
-    # Fraction of the dataset held out for validation
+    # Legacy split controls. Ignored when val_data_dir is set.
     val_fraction: float = 0.1
     seed: int = 42
 

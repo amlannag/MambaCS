@@ -19,13 +19,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from DcTNN.dc import fft_2d, ifft_2d
-from DcTNN.model import TokenVIT, axVIT, cascadeNet
+from DcTNN.dc import ifft_2d
 from dataset import H5MRIDataset
+from train_utils import build_model_from_config_dict, generate_column_mask, simulate_undersampling
 
 
 _DATA_KEYS = {
     "data_dir",
+    "val_data_dir",
     "image_size",
     "num_channels",
     "acceleration_factors",
@@ -59,113 +60,23 @@ def normalise_cfg(cfg_dict):
     }
 
 
-_ENCODER_MAP = {
-    "axial": lambda m, ch: (
-        axVIT,
-        dict(
-            layerNo=m["layer_no"],
-            numCh=ch,
-            d_model=None,
-            nhead=m["nhead_axial"],
-            num_encoder_layers=m["num_encoder_layers"],
-            dim_feedforward=None,
-            pos_emb_type=m.get("pos_emb_type", "APE"),
-            attn_type=m.get("attn_type", "standard"),
-            rope_theta=m.get("rope_theta", 100.0),
-            rope_mixed_rotate=m.get("rope_mixed_rotate", True),
-        ),
-    ),
-    "kaleidoscope": lambda m, ch: (
-        TokenVIT,
-        dict(
-            patch_size=m["patch_size"],
-            tokenizer_type="kaleidoscope",
-            layerNo=m["layer_no"],
-            numCh=ch,
-            nhead=m["nhead_patch"],
-            num_encoder_layers=m["num_encoder_layers"],
-            dim_feedforward=None,
-            d_model=None,
-            pos_emb_type=m.get("pos_emb_type", "APE"),
-            attn_type=m.get("attn_type", "standard"),
-            rope_theta=m.get("rope_theta", 100.0),
-            rope_mixed_rotate=m.get("rope_mixed_rotate", True),
-        ),
-    ),
-    "patch": lambda m, ch: (
-        TokenVIT,
-        dict(
-            patch_size=m["patch_size"],
-            tokenizer_type="patch",
-            layerNo=m["layer_no"],
-            numCh=ch,
-            nhead=m["nhead_patch"],
-            num_encoder_layers=m["num_encoder_layers"],
-            dim_feedforward=None,
-            d_model=None,
-            pos_emb_type=m.get("pos_emb_type", "APE"),
-            attn_type=m.get("attn_type", "standard"),
-            rope_theta=m.get("rope_theta", 100.0),
-            rope_mixed_rotate=m.get("rope_mixed_rotate", True),
-        ),
-    ),
-}
-
-
-def build_model_from_config(cfg_dict):
-    model_cfg = cfg_dict["model"]
-    data_cfg = cfg_dict["data"]
-    k_space_learning = bool(model_cfg.get("k_space_learning", True))
-    num_ch = 2 if k_space_learning else 1
-
-    enc_list = []
-    enc_args = []
-    for name in model_cfg.get("encoders", ["patch", "patch", "patch"]):
-        cls, args = _ENCODER_MAP[name](model_cfg, num_ch)
-        enc_list.append(cls)
-        enc_args.append(args)
-
-    use_learned_lamb = model_cfg.get("lambda_schedule", "none") == "none"
-    return cascadeNet(
-        data_cfg["image_size"],
-        enc_list,
-        enc_args,
-        use_learned_lamb,
-        k_space_learning=k_space_learning,
-    )
-
-
-def generate_column_mask(image_size, accel, device):
-    cols = torch.randperm(image_size, device=device)[: image_size // accel]
-    mask = torch.zeros(image_size, image_size, device=device)
-    mask[:, cols] = 1.0
-    return mask
-
-
-def simulate_undersampling(kspace_full, mask, k_space_learning):
-    kspace_us = kspace_full * mask
-    img_us = ifft_2d(kspace_us)
-    real = img_us[:, 0:1]
-    mean = real.mean(dim=(-2, -1), keepdim=True)
-    std = real.std(dim=(-2, -1), keepdim=True).clamp(min=1e-8)
-
-    img_norm = img_us.clone()
-    img_norm[:, 0:1] = (real - mean) / std
-    kspace_norm = fft_2d(img_norm)
-
-    if k_space_learning:
-        model_input = kspace_norm
-    else:
-        model_input = img_norm[:, 0:1]
-
-    return model_input, kspace_norm, {"mean": mean, "std": std}
+def resolve_data_dir(data_cfg, split):
+    if split == "val" and data_cfg.get("val_data_dir"):
+        return data_cfg["val_data_dir"]
+    return data_cfg["data_dir"]
 
 
 def _magnitude_image(tensor):
     array = tensor.detach().cpu().numpy()
+    if np.iscomplexobj(array):
+        return np.abs(array[0, 0])
     if array.shape[1] == 1:
         return array[0, 0]
     return np.sqrt(array[0, 0] ** 2 + array[0, 1] ** 2)
+
+
+def _denormalize_image(img_norm, mean, std):
+    return torch.complex(img_norm.real * std + mean, img_norm.imag)
 
 
 def _save_reconstruction_figure(output_path, gt_img, zf_img, recon_img, title):
@@ -215,7 +126,7 @@ def load_experiment_model(exp_dir, checkpoint_name=None, device=None):
     if not os.path.isfile(checkpoint_path):
         raise FileNotFoundError(f"Missing checkpoint: {checkpoint_path}")
 
-    model = build_model_from_config(cfg_dict).to(device)
+    model = build_model_from_config_dict(cfg_dict).to(device)
     checkpoint = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(checkpoint["model"])
     model.eval()
@@ -256,11 +167,8 @@ def reconstruct_dataset_samples(
         accel = data_cfg.get("acceleration_factors", [8])[0]
 
     dataset = H5MRIDataset(
-        data_cfg["data_dir"],
+        resolve_data_dir(data_cfg, split),
         N=image_size,
-        split=split,
-        val_fraction=data_cfg.get("val_fraction", 0.1),
-        seed=data_cfg.get("seed", 42),
         kspace_key=data_cfg.get("kspace_key", "kspace"),
     )
 
@@ -277,19 +185,17 @@ def reconstruct_dataset_samples(
     results = []
     for sample_idx in indices:
         kspace_full = dataset[int(sample_idx)].unsqueeze(0).to(device)
-        model_input, kspace_norm, stats = simulate_undersampling(
-            kspace_full, mask, k_space_learning
-        )
+        model_input, kspace_norm, _, stats = simulate_undersampling(kspace_full, mask, k_space_learning)
         recon_norm = model(model_input, kspace_norm, mask)
 
         mean = stats["mean"]
         std = stats["std"]
-        gt_img = ifft_2d(kspace_full)[:, 0:1]
-        zf_img = ifft_2d(kspace_norm)[:, 0:1] * std + mean
+        gt_img = ifft_2d(kspace_full)
+        zf_img = _denormalize_image(ifft_2d(kspace_norm), mean, std)
         if k_space_learning:
-            recon_img = ifft_2d(recon_norm)[:, 0:1] * std + mean
+            recon_img = _denormalize_image(ifft_2d(recon_norm), mean, std)
         else:
-            recon_img = recon_norm * std + mean
+            recon_img = _denormalize_image(recon_norm, mean, std)
 
         gt_np = _magnitude_image(gt_img)
         zf_np = _magnitude_image(zf_img)

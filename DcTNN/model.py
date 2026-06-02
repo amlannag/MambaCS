@@ -11,9 +11,9 @@ class cascadeNet(nn.Module):
     """
     Cascaded denoising network with data consistency after each stage.
 
-    When k_space_learning=True  — input/output are k-space [B, 2, N, N];
+    When k_space_learning=True  — input/output are k-space [B, 1, N, N] complex;
                                    KSpace_DC enforces consistency in k-space.
-    When k_space_learning=False — input/output are image domain [B, 1, N, N];
+    When k_space_learning=False — input/output are image domain [B, 1, N, N] complex;
                                    FFT_DC converts to k-space internally for DC.
 
     Args:
@@ -43,9 +43,9 @@ class cascadeNet(nn.Module):
 
     def forward(self, xPrev, y, sampleMask):
         """
-        xPrev      : [B, 2, N, N] undersampled k-space  (k_space_learning=True)
-                     [B, 1, N, N] zero-filled image      (k_space_learning=False)
-        y          : [B, 2, N, N] undersampled k-space   (DC reference, always)
+        xPrev      : [B, 1, N, N] complex undersampled k-space (k_space_learning=True)
+                     [B, 1, N, N] complex zero-filled image    (k_space_learning=False)
+        y          : [B, 1, N, N] complex undersampled k-space (DC reference, always)
         sampleMask : [N, N]
         Returns same domain as xPrev.
         """
