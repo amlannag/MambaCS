@@ -16,7 +16,7 @@ EXPERIMENTS = [
     # },
     {
         "prefix": "FullComplex",
-        "name": "axial_rope_axial",
+        "name": "axial_rope_axial_complexattn",
         "encoders": ["axial", "axial", "axial"],
         "k_space_learning": True,
         "pos_emb_type": "Rope-Axial",

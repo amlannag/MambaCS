@@ -143,8 +143,8 @@ class axialEncoder(nn.Module):
             self.vertical_pos_embedding = nn.Parameter(torch.randn(1, image_height, d_model, dtype=ape_dtype))
 
         elif pos_emb_type in ("Rope-Axial", "Rope-Mixed"):
-            freqs_h = cis_fn(dim=head_dim, end_x=image_width, end_y=1, theta=rope_theta)
-            freqs_v = cis_fn(dim=head_dim, end_x=image_height, end_y=1, theta=rope_theta)
+            freqs_h = cis_fn(dim=head_dim, end_x=image_height, end_y=1, theta=rope_theta)
+            freqs_v = cis_fn(dim=head_dim, end_x=image_width, end_y=1, theta=rope_theta)
 
         h_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation,
                                           layer_norm_eps, freqs_cis=freqs_h, attn_type=attn_type)

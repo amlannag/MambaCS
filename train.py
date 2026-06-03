@@ -161,9 +161,9 @@ def main():
 
     # ---- Datasets ----
     train_data_dir, val_data_dir = resolve_data_dirs(cfg)
-    train_ds = H5MRIDataset(train_data_dir, N=cfg.image_size,
+    train_ds = H5MRIDataset(train_data_dir, N=img_w,
                             kspace_key=cfg.kspace_key)
-    val_ds   = H5MRIDataset(val_data_dir, N=cfg.image_size,
+    val_ds   = H5MRIDataset(val_data_dir, N=img_w,
                             kspace_key=cfg.kspace_key)
 
     train_loader = DataLoader(train_ds, batch_size=cfg.batch_size,

@@ -85,6 +85,10 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
         shape = [d if i >= ndim - 2 else 1 for i, d in enumerate(x.shape)]
     elif freqs_cis.shape == (x.shape[-3], x.shape[-2], x.shape[-1]):
         shape = [d if i >= ndim - 3 else 1 for i, d in enumerate(x.shape)]
+    else:
+        raise ValueError(
+            f"freqs_cis shape {tuple(freqs_cis.shape)} cannot broadcast with x shape {tuple(x.shape)}"
+        )
     return freqs_cis.view(*shape)
 
 
