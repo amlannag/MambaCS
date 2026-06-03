@@ -127,8 +127,9 @@ def build_model_from_config_dict(cfg_dict):
 
 
 def generate_column_mask(image_size, accel, device):
-    cols = torch.randperm(image_size, device=device)[: image_size // accel]
-    mask = torch.zeros(image_size, image_size, device=device)
+    H, W = image_size if isinstance(image_size, tuple) else (image_size, image_size)
+    cols = torch.randperm(W, device=device)[: W // accel]
+    mask = torch.zeros(H, W, device=device)
     mask[:, cols] = 1.0
     return mask
 

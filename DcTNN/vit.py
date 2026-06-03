@@ -85,7 +85,8 @@ class axVIT(BaseVIT):
                     layer_norm_eps=1e-05, batch_first=True, device=None, dtype=None,
                     pos_emb_type="APE", rope_theta=100.0, rope_mixed_rotate=True, attn_type="standard"):
         if d_model is None:
-            d_model = N * numCh
+            _, image_width = N if isinstance(N, tuple) else (N, N)
+            d_model = image_width * numCh
         if dim_feedforward is None:
             dim_feedforward = int(d_model ** (3 / 2))
         transformers = nn.ModuleList([

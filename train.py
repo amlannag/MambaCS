@@ -156,7 +156,8 @@ def main():
     print(f"Output dir : {out_dir}")
     print(f"Device     : {device}")
 
-    print(f"Accel      : R = {cfg.acceleration_factors}  ({cfg.image_size // cfg.acceleration_factors[0]} cols sampled for R={cfg.acceleration_factors[0]})")
+    _, img_w = cfg.image_size if isinstance(cfg.image_size, tuple) else (cfg.image_size, cfg.image_size)
+    print(f"Accel      : R = {cfg.acceleration_factors}  ({img_w // cfg.acceleration_factors[0]} cols sampled for R={cfg.acceleration_factors[0]})")
 
     # ---- Datasets ----
     train_data_dir, val_data_dir = resolve_data_dirs(cfg)

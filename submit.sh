@@ -4,10 +4,10 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --job-name=dctnn_baseline
-#SBATCH --time=24:00:00
+#SBATCH --time=20:00:00
 #SBATCH --qos=gpu
 #SBATCH --partition=gpu_cuda
-#SBATCH --gres=gpu:a100:1
+#SBATCH --gres=gpu:1
 #SBATCH --account='a_ai_collab'
 #SBATCH -o logs/slurm-%j.output
 #SBATCH -e logs/slurm-%j.error

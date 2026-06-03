@@ -11,7 +11,7 @@ Encoder options for `encoders`:
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 
 @dataclass
@@ -43,7 +43,7 @@ class Config:
     kspace_key: str = "kspace"
 
     # All images are resized to image_size x image_size
-    image_size: int = 320
+    image_size: Tuple[int, int] = (640, 320)
 
     # Number of complex-valued image/k-space channels. Keep this at 1 for the
     # current complex-valued pipeline.

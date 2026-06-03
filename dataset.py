@@ -5,22 +5,21 @@ from torch.utils.data import Dataset
 
 
 def center_crop_kspace(kspace, N):
-    """Center-crop a (H, W) complex k-space array to (N, N)."""
+    """Center-crop a (H, W) complex k-space array to (H, N) — full height, center N columns."""
     H, W = kspace.shape
-    h0 = (H - N) // 2
     w0 = (W - N) // 2
-    return kspace[h0:h0 + N, w0:w0 + N]
+    return kspace[:, w0:w0 + N]
 
 
 class H5MRIDataset(Dataset):
     """
     Loads k-space slices from .h5 MRI files (fastMRI format).
     Each file contains kspace of shape (num_slices, H, W) complex64.
-    Returns one center-cropped slice as [1, N, N] complex64.
+    Returns one center-cropped slice as [1, H, N] complex64 — full height, center N columns.
 
     Args:
         data_dir (str):       Directory containing .h5 files
-        N (int):              Output spatial size — k-space is center-cropped to N×N
+        N (int):              Output width — k-space is center-cropped to H×N
         kspace_key (str):     HDF5 dataset key for raw k-space (default: 'kspace')
     """
 
@@ -49,5 +48,5 @@ class H5MRIDataset(Dataset):
         fpath, s = self.index[idx]
         with h5py.File(fpath, 'r') as f:
             kspace = f[self.kspace_key][s]            # (H, W) complex64
-        kspace = center_crop_kspace(kspace, self.N)   # (N, N) complex64
-        return torch.tensor(kspace, dtype=torch.complex64).unsqueeze(0)  # [1, N, N]
+        kspace = center_crop_kspace(kspace, self.N)   # (H, N) complex64
+        return torch.tensor(kspace, dtype=torch.complex64).unsqueeze(0)  # [1, H, N]
