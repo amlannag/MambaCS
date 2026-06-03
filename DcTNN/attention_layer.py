@@ -22,7 +22,7 @@ class BaseAttention(nn.Module):
         self.scale = self.head_dim ** -0.5
         self.qkv = nn.Linear(d_model, 3 * d_model, dtype=dtype)
         self.proj = nn.Linear(d_model, d_model, dtype=dtype)
-        self.attn_drop = nn.Dropout(dropout)
+        self.attn_drop = ComplexDropout(dropout) if dtype == torch.cfloat else nn.Dropout(dropout)
         self.use_rope = freqs_cis is not None
         if self.use_rope:
             self.register_buffer('freqs_cis', freqs_cis)
