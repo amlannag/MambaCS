@@ -42,7 +42,7 @@ _MODEL_KEYS = {
     "nhead_axial",
     "layer_no",
     "num_encoder_layers",
-    "k_space_learning",
+    "learning",
     "lambda_schedule",
     "pos_emb_type",
     "attn_type",
@@ -75,8 +75,11 @@ def _magnitude_image(tensor):
     return np.sqrt(array[0, 0] ** 2 + array[0, 1] ** 2)
 
 
-def _denormalize_image(img_norm, mean, std):
-    return torch.complex(img_norm.real * std + mean, img_norm.imag)
+def _denormalize_image(img_norm, mn, scale):
+    """Invert min-max normalisation. Handles complex (k-space) and real (image) tensors."""
+    if img_norm.is_complex():
+        return torch.complex(img_norm.real * scale + mn, img_norm.imag)
+    return img_norm * scale + mn
 
 
 def _save_reconstruction_figure(output_path, gt_img, zf_img, recon_img, title):
@@ -162,13 +165,17 @@ def reconstruct_dataset_samples(
     data_cfg = cfg_dict["data"]
     model_cfg = cfg_dict["model"]
     image_size = data_cfg["image_size"]
-    k_space_learning = bool(model_cfg.get("k_space_learning", True))
+    if isinstance(image_size, (tuple, list)):
+        img_h, img_w = image_size
+    else:
+        img_h = img_w = image_size
+    learning = model_cfg.get("learning", "k_space")
     if accel is None:
         accel = data_cfg.get("acceleration_factors", [8])[0]
 
     dataset = H5MRIDataset(
         resolve_data_dir(data_cfg, split),
-        N=image_size,
+        N=img_w,
         kspace_key=data_cfg.get("kspace_key", "kspace"),
     )
 
@@ -180,22 +187,24 @@ def reconstruct_dataset_samples(
 
     num_images = min(num_images, len(dataset))
     indices = np.linspace(0, len(dataset) - 1, num_images, dtype=int)
-    mask = generate_column_mask(image_size, accel, device)
+    mask = generate_column_mask((img_h, img_w), accel, device)
 
     results = []
     for sample_idx in indices:
         kspace_full = dataset[int(sample_idx)].unsqueeze(0).to(device)
-        model_input, kspace_norm, _, stats = simulate_undersampling(kspace_full, mask, k_space_learning)
+        model_input, kspace_norm, _, stats = simulate_undersampling(kspace_full, mask, learning)
         recon_norm = model(model_input, kspace_norm, mask)
 
-        mean = stats["mean"]
-        std = stats["std"]
+        mn    = stats["min"]
+        scale = stats["scale"]
         gt_img = ifft_2d(kspace_full)
-        zf_img = _denormalize_image(ifft_2d(kspace_norm), mean, std)
-        if k_space_learning:
-            recon_img = _denormalize_image(ifft_2d(recon_norm), mean, std)
+
+        if learning == "k_space":
+            zf_img    = _denormalize_image(ifft_2d(kspace_norm), mn, scale)
+            recon_img = _denormalize_image(ifft_2d(recon_norm), mn, scale)
         else:
-            recon_img = _denormalize_image(recon_norm, mean, std)
+            zf_img    = _denormalize_image(model_input, mn, scale)
+            recon_img = _denormalize_image(recon_norm, mn, scale)
 
         gt_np = _magnitude_image(gt_img)
         zf_np = _magnitude_image(zf_img)

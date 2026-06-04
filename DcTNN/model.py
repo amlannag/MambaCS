@@ -11,19 +11,17 @@ class cascadeNet(nn.Module):
     """
     Cascaded denoising network with data consistency after each stage.
 
-    When k_space_learning=True  — input/output are k-space [B, 1, N, N] complex;
-                                   KSpace_DC enforces consistency in k-space.
-    When k_space_learning=False — input/output are image domain [B, 1, N, N] complex;
-                                   FFT_DC converts to k-space internally for DC.
+    When learning="k_space" — encoder input/output is complex k-space; KSpace_DC used.
+    When learning="image"   — encoder input/output is real magnitude image; FFT_DC used.
 
     Args:
         N (int)                 Image size
         encList (list)          Encoder classes for each cascade stage
         encArgs (list)          Dicts of kwargs for each encoder
         lamb (bool)             Whether to use a learned per-stage lambda
-        k_space_learning (bool) True → k-space mode (default); False → image mode
+        learning (str)          "k_space" or "image"
     """
-    def __init__(self, N, encList, encArgs, lamb=True, k_space_learning=True):
+    def __init__(self, N, encList, encArgs, lamb=True, learning="k_space"):
         super().__init__()
         if lamb:
             self.lamb = nn.Parameter(torch.ones(len(encList)) * 0.5)
@@ -31,8 +29,8 @@ class cascadeNet(nn.Module):
             self.lamb = False
         self.scheduled_lamb = None
         self.N = N
-        self.k_space_learning = k_space_learning
-        self._dc_func = KSpace_DC if k_space_learning else FFT_DC
+        self.learning = learning
+        self._dc_func = KSpace_DC if learning == "k_space" else FFT_DC
 
         self.transformers = nn.ModuleList(
             enc(N, **args) for enc, args in zip(encList, encArgs)
@@ -43,10 +41,10 @@ class cascadeNet(nn.Module):
 
     def forward(self, xPrev, y, sampleMask):
         """
-        xPrev      : [B, 1, N, N] complex undersampled k-space (k_space_learning=True)
-                     [B, 1, N, N] complex zero-filled image    (k_space_learning=False)
-        y          : [B, 1, N, N] complex undersampled k-space (DC reference, always)
-        sampleMask : [N, N]
+        xPrev      : [B,1,H,W] complex undersampled k-space  (learning="k_space")
+                     [B,1,H,W] real magnitude undersampled    (learning="image")
+        y          : [B,1,H,W] complex k-space DC reference (always complex)
+        sampleMask : [H, W]
         Returns same domain as xPrev.
         """
         x = xPrev
@@ -59,4 +57,6 @@ class cascadeNet(nn.Module):
             else:
                 lamb_i = None
             x = self._dc_func(x + transformer(x), y, sampleMask, lamb_i)
+            if self.learning == "image":
+                x = x.real    # FFT_DC IFFTs to complex; extract real for next encoder
         return x

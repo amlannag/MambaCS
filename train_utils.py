@@ -93,7 +93,7 @@ def _build_model_impl(cfg):
         enc_list,
         enc_args,
         use_learned_lamb,
-        k_space_learning=cfg.k_space_learning,
+        learning=cfg.learning,
     )
 
 
@@ -117,7 +117,7 @@ def build_model_from_config_dict(cfg_dict):
     cfg.nhead_axial = model_cfg["nhead_axial"]
     cfg.layer_no = model_cfg["layer_no"]
     cfg.num_encoder_layers = model_cfg["num_encoder_layers"]
-    cfg.k_space_learning = bool(model_cfg.get("k_space_learning", True))
+    cfg.learning = model_cfg.get("learning", "k_space")
     cfg.lambda_schedule = model_cfg.get("lambda_schedule", "none")
     cfg.pos_emb_type = model_cfg.get("pos_emb_type", "APE")
     cfg.attn_type = model_cfg.get("attn_type", "standard")
@@ -127,31 +127,35 @@ def build_model_from_config_dict(cfg_dict):
 
 
 def generate_column_mask(image_size, accel, device):
-    H, W = image_size if isinstance(image_size, tuple) else (image_size, image_size)
+    H, W = image_size if isinstance(image_size, (tuple, list)) else (image_size, image_size)
     cols = torch.randperm(W, device=device)[: W // accel]
     mask = torch.zeros(H, W, device=device)
     mask[:, cols] = 1.0
     return mask
 
 
-def simulate_undersampling(kspace_full, mask, k_space_learning=True):
-    kspace_us = kspace_full * mask
-    img_us = ifft_2d(kspace_us)
-    real = img_us.real
-    mean = real.mean(dim=(-2, -1), keepdim=True)
-    std = real.std(dim=(-2, -1), keepdim=True).clamp(min=1e-8)
+def simulate_undersampling(kspace_full, mask, learning="k_space"):
+    kspace_us  = kspace_full * mask
+    img_us     = ifft_2d(kspace_us)               # complex zero-filled image
+    img_gt_mag = torch.abs(ifft_2d(kspace_full))  # GT magnitude image (always needed)
 
-    img_norm = torch.complex((img_us.real - mean) / std, img_us.imag)
-    kspace_norm = fft_2d(img_norm)
+    if learning == "k_space":
+        real  = img_us.real
+        mn    = real.amin(dim=(-2, -1), keepdim=True)
+        scale = (real.amax(dim=(-2, -1), keepdim=True) - mn).clamp(min=1e-8)
 
-    if k_space_learning:
+        img_norm    = torch.complex((img_us.real - mn) / scale, img_us.imag)
+        kspace_norm = fft_2d(img_norm)
         model_input = kspace_norm
-        img_gt_full = ifft_2d(kspace_full)
-        img_gt_norm = torch.complex((img_gt_full.real - mean) / std, img_gt_full.imag)
-        gt_norm = fft_2d(img_gt_norm)
-    else:
-        model_input = img_norm
-        img_gt_full = ifft_2d(kspace_full)
-        gt_norm = torch.complex((img_gt_full.real - mean) / std, img_gt_full.imag)
 
-    return model_input, kspace_norm, gt_norm, {"mean": mean, "std": std}
+    else:  # "image"
+        img_us_mag = torch.abs(img_us)
+        mn         = img_us_mag.amin(dim=(-2, -1), keepdim=True)
+        scale      = (img_us_mag.amax(dim=(-2, -1), keepdim=True) - mn).clamp(min=1e-8)
+
+        model_input = (img_us_mag - mn) / scale
+        kspace_norm = fft_2d(model_input)          # DC reference: FFT of real magnitude input
+
+    gt_norm = (img_gt_mag - mn) / scale            # always real magnitude in [0, 1]
+
+    return model_input, kspace_norm, gt_norm, {"min": mn, "scale": scale}

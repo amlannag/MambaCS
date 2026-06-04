@@ -75,8 +75,8 @@ class Config:
     layer_no: int = 1
     num_encoder_layers: int = 2
     learned_lambda: bool = True
-    # True → model operates in k-space (default); False → image domain
-    k_space_learning: bool = True
+    # Domain the model operates in: "k_space" or "image"
+    learning: str = "k_space"
 
     lambda_schedule: str = "none"
     lambda_start: float = 1.0

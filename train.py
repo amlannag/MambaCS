@@ -18,7 +18,9 @@ from dataset import H5MRIDataset
 from config import Config
 from train_config import EXPERIMENTS
 from DcTNN.lambda_scheduler import LambdaScheduler
-from train_utils import build_model, generate_column_mask, psnr, resolve_data_dirs, simulate_undersampling
+from train_utils import build_model, generate_column_mask, resolve_data_dirs, simulate_undersampling
+from loss import MagnitudeImageLoss
+from DcTNN.dc import ifft_2d
 
 
 def build_cfg(exp_idx: int) -> Config:
@@ -90,7 +92,7 @@ def train_one_epoch(model, loader, accel_factors, image_size, optimizer, criteri
 
         with torch.no_grad():
             model_input, kspace_norm, gt_norm, _ = simulate_undersampling(
-                kspace_full, mask, cfg.k_space_learning)
+                kspace_full, mask, cfg.learning)
 
         optimizer.zero_grad()
         recon = model(model_input, kspace_norm, mask)
@@ -116,11 +118,12 @@ def validate(model, loader, accel_factors, image_size, criterion, device):
         mask = generate_column_mask(image_size, R, device)
 
         model_input, kspace_norm, gt_norm, _ = simulate_undersampling(
-            kspace_full, mask, cfg.k_space_learning)
+            kspace_full, mask, cfg.learning)
         recon = model(model_input, kspace_norm, mask)
 
+        recon_mag = torch.abs(ifft_2d(recon)) if recon.is_complex() else recon
         total_loss += criterion(recon, gt_norm).item()
-        total_psnr += psnr(recon, gt_norm).item()
+        total_psnr += psnr(recon_mag, gt_norm).item()
 
     n = len(loader)
     return total_loss / n, total_psnr / n
@@ -191,9 +194,7 @@ def main():
         T_max=cfg.epochs,
         eta_min=cfg.lr * 1e-2,
     )
-    def criterion(recon, target):
-        """Mean squared magnitude error over all elements."""
-        return torch.mean(torch.abs(recon - target) ** 2)
+    criterion = MagnitudeImageLoss()
 
     # ---- Resume ----
     start_epoch   = 0

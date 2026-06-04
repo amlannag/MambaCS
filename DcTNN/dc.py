@@ -35,7 +35,7 @@ def FFT_DC(x, y, mask, lamb, norm='ortho'):
     else:
         z = (1 - mask) * z + mask * (z + lamb * cy) / (1 + lamb)
 
-    return torch.fft.ifft2(z, norm=norm)
+    return torch.abs(torch.fft.ifft2(z, norm=norm))
 
 
 def KSpace_DC(x, y, mask, lamb):
