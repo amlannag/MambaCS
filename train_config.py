@@ -11,16 +11,6 @@ Index  Name
 """
 
 EXPERIMENTS = [
-    # 0 — original experiment (key updated: k_space_learning → learning)
-    {
-        "prefix": "FullComplex",
-        "name": "axial_rope_axial_complexattn",
-        "encoders": ["axial", "axial", "axial"],
-        "learning": "k_space",
-        "pos_emb_type": "Rope-Axial",
-        "attn_type": "complex",
-    },
-
     # 1 — k-space learning with MagnitudeImageLoss
     {
         "prefix": "MagLoss",
@@ -30,10 +20,6 @@ EXPERIMENTS = [
         "pos_emb_type": "Rope-Axial",
         "attn_type": "complex",
     },
-
-    # 2 — image-domain learning with MagnitudeImageLoss
-    #     Real-valued pipeline: encoder receives magnitude image, DC uses FFT of input.
-    #     Standard attention used (encoder input is real float, not complex).
     {
         "prefix": "MagLoss",
         "name": "image_axial_rope_axial",
