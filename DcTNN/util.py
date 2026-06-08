@@ -91,7 +91,7 @@ class FeedForward(nn.Module):
 
 
 def get_to_embedding(tokenizer_type, patch_height=None, patch_width=None, patch_dim=None, d_model=None,
-                     image_height=None, image_width=None, numCh=None, is_complex=False):
+                     image_height=None, image_width=None, numCh=None, row_stride=1, is_complex=False):
     dtype = torch.cfloat if is_complex else None
     if tokenizer_type == "patch":
         return nn.Sequential(
@@ -106,8 +106,8 @@ def get_to_embedding(tokenizer_type, patch_height=None, patch_width=None, patch_
     elif tokenizer_type == "axial":
         return (
             nn.Sequential(
-                Rearrange('b c h w -> b h (w c)'),
-                nn.Linear(image_width * numCh, d_model, dtype=dtype),
+                Rearrange('b c (h p) w -> b h (p w c)', p=row_stride),
+                nn.Linear(row_stride * image_width * numCh, d_model, dtype=dtype),
             ),
             nn.Sequential(
                 Rearrange('b c h w -> b w (h c)'),
@@ -119,7 +119,7 @@ def get_to_embedding(tokenizer_type, patch_height=None, patch_width=None, patch_
 
 
 def get_from_embedding(tokenizer_type, patch_height=None, patch_width=None, grid_h=None, numCh=None,
-                       image_height=None, image_width=None):
+                       image_height=None, image_width=None, row_stride=1):
     if tokenizer_type == "patch":
         return Rearrange('b (h w) (p1 p2 c) -> b c (h p1) (w p2)',
                          c=numCh, h=grid_h, p1=patch_height, p2=patch_width)
@@ -128,7 +128,7 @@ def get_from_embedding(tokenizer_type, patch_height=None, patch_width=None, grid
                          k1=patch_height, k2=patch_width, h=grid_h, c=numCh)
     elif tokenizer_type == "axial":
         return (
-            Rearrange('b h (w c) -> b c h w', c=numCh),
+            Rearrange('b h (p w c) -> b c (h p) w', p=row_stride, w=image_width, c=numCh),
             Rearrange('b w (h c) -> b c h w', c=numCh),
         )
     else:
@@ -136,7 +136,7 @@ def get_from_embedding(tokenizer_type, patch_height=None, patch_width=None, grid
 
 
 def get_mlp_head(tokenizer_type, d_model, patch_dim=None, patch_height=None, patch_width=None,
-                 grid_h=None, numCh=None, image_height=None, image_width=None, is_complex=False):
+                 grid_h=None, numCh=None, image_height=None, image_width=None, row_stride=1, is_complex=False):
     norm = ComplexLayerNorm if is_complex else nn.LayerNorm
     dtype = torch.cfloat if is_complex else None
     if tokenizer_type in ("patch", "kaleidoscope"):
@@ -147,9 +147,9 @@ def get_mlp_head(tokenizer_type, d_model, patch_dim=None, patch_height=None, pat
             from_emb,
         )
     elif tokenizer_type == "axial":
-        h_from, v_from = get_from_embedding("axial", numCh=numCh)
+        h_from, v_from = get_from_embedding("axial", numCh=numCh, image_width=image_width, row_stride=row_stride)
         return (
-            nn.Sequential(norm(d_model), nn.Linear(d_model, image_width * numCh, dtype=dtype), h_from),
+            nn.Sequential(norm(d_model), nn.Linear(d_model, row_stride * image_width * numCh, dtype=dtype), h_from),
             nn.Sequential(norm(d_model), nn.Linear(d_model, image_height * numCh, dtype=dtype), v_from),
         )
     else:

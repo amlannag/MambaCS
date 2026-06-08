@@ -35,6 +35,7 @@ _ENCODER_ARGS = {
             rope_theta=cfg.rope_theta,
             rope_mixed_rotate=cfg.rope_mixed_rotate,
             attn_type=cfg.attn_type,
+            row_stride=cfg.axial_row_stride,
         ),
     ),
     "kaleidoscope": lambda cfg: (
@@ -128,9 +129,34 @@ def build_model_from_config_dict(cfg_dict):
 
 def generate_column_mask(image_size, accel, device):
     H, W = image_size if isinstance(image_size, (tuple, list)) else (image_size, image_size)
-    cols = torch.randperm(W, device=device)[: W // accel]
+
+    n_total = W // accel
+    beta  = 0.08 if accel <= 4 else 0.04   # 8% ACS for R<=4, 4% for R>4
+    n_acs = min(round(beta * W), n_total)
+    n_outer = n_total - n_acs
+
+    center = W // 2
+    acs_start = center - n_acs // 2
+    acs_cols = torch.arange(acs_start, acs_start + n_acs, device=device)
+
     mask = torch.zeros(H, W, device=device)
-    mask[:, cols] = 1.0
+    mask[:, acs_cols] = 1.0
+
+    if n_outer > 0:
+        # Build outer column indices (everything outside the ACS band)
+        all_cols = torch.arange(W, dtype=torch.float32, device=device)
+        outer_mask = torch.ones(W, dtype=torch.bool, device=device)
+        outer_mask[acs_start : acs_start + n_acs] = False
+        outer_cols = all_cols[outer_mask]
+
+        # Gaussian weights — higher probability near k-space centre
+        sigma = W / 4.0
+        weights = torch.exp(-0.5 * ((outer_cols - center) / sigma) ** 2)
+        weights = weights / weights.sum()
+
+        sampled_idx = torch.multinomial(weights, min(n_outer, len(outer_cols)), replacement=False)
+        mask[:, outer_cols[sampled_idx].long()] = 1.0
+
     return mask
 
 

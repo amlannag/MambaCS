@@ -69,7 +69,8 @@ class Config:
     #   ["axial", "kaleidoscope", "patch", "patch"] — 4-stage deeper model
     encoders: List[str] = field(default_factory=lambda: ["patch", "patch", "patch"])
 
-    patch_size: int = 16
+    patch_size: tuple = (16, 32)
+    axial_row_stride: int = 2
     nhead_patch: int = 8
     nhead_axial: int = 8
     layer_no: int = 1

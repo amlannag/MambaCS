@@ -112,7 +112,7 @@ class axialEncoder(nn.Module):
     def __init__(self, image_size, numCh=1, d_model=512, nhead=8, num_layers=6, dim_feedforward=None,
                     dropout=0.1, activation='relu', layer_norm_eps=1e-05, batch_first=True,
                     device=None, dtype=None, norm=None,
-                    pos_emb_type="APE", rope_theta=100.0, attn_type="standard"):
+                    pos_emb_type="APE", rope_theta=100.0, attn_type="standard", row_stride=1):
         super().__init__()
 
         self.pos_emb_type = pos_emb_type
@@ -120,14 +120,15 @@ class axialEncoder(nn.Module):
         self.is_complex = attn_type in _COMPLEX_ATTN_TYPES
 
         image_height, image_width = pair(image_size)
+        h_tokens = image_height // row_stride  # horizontal token count after row grouping
 
         self.to_horizontal_embedding, self.to_vertical_embedding = get_to_embedding(
             "axial", image_height=image_height, image_width=image_width, numCh=numCh, d_model=d_model,
-            is_complex=self.is_complex)
+            row_stride=row_stride, is_complex=self.is_complex)
 
         self.horizontal_mlp_head, self.vertical_mlp_head = get_mlp_head(
             "axial", d_model, numCh=numCh, image_height=image_height, image_width=image_width,
-            is_complex=self.is_complex)
+            row_stride=row_stride, is_complex=self.is_complex)
 
         self.dropout = ComplexDropout(dropout) if self.is_complex else nn.Dropout(dropout)
 
@@ -139,11 +140,11 @@ class axialEncoder(nn.Module):
             freqs_h = None
             freqs_v = None
             ape_dtype = torch.cfloat if self.is_complex else None
-            self.horizontal_pos_embedding = nn.Parameter(torch.randn(1, image_width, d_model, dtype=ape_dtype))
-            self.vertical_pos_embedding = nn.Parameter(torch.randn(1, image_height, d_model, dtype=ape_dtype))
+            self.horizontal_pos_embedding = nn.Parameter(torch.randn(1, h_tokens,     d_model, dtype=ape_dtype))
+            self.vertical_pos_embedding   = nn.Parameter(torch.randn(1, image_width,  d_model, dtype=ape_dtype))
 
         elif pos_emb_type in ("Rope-Axial", "Rope-Mixed"):
-            freqs_h = cis_fn(dim=head_dim, end_x=image_height, end_y=1, theta=rope_theta)
+            freqs_h = cis_fn(dim=head_dim, end_x=h_tokens,    end_y=1, theta=rope_theta)
             freqs_v = cis_fn(dim=head_dim, end_x=image_width, end_y=1, theta=rope_theta)
 
         h_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation,
