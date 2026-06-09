@@ -12,27 +12,14 @@ Index  Name
 """
 
 EXPERIMENTS = [
-    # 0 — k-space axial
-    {
-        "prefix": "DcTNN",
-        "name": "kspace_axial",
-        "encoders": ["axial", "axial", "axial"],
-        "learning": "k_space",
-        "pos_emb_type": "Rope-Axial",
-        "attn_type": "complex",
-        "patch_size": (16, 32),
-        "axial_row_stride": 2,
-        "acceleration_factors": [8],
-    },
     # 1 — image domain axial
     {
-        "prefix": "DcTNN",
+        "prefix": "DcTNN_fixed",
         "name": "image_axial",
         "encoders": ["axial", "axial", "axial"],
         "learning": "image",
         "pos_emb_type": "Rope-Axial",
         "attn_type": "standard",
-        "patch_size": (16, 32),
         "axial_row_stride": 2,
         "acceleration_factors": [8],
     },

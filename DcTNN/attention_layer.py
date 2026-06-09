@@ -20,6 +20,7 @@ class BaseAttention(nn.Module):
         self.nhead = nhead
         self.head_dim = d_model // nhead
         self.scale = self.head_dim ** -0.5
+        self.dropout_p = dropout
         self.qkv = nn.Linear(d_model, 3 * d_model, dtype=dtype)
         self.proj = nn.Linear(d_model, d_model, dtype=dtype)
         self.attn_drop = ComplexDropout(dropout) if dtype == torch.cfloat else nn.Dropout(dropout)
@@ -51,9 +52,9 @@ class MultiHeadAttention(BaseAttention):
         super().__init__(d_model, nhead, dropout, freqs_cis, dtype=None)
 
     def _attend(self, q, k, v):
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = self.attn_drop(attn.softmax(dim=-1))
-        return attn @ v
+        return F.scaled_dot_product_attention(
+            q,k,v,dropout_p=self.dropout_p if self.training else 0.0,
+        )
 
 
 class ComplexMultiHeadAttention(BaseAttention):

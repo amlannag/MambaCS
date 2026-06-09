@@ -143,19 +143,14 @@ def generate_column_mask(image_size, accel, device):
     mask[:, acs_cols] = 1.0
 
     if n_outer > 0:
-        # Build outer column indices (everything outside the ACS band)
-        all_cols = torch.arange(W, dtype=torch.float32, device=device)
+        # Uniform random sampling over outer columns — matches fastMRI RandomMaskFunc
         outer_mask = torch.ones(W, dtype=torch.bool, device=device)
         outer_mask[acs_start : acs_start + n_acs] = False
-        outer_cols = all_cols[outer_mask]
+        outer_cols = torch.where(outer_mask)[0]
 
-        # Gaussian weights — higher probability near k-space centre
-        sigma = W / 4.0
-        weights = torch.exp(-0.5 * ((outer_cols - center) / sigma) ** 2)
-        weights = weights / weights.sum()
-
-        sampled_idx = torch.multinomial(weights, min(n_outer, len(outer_cols)), replacement=False)
-        mask[:, outer_cols[sampled_idx].long()] = 1.0
+        prob = n_outer / len(outer_cols)
+        selected = torch.rand(len(outer_cols), device=device) < prob
+        mask[:, outer_cols[selected]] = 1.0
 
     return mask
 

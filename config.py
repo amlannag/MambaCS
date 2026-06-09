@@ -55,8 +55,8 @@ class Config:
     # Legacy split controls. Ignored when val_data_dir is set.
     val_fraction: float = 0.1
     seed: int = 42
-    # Cap validation set size. None = use full val set.
-    max_val_samples: int = 1000
+    # Cap validation set size by number of .h5 files. None = use full val set.
+    max_val_files: Optional[int] = 15
 
     # ---------------------------------------------------------------------------
     # Model architecture

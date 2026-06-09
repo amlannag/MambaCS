@@ -167,26 +167,23 @@ def main():
     train_ds = H5MRIDataset(train_data_dir, N=img_w,
                             kspace_key=cfg.kspace_key)
     val_ds   = H5MRIDataset(val_data_dir, N=img_w,
-                            kspace_key=cfg.kspace_key)
+                            kspace_key=cfg.kspace_key,
+                            max_files=cfg.max_val_files)
 
     train_loader = DataLoader(train_ds, batch_size=cfg.batch_size,
                               shuffle=True,  num_workers=cfg.num_workers,
-                              pin_memory=True)
+                              pin_memory=True,
+                              persistent_workers=cfg.num_workers > 0)
 
-    if cfg.max_val_samples and len(val_ds) > cfg.max_val_samples:
-        val_subset = torch.utils.data.Subset(
-            val_ds, torch.randperm(len(val_ds), generator=torch.Generator().manual_seed(cfg.seed))[:cfg.max_val_samples].tolist()
-        )
-        print(f"Val capped   : {cfg.max_val_samples}/{len(val_ds)} samples")
-    else:
-        val_subset = val_ds
-
-    val_loader = DataLoader(val_subset, batch_size=cfg.batch_size,
+    val_loader = DataLoader(val_ds, batch_size=cfg.batch_size,
                             shuffle=False, num_workers=cfg.num_workers,
-                            pin_memory=True)
+                            pin_memory=True,
+                            persistent_workers=cfg.num_workers > 0)
 
     print(f"Train dir   : {train_data_dir}")
     print(f"Val dir     : {val_data_dir}")
+    if cfg.max_val_files is not None:
+        print(f"Val files   : {len(val_ds.h5_files)} capped")
     print(f"Train / Val : {len(train_ds)} / {len(val_ds)} samples")
 
     # ---- Model ----
