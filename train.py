@@ -91,12 +91,12 @@ def train_one_epoch(model, loader, accel_factors, image_size, optimizer, criteri
         mask = generate_column_mask(image_size, R, device)
 
         with torch.no_grad():
-            model_input, kspace_norm, gt_norm, _ = simulate_undersampling(
+            model_input, DC_input, gt, _ = simulate_undersampling(
                 kspace_full, mask, cfg.learning)
 
         optimizer.zero_grad()
-        recon = model(model_input, kspace_norm, mask)
-        loss  = criterion(recon, gt_norm)
+        recon = model(model_input, DC_input, mask)
+        loss  = criterion(recon, gt)
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.grad_clip)
         optimizer.step()
@@ -117,13 +117,13 @@ def validate(model, loader, accel_factors, image_size, criterion, device):
         R    = accel_factors[np.random.randint(len(accel_factors))]
         mask = generate_column_mask(image_size, R, device)
 
-        model_input, kspace_norm, gt_norm, _ = simulate_undersampling(
+        model_input, DC_input, gt, _ = simulate_undersampling(
             kspace_full, mask, cfg.learning)
-        recon = model(model_input, kspace_norm, mask)
+        recon = model(model_input, DC_input, mask)
 
         recon_mag = torch.abs(ifft_2d(recon)) if recon.is_complex() else recon
-        total_loss += criterion(recon, gt_norm).item()
-        total_psnr += psnr(recon_mag, gt_norm).item()
+        total_loss += criterion(recon, gt).item()
+        total_psnr += psnr(recon_mag, gt).item()
 
     n = len(loader)
     return total_loss / n, total_psnr / n
