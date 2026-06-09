@@ -172,9 +172,18 @@ def main():
     train_loader = DataLoader(train_ds, batch_size=cfg.batch_size,
                               shuffle=True,  num_workers=cfg.num_workers,
                               pin_memory=True)
-    val_loader   = DataLoader(val_ds,   batch_size=cfg.batch_size,
-                              shuffle=False, num_workers=cfg.num_workers,
-                              pin_memory=True)
+
+    if cfg.max_val_samples and len(val_ds) > cfg.max_val_samples:
+        val_subset = torch.utils.data.Subset(
+            val_ds, torch.randperm(len(val_ds), generator=torch.Generator().manual_seed(cfg.seed))[:cfg.max_val_samples].tolist()
+        )
+        print(f"Val capped   : {cfg.max_val_samples}/{len(val_ds)} samples")
+    else:
+        val_subset = val_ds
+
+    val_loader = DataLoader(val_subset, batch_size=cfg.batch_size,
+                            shuffle=False, num_workers=cfg.num_workers,
+                            pin_memory=True)
 
     print(f"Train dir   : {train_data_dir}")
     print(f"Val dir     : {val_data_dir}")

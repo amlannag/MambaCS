@@ -180,8 +180,7 @@ def simulate_undersampling(kspace_full, mask, learning="k_space"):
         scale      = (img_us_mag.amax(dim=(-2, -1), keepdim=True) - mn).clamp(min=1e-8)
 
         model_input = (img_us_mag - mn) / scale
-        kspace_norm = fft_2d(model_input)          # DC reference: FFT of real magnitude input
-
-    gt_norm = (img_gt_mag - mn) / scale            # always real magnitude in [0, 1]
-
+        kspace_norm = fft_2d(model_input)     
+             
+    gt_norm = (img_gt_mag - mn) / scale       
     return model_input, kspace_norm, gt_norm, {"min": mn, "scale": scale}

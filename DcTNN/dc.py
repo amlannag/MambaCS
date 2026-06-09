@@ -18,24 +18,24 @@ def _to_complex_channel(x):
 
 def fft_2d(input, norm='ortho', dim=(-2, -1)):
     x = _to_complex_channel(input)
-    return torch.fft.fft2(x, norm=norm, dim=dim)
+    return torch.fft.fftshift(torch.fft.fft2(torch.fft.ifftshift(x, dim=dim), norm=norm, dim=dim), dim=dim)
 
 def ifft_2d(input, norm='ortho', dim=(-2, -1)):
     x = _to_complex_channel(input)
-    return torch.fft.ifft2(x, dim=dim, norm=norm)
+    return torch.fft.fftshift(torch.fft.ifft2(torch.fft.ifftshift(x, dim=dim), norm=norm, dim=dim), dim=dim)
 
 
 def FFT_DC(x, y, mask, lamb, norm='ortho'):
     x_complex = _to_complex_channel(x)
     cy = _to_complex_channel(y)
-    z = torch.fft.fft2(x_complex, norm=norm)
+    z = fft_2d(x_complex, norm=norm)
 
     if lamb is None:
         z = (1 - mask) * z + mask * cy
     else:
         z = (1 - mask) * z + mask * (z + lamb * cy) / (1 + lamb)
 
-    return torch.abs(torch.fft.ifft2(z, norm=norm))
+    return torch.abs(ifft_2d(z, norm=norm))
 
 
 def KSpace_DC(x, y, mask, lamb):
