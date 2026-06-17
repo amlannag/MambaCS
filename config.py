@@ -34,28 +34,17 @@ class Config:
 
     # Folder of training .h5 MRI files (fastMRI format, one file per scan)
     data_dir: str = "/scratch/user/uqanag/fastmri/singlecoil_train"
-
-    # Folder of validation .h5 MRI files. When set, validation is loaded
-    # directly from this directory instead of splitting data_dir.
     val_data_dir: Optional[str] = "/scratch/user/uqanag/fastmri/singlecoil_val"
 
-    # HDF5 dataset key for raw k-space within each .h5 file
     kspace_key: str = "kspace"
+    image_size: Tuple[int, int] = (320, 320)
 
-    # All images are resized to image_size x image_size
-    image_size: Tuple[int, int] = (640, 320)
-
-    # Number of complex-valued image/k-space channels. Keep this at 1 for the
-    # current complex-valued pipeline.
     num_channels: int = 1
 
-    # Which acceleration factors to randomly draw from during training
     acceleration_factors: List[int] = field(default_factory=lambda: [8])
 
-    # Legacy split controls. Ignored when val_data_dir is set.
     val_fraction: float = 0.1
     seed: int = 42
-    # Cap validation set size by number of .h5 files. None = use full val set.
     max_val_files: Optional[int] = 15
 
     # ---------------------------------------------------------------------------
@@ -71,8 +60,8 @@ class Config:
     #   ["axial", "kaleidoscope", "patch", "patch"] — 4-stage deeper model
     encoders: List[str] = field(default_factory=lambda: ["patch", "patch", "patch"])
 
-    patch_size: tuple = (16, 32)
-    axial_row_stride: int = 2
+    patch_size: tuple = (16, 16)
+    axial_row_stride: int = 1
     nhead_patch: int = 8
     nhead_axial: int = 8
     layer_no: int = 1
@@ -89,7 +78,7 @@ class Config:
     pos_emb_type: str = "APE"
     # Attention implementation used inside transformer blocks.
     # Options: "standard", "complex", "real_valued", "phase_aware"
-    attn_type: str = "complex"
+    attn_type: str = "standard"
     # Base frequency for RoPE (ignored when pos_emb_type == "APE")
     rope_theta: float = 100.0
     # Randomly rotate initial 2D frequencies in Rope-Mixed (ignored otherwise)

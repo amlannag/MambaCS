@@ -159,14 +159,14 @@ def main():
     print(f"Output dir : {out_dir}")
     print(f"Device     : {device}")
 
-    _, img_w = cfg.image_size if isinstance(cfg.image_size, tuple) else (cfg.image_size, cfg.image_size)
+    img_h, img_w = cfg.image_size if isinstance(cfg.image_size, tuple) else (cfg.image_size, cfg.image_size)
     print(f"Accel      : R = {cfg.acceleration_factors}  ({img_w // cfg.acceleration_factors[0]} cols sampled for R={cfg.acceleration_factors[0]})")
 
     # ---- Datasets ----
     train_data_dir, val_data_dir = resolve_data_dirs(cfg)
-    train_ds = H5MRIDataset(train_data_dir, N=img_w,
+    train_ds = H5MRIDataset(train_data_dir, image_size=cfg.image_size,
                             kspace_key=cfg.kspace_key)
-    val_ds   = H5MRIDataset(val_data_dir, N=img_w,
+    val_ds   = H5MRIDataset(val_data_dir, image_size=cfg.image_size,
                             kspace_key=cfg.kspace_key,
                             max_files=cfg.max_val_files)
 

@@ -175,7 +175,7 @@ def reconstruct_dataset_samples(
 
     dataset = H5MRIDataset(
         resolve_data_dir(data_cfg, split),
-        N=img_w,
+        image_size=image_size,
         kspace_key=data_cfg.get("kspace_key", "kspace"),
     )
 

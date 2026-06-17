@@ -4,8 +4,8 @@ Shared helpers used by training and inference.
 
 import torch
 
-from DcTNN.dc import fft_2d, ifft_2d
 from DcTNN.model import TokenVIT, axVIT, cascadeNet
+import normalizer as _norm
 
 
 def resolve_data_dirs(cfg):
@@ -155,32 +155,19 @@ def generate_column_mask(image_size, accel, device):
     return mask
 
 
-def simulate_undersampling(kspace_full, mask, learning="k_space"):
-    kspace_us = kspace_full * mask
-    img_us    = ifft_2d(kspace_us)    # complex zero-filled image  [B,1,H,W]
-    img_gt    = ifft_2d(kspace_full)  # complex GT image           [B,1,H,W]
+_NORMALIZERS = {
+    "zscore": _norm.zscore,
+    None:     _norm.none,
+    "none":   _norm.none,
+}
 
-    # Z-score normalise real and imaginary components separately,
-    # statistics computed from the zero-filled image
-    mean_r = img_us.real.mean(dim=(-2, -1), keepdim=True)
-    std_r  = img_us.real.std( dim=(-2, -1), keepdim=True).clamp(min=1e-8)
-    mean_i = img_us.imag.mean(dim=(-2, -1), keepdim=True)
-    std_i  = img_us.imag.std( dim=(-2, -1), keepdim=True).clamp(min=1e-8)
 
-    img_us_norm = torch.complex((img_us.real - mean_r) / std_r,
-                                (img_us.imag - mean_i) / std_i)
-    img_gt_norm = torch.complex((img_gt.real - mean_r) / std_r,
-                                (img_gt.imag - mean_i) / std_i)
-
-    gt     = torch.abs(img_gt_norm)   # real magnitude GT in normalised space
-    metric = {"mean_r": mean_r, "std_r": std_r,
-              "mean_i": mean_i, "std_i": std_i}
-
-    if learning == "k_space":
-        DC_input    = fft_2d(img_us_norm)  # normalised measured k-space
-        model_input = DC_input
-    else:  # "image"
-        model_input = torch.abs(img_us_norm)  # real normalised magnitude
-        DC_input    = fft_2d(model_input)     # k-space of real magnitude for DC
-
-    return model_input, DC_input, gt, metric
+def simulate_undersampling(kspace_full, mask, learning="k_space", norm="zscore"):
+    """
+    norm="zscore" : z-score normalise real/imag separately using undersampled image stats
+    norm=None     : no normalisation — tensors left in raw k-space units
+    """
+    fn = _NORMALIZERS.get(norm)
+    if fn is None:
+        raise ValueError(f"Unknown norm '{norm}'. Choose from: {list(_NORMALIZERS)}")
+    return fn(kspace_full, mask, learning)

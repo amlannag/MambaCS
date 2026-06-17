@@ -14,13 +14,12 @@ Index  Name
 EXPERIMENTS = [
     # 1 — image domain axial
     {
-        "prefix": "DcTNN_fixed",
-        "name": "image_axial",
+        "prefix": "DcTNN",
+        "name": "image_axial_320x320_knee_4",
         "encoders": ["axial", "axial", "axial"],
         "learning": "image",
         "pos_emb_type": "Rope-Axial",
         "attn_type": "standard",
-        "axial_row_stride": 2,
-        "acceleration_factors": [8],
+        "acceleration_factors": [4],
     },
 ]
