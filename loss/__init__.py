@@ -1,3 +1,3 @@
-from .losses import MagnitudeImageLoss
+from .losses import MagnitudeImageLoss, SSIMLoss
 
-__all__ = ["MagnitudeImageLoss"]
+__all__ = ["MagnitudeImageLoss", "SSIMLoss"]

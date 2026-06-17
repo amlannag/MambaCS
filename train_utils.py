@@ -14,11 +14,13 @@ def resolve_data_dirs(cfg):
     return cfg.data_dir, cfg.data_dir
 
 
-def psnr(pred, target, max_val=1.0):
+def psnr(pred, target, max_val=None):
+    """PSNR between pred and target. max_val defaults to target.max()."""
     mse = torch.mean(torch.abs(pred - target) ** 2)
     if mse == 0:
         return torch.tensor(float("inf"))
-    return 20.0 * torch.log10(torch.tensor(max_val, device=pred.device) / torch.sqrt(mse))
+    mv = target.max() if max_val is None else torch.tensor(max_val, device=pred.device)
+    return 20.0 * torch.log10(mv.to(pred.device) / torch.sqrt(mse))
 
 
 _ENCODER_ARGS = {

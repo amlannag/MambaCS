@@ -70,6 +70,9 @@ class Config:
     # Domain the model operates in: "k_space" or "image"
     learning: str = "k_space"
 
+    # Normalisation applied during undersampling simulation: "zscore" or None
+    norm: str = "zscore"
+
     lambda_schedule: str = "none"
     lambda_start: float = 1.0
     lambda_end: float = 0.1

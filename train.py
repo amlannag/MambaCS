@@ -19,7 +19,7 @@ from config import Config
 from train_config import EXPERIMENTS
 from DcTNN.lambda_scheduler import LambdaScheduler
 from train_utils import build_model, generate_column_mask, resolve_data_dirs, simulate_undersampling
-from loss import MagnitudeImageLoss
+from loss import MagnitudeImageLoss, SSIMLoss
 from DcTNN.dc import ifft_2d
 
 
@@ -49,14 +49,13 @@ def experiment_dir(cfg):
     folder = f"{cfg.prefix}_{cfg.name}"
     return os.path.join(cfg.output_dir, folder)
 
-def psnr(pred, target, max_val=1.0):
-    """
-    Calculate the Peak Signal-to-Noise Ratio (PSNR) between prediction and target.
-    """
+def psnr(pred, target, max_val=None):
+    """PSNR between pred and target. max_val defaults to target.max()."""
     mse = torch.mean(torch.abs(pred - target) ** 2)
     if mse == 0:
         return torch.tensor(float('inf'))
-    return 20.0 * torch.log10(torch.tensor(max_val, device=pred.device) / torch.sqrt(mse))
+    mv = target.max() if max_val is None else torch.tensor(max_val, device=pred.device)
+    return 20.0 * torch.log10(mv.to(pred.device) / torch.sqrt(mse))
 
 def config_to_dict(cfg):
     """
@@ -83,7 +82,8 @@ def append_metrics(path, record):
 
 def train_one_epoch(model, loader, accel_factors, image_size, optimizer, criterion, device):
     model.train()
-    total_loss = 0.0
+    total_ssim = 0.0
+    total_psnr = 0.0
 
     for kspace_full in loader:
         kspace_full = kspace_full.to(device)
@@ -92,7 +92,7 @@ def train_one_epoch(model, loader, accel_factors, image_size, optimizer, criteri
 
         with torch.no_grad():
             model_input, DC_input, gt, _ = simulate_undersampling(
-                kspace_full, mask, cfg.learning)
+                kspace_full, mask, cfg.learning, cfg.norm)
 
         optimizer.zero_grad()
         recon = model(model_input, DC_input, mask)
@@ -101,15 +101,19 @@ def train_one_epoch(model, loader, accel_factors, image_size, optimizer, criteri
         nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.grad_clip)
         optimizer.step()
 
-        total_loss += loss.item()
+        with torch.no_grad():
+            recon_mag = torch.abs(ifft_2d(recon)) if recon.is_complex() else recon
+            total_ssim += (1.0 - loss.item())
+            total_psnr += psnr(recon_mag, gt).item()
 
-    return total_loss / len(loader)
+    n = len(loader)
+    return total_ssim / n, total_psnr / n
 
 
 @torch.no_grad()
 def validate(model, loader, accel_factors, image_size, criterion, device):
     model.eval()
-    total_loss = 0.0
+    total_ssim = 0.0
     total_psnr = 0.0
 
     for kspace_full in loader:
@@ -118,15 +122,15 @@ def validate(model, loader, accel_factors, image_size, criterion, device):
         mask = generate_column_mask(image_size, R, device)
 
         model_input, DC_input, gt, _ = simulate_undersampling(
-            kspace_full, mask, cfg.learning)
+            kspace_full, mask, cfg.learning, cfg.norm)
         recon = model(model_input, DC_input, mask)
 
         recon_mag = torch.abs(ifft_2d(recon)) if recon.is_complex() else recon
-        total_loss += criterion(recon, gt).item()
+        total_ssim += (1.0 - criterion(recon, gt).item())
         total_psnr += psnr(recon_mag, gt).item()
 
     n = len(loader)
-    return total_loss / n, total_psnr / n
+    return total_ssim / n, total_psnr / n
 
 
 # ---------------------------------------------------------------------------
@@ -200,11 +204,11 @@ def main():
         T_max=cfg.epochs,
         eta_min=cfg.lr * 1e-2,
     )
-    criterion = MagnitudeImageLoss()
+    criterion = SSIMLoss()
 
     # ---- Resume ----
-    start_epoch   = 0
-    best_val_loss = float('inf')
+    start_epoch    = 0
+    best_val_ssim  = -float('inf')
 
     if cfg.resume and os.path.exists(cfg.resume):
         ckpt = torch.load(cfg.resume, map_location=device)
@@ -212,7 +216,7 @@ def main():
         optimizer.load_state_dict(ckpt['optimizer'])
         scheduler.load_state_dict(ckpt['scheduler'])
         start_epoch   = ckpt['epoch'] + 1
-        best_val_loss = ckpt.get('best_val_loss', float('inf'))
+        best_val_ssim = ckpt.get('best_val_ssim', -float('inf'))
         print(f"Resumed from epoch {start_epoch}  ({cfg.resume})")
 
     # ---- Lambda scheduler (if active) ----
@@ -229,26 +233,25 @@ def main():
         if lamb_sched is not None:
             model.set_scheduled_lamb(lamb_sched.get_lambda(epoch))
 
-        train_loss         = train_one_epoch(model, train_loader, cfg.acceleration_factors,
-                                             cfg.image_size, optimizer, criterion, device)
-        val_loss, val_psnr = validate(model, val_loader, cfg.acceleration_factors,
-                                      cfg.image_size, criterion, device)
+        train_ssim, train_psnr = train_one_epoch(model, train_loader, cfg.acceleration_factors,
+                                                cfg.image_size, optimizer, criterion, device)
+        val_ssim,   val_psnr   = validate(model, val_loader, cfg.acceleration_factors,
+                                          cfg.image_size, criterion, device)
         scheduler.step()
 
         lr      = scheduler.get_last_lr()[0]
         elapsed = time.time() - t0
 
         print(f"Epoch {epoch+1:03d}/{cfg.epochs}  |  "
-              f"Train L1: {train_loss:.4f}  |  "
-              f"Val L1: {val_loss:.4f}  |  "
-              f"Val PSNR: {val_psnr:.2f} dB  |  "
-              f"LR: {lr:.2e}  |  "
-              f"{elapsed:.1f}s")
+              f"Train SSIM: {train_ssim:.4f}  Train PSNR: {train_psnr:.2f} dB  |  "
+              f"Val SSIM: {val_ssim:.4f}  Val PSNR: {val_psnr:.2f} dB  |  "
+              f"LR: {lr:.2e}  |  {elapsed:.1f}s")
 
         metrics = {
             'epoch':      epoch + 1,
-            'train_loss': round(train_loss, 6),
-            'val_loss':   round(val_loss,   6),
+            'train_ssim': round(train_ssim, 6),
+            'train_psnr': round(train_psnr, 4),
+            'val_ssim':   round(val_ssim,   6),
             'val_psnr':   round(val_psnr,   4),
             'lr':         lr,
             'time_s':     round(elapsed, 1),
@@ -261,24 +264,24 @@ def main():
         append_metrics(metrics_path, metrics)
         wandb.log(metrics, step=epoch + 1)
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if val_ssim > best_val_ssim:
+            best_val_ssim = val_ssim
             torch.save({
-                'epoch':         epoch,
-                'model':         model.state_dict(),
-                'optimizer':     optimizer.state_dict(),
-                'scheduler':     scheduler.state_dict(),
-                'best_val_loss': best_val_loss,
-                'val_psnr':      val_psnr,
+                'epoch':          epoch,
+                'model':          model.state_dict(),
+                'optimizer':      optimizer.state_dict(),
+                'scheduler':      scheduler.state_dict(),
+                'best_val_ssim':  best_val_ssim,
+                'val_psnr':       val_psnr,
             }, best_path)
-            print(f"  -> Best model saved  (val_loss={best_val_loss:.4f})")
+            print(f"  -> Best model saved  (val_ssim={best_val_ssim:.4f})")
 
         torch.save({
             'epoch':         epoch,
             'model':         model.state_dict(),
             'optimizer':     optimizer.state_dict(),
             'scheduler':     scheduler.state_dict(),
-            'best_val_loss': best_val_loss,
+            'best_val_ssim': best_val_ssim,
         }, latest_path)
 
     wandb.finish()
