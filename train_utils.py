@@ -164,7 +164,7 @@ _NORMALIZERS = {
 }
 
 
-def simulate_undersampling(kspace_full, mask, learning="k_space", norm="zscore"):
+def simulate_undersampling(kspace_full, mask, learning="k_space", norm="none"):
     """
     norm="zscore" : z-score normalise real/imag separately using undersampled image stats
     norm=None     : no normalisation — tensors left in raw k-space units
