@@ -34,7 +34,7 @@ EXPERIMENTS = [
         "learning": "k_space",
         "norm": None,
         "pos_emb_type": "APE",
-        "attn_type": "standard",
+        "attn_type": "complex",
         "acceleration_factors": [4],
     },
 ]
