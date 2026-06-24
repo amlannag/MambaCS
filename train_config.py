@@ -15,18 +15,7 @@ Index  Name
 """
 
 EXPERIMENTS = [
-    # 0 — image domain, no normalisation, standard attention (baseline)
-    {
-        "prefix": "BugFIX",
-        "name": "image_axial_APE_4x",
-        "encoders": ["axial", "axial", "axial"],
-        "learning": "image",
-        "norm": None,
-        "pos_emb_type": "APE",
-        "attn_type": "standard",
-        "acceleration_factors": [4],
-    },
-    # 6 — k-space domain, APE, standard attention, 4x acceleration (baseline)
+
     {
         "prefix": "BugFIX",
         "name": "kspace_axial_APE_4x",
