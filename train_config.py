@@ -10,62 +10,31 @@ Index  Name
   2    kspace_axial_real_valued_8x    — axial, k-space domain, no norm, real_valued attn
   3    kspace_axial_phase_aware_8x    — axial, k-space domain, no norm, phase_aware attn
   4    kspace_axial_standard_8x       — axial, k-space domain, no norm, standard attn
+  5    image_axial_APE_4x             — axial, image domain, APE, standard attn, 4x
+  6    kspace_axial_APE_4x            — axial, k-space domain, APE, standard attn, 4x
 """
 
 EXPERIMENTS = [
     # 0 — image domain, no normalisation, standard attention (baseline)
     {
-        "prefix": "DcTNN",
-        "name": "image_axial_nonorm_8x",
+        "prefix": "BugFIX",
+        "name": "image_axial_APE_4x",
         "encoders": ["axial", "axial", "axial"],
         "learning": "image",
         "norm": None,
-        "pos_emb_type": "Rope-Axial",
+        "pos_emb_type": "APE",
         "attn_type": "standard",
-        "acceleration_factors": [8],
+        "acceleration_factors": [4],
     },
-    # 1 — k-space domain, complex attention
+    # 6 — k-space domain, APE, standard attention, 4x acceleration (baseline)
     {
-        "prefix": "DcTNN",
-        "name": "kspace_axial_complex_8x",
+        "prefix": "BugFIX",
+        "name": "kspace_axial_APE_4x",
         "encoders": ["axial", "axial", "axial"],
         "learning": "k_space",
         "norm": None,
-        "pos_emb_type": "Rope-Axial",
-        "attn_type": "complex",
-        "acceleration_factors": [8],
-    },
-    # 2 — k-space domain, real-valued attention
-    {
-        "prefix": "DcTNN",
-        "name": "kspace_axial_real_valued_8x",
-        "encoders": ["axial", "axial", "axial"],
-        "learning": "k_space",
-        "norm": None,
-        "pos_emb_type": "Rope-Axial",
-        "attn_type": "real_valued",
-        "acceleration_factors": [8],
-    },
-    # 3 — k-space domain, phase-aware attention
-    {
-        "prefix": "DcTNN",
-        "name": "kspace_axial_phase_aware_8x",
-        "encoders": ["axial", "axial", "axial"],
-        "learning": "k_space",
-        "norm": None,
-        "pos_emb_type": "Rope-Axial",
-        "attn_type": "phase_aware",
-        "acceleration_factors": [8],
-    },
-    # 4 — k-space domain, standard attention
-    {
-        "prefix": "DcTNN",
-        "name": "kspace_axial_standard_8x",
-        "encoders": ["axial", "axial", "axial"],
-        "learning": "k_space",
-        "norm": None,
-        "pos_emb_type": "Rope-Axial",
+        "pos_emb_type": "APE",
         "attn_type": "standard",
-        "acceleration_factors": [8],
+        "acceleration_factors": [4],
     },
 ]
