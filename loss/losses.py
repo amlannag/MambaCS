@@ -30,6 +30,12 @@ class MagnitudeImageLoss(nn.Module):
         return torch.mean((_to_magnitude(pred) - _to_magnitude(gt)) ** 2)
 
 
+class MagnitudeL1Loss(nn.Module):
+    """L1 loss in the normalised magnitude image domain."""
+    def forward(self, pred, gt):
+        return torch.mean(torch.abs(_to_magnitude(pred) - _to_magnitude(gt)))
+
+
 class SSIMLoss(nn.Module):
     """
     1 - SSIM, computed in the magnitude image domain.
