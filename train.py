@@ -18,7 +18,7 @@ from dataset import H5MRIDataset
 from config import Config
 from train_config import EXPERIMENTS
 from DcTNN.lambda_scheduler import LambdaScheduler
-from train_utils import build_model, generate_column_mask, resolve_data_dirs, simulate_undersampling
+from train_utils import FastMRIMaskGenerator, build_model, resolve_data_dirs, simulate_undersampling
 from loss import MagnitudeL1Loss
 from DcTNN.dc import ifft_2d
 
@@ -80,7 +80,7 @@ def append_metrics(path, record):
 # Epoch helpers
 # ---------------------------------------------------------------------------
 
-def train_one_epoch(model, loader, accel_factors, image_size, optimizer, criterion, device):
+def train_one_epoch(model, loader, accel_factors, mask_generator, optimizer, criterion, device):
     model.train()
     total_loss = 0.0
     total_psnr = 0.0
@@ -88,11 +88,11 @@ def train_one_epoch(model, loader, accel_factors, image_size, optimizer, criteri
     for kspace_full in loader:
         kspace_full = kspace_full.to(device)
         R    = accel_factors[np.random.randint(len(accel_factors))]
-        mask = generate_column_mask(image_size, R, device)
+        kspace_us, mask, _ = mask_generator.apply(kspace_full, R)
 
         with torch.no_grad():
             model_input, DC_input, gt, _ = simulate_undersampling(
-                kspace_full, mask, cfg.learning, cfg.norm)
+                kspace_full, mask, cfg.learning, cfg.norm, kspace_us=kspace_us)
 
         optimizer.zero_grad()
         recon = model(model_input, DC_input, mask)
@@ -115,22 +115,31 @@ def validate(model, loader, accel_factors, image_size, criterion, device):
     model.eval()
     total_loss = 0.0
     total_psnr = 0.0
+    total_zf_psnr = 0.0
 
-    for kspace_full in loader:
+    mask_generator = FastMRIMaskGenerator(
+        accel_factors,
+        center_fractions=cfg.center_fractions,
+        mask_type=cfg.mask_type,
+    )
+
+    for batch_idx, kspace_full in enumerate(loader):
         kspace_full = kspace_full.to(device)
         R    = accel_factors[np.random.randint(len(accel_factors))]
-        mask = generate_column_mask(image_size, R, device)
+        kspace_us, mask, _ = mask_generator.apply(kspace_full, R, seed=(cfg.seed, batch_idx, int(R)))
 
         model_input, DC_input, gt, _ = simulate_undersampling(
-            kspace_full, mask, cfg.learning, cfg.norm)
+            kspace_full, mask, cfg.learning, cfg.norm, kspace_us=kspace_us)
         recon = model(model_input, DC_input, mask)
 
         recon_mag = torch.abs(ifft_2d(recon)) if recon.is_complex() else recon
-        total_loss += criterion(recon, gt).item()
-        total_psnr += psnr(recon_mag, gt).item()
+        zf_mag    = torch.abs(ifft_2d(DC_input)) if DC_input.is_complex() else model_input
+        total_loss    += criterion(recon, gt).item()
+        total_psnr    += psnr(recon_mag, gt).item()
+        total_zf_psnr += psnr(zf_mag, gt).item()
 
     n = len(loader)
-    return total_loss / n, total_psnr / n
+    return total_loss / n, total_psnr / n, total_zf_psnr / n
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +173,7 @@ def main():
     print(f"Device     : {device}")
 
     img_h, img_w = cfg.image_size if isinstance(cfg.image_size, tuple) else (cfg.image_size, cfg.image_size)
-    print(f"Accel      : R = {cfg.acceleration_factors}  ({img_w // cfg.acceleration_factors[0]} cols sampled for R={cfg.acceleration_factors[0]})")
+    print(f"Accel      : R = {cfg.acceleration_factors}  |  mask={cfg.mask_type}  |  center_fractions={cfg.center_fractions}")
 
     # ---- Datasets ----
     train_data_dir, val_data_dir = resolve_data_dirs(cfg)
@@ -194,6 +203,11 @@ def main():
     model    = build_model(cfg).to(device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Parameters : {n_params:,}")
+    mask_generator = FastMRIMaskGenerator(
+        cfg.acceleration_factors,
+        center_fractions=cfg.center_fractions,
+        mask_type=cfg.mask_type,
+    )
 
     # ---- Optimiser / scheduler / loss ----
     optimizer = torch.optim.Adam(model.parameters(),
@@ -234,9 +248,9 @@ def main():
             model.set_scheduled_lamb(lamb_sched.get_lambda(epoch))
 
         train_loss, train_psnr = train_one_epoch(model, train_loader, cfg.acceleration_factors,
-                                                cfg.image_size, optimizer, criterion, device)
-        val_loss,   val_psnr   = validate(model, val_loader, cfg.acceleration_factors,
-                                          cfg.image_size, criterion, device)
+                                                mask_generator, optimizer, criterion, device)
+        val_loss, val_psnr, val_zf_psnr = validate(model, val_loader, cfg.acceleration_factors,
+                                                    cfg.image_size, criterion, device)
         scheduler.step()
 
         lr      = scheduler.get_last_lr()[0]
@@ -244,17 +258,18 @@ def main():
 
         print(f"Epoch {epoch+1:03d}/{cfg.epochs}  |  "
               f"Train L1: {train_loss:.6f}  Train PSNR: {train_psnr:.2f} dB  |  "
-              f"Val L1: {val_loss:.6f}  Val PSNR: {val_psnr:.2f} dB  |  "
+              f"Val L1: {val_loss:.6f}  Val PSNR: {val_psnr:.2f} dB  (ZF: {val_zf_psnr:.2f} dB)  |  "
               f"LR: {lr:.2e}  |  {elapsed:.1f}s")
 
         metrics = {
-            'epoch':      epoch + 1,
-            'train_l1':   round(train_loss, 6),
-            'train_psnr': round(train_psnr, 4),
-            'val_l1':     round(val_loss,   6),
-            'val_psnr':   round(val_psnr,   4),
-            'lr':         lr,
-            'time_s':     round(elapsed, 1),
+            'epoch':        epoch + 1,
+            'train_l1':     round(train_loss,    6),
+            'train_psnr':   round(train_psnr,    4),
+            'val_l1':       round(val_loss,      6),
+            'val_psnr':     round(val_psnr,      4),
+            'val_zf_psnr':  round(val_zf_psnr,   4),
+            'lr':           lr,
+            'time_s':       round(elapsed, 1),
         }
         if model.lamb is not False:
             for i, lv in enumerate(model.lamb):

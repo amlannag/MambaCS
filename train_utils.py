@@ -3,6 +3,8 @@ Shared helpers used by training and inference.
 """
 
 import torch
+from fastmri.data.subsample import EquiSpacedMaskFunc, RandomMaskFunc
+from fastmri.data.transforms import apply_mask
 
 from DcTNN.model import TokenVIT, axVIT, cascadeNet
 import normalizer as _norm
@@ -126,35 +128,61 @@ def build_model_from_config_dict(cfg_dict):
     cfg.attn_type = model_cfg.get("attn_type", "standard")
     cfg.rope_theta = model_cfg.get("rope_theta", 100.0)
     cfg.rope_mixed_rotate = model_cfg.get("rope_mixed_rotate", True)
+    cfg.axial_row_stride = model_cfg.get("axial_row_stride", 1)
     return _build_model_impl(cfg)
 
 
-def generate_column_mask(image_size, accel, device):
-    H, W = image_size if isinstance(image_size, (tuple, list)) else (image_size, image_size)
+_DEFAULT_CENTER_FRACTIONS = {
+    4: 0.08,
+    8: 0.04,
+}
 
-    n_total = W // accel
-    beta  = 0.08 if accel <= 4 else 0.04   # 8% ACS for R<=4, 4% for R>4
-    n_acs = min(round(beta * W), n_total)
-    n_outer = n_total - n_acs
 
-    center = W // 2
-    acs_start = center - n_acs // 2
-    acs_cols = torch.arange(acs_start, acs_start + n_acs, device=device)
+def _default_center_fraction(accel):
+    return _DEFAULT_CENTER_FRACTIONS.get(int(accel), 0.04)
 
-    mask = torch.zeros(H, W, device=device)
-    mask[:, acs_cols] = 1.0
 
-    if n_outer > 0:
-        # Uniform random sampling over outer columns — matches fastMRI RandomMaskFunc
-        outer_mask = torch.ones(W, dtype=torch.bool, device=device)
-        outer_mask[acs_start : acs_start + n_acs] = False
-        outer_cols = torch.where(outer_mask)[0]
+class FastMRIMaskGenerator:
+    def __init__(self, accelerations, center_fractions=None, mask_type="random"):
+        if center_fractions is not None and len(center_fractions) != len(accelerations):
+            raise ValueError("center_fractions must be None or match acceleration_factors length")
 
-        prob = n_outer / len(outer_cols)
-        selected = torch.rand(len(outer_cols), device=device) < prob
-        mask[:, outer_cols[selected]] = 1.0
+        if mask_type == "random":
+            mask_cls = RandomMaskFunc
+        elif mask_type in {"equispaced", "equi_spaced"}:
+            mask_cls = EquiSpacedMaskFunc
+        else:
+            raise ValueError("mask_type must be 'random' or 'equispaced'")
 
-    return mask
+        if center_fractions is None:
+            center_fractions = [_default_center_fraction(accel) for accel in accelerations]
+
+        self.center_fractions = {
+            int(accel): float(center_fraction)
+            for accel, center_fraction in zip(accelerations, center_fractions)
+        }
+        self.mask_funcs = {
+            int(accel): mask_cls(
+                center_fractions=[self.center_fractions[int(accel)]],
+                accelerations=[int(accel)],
+            )
+            for accel in accelerations
+        }
+
+    def apply(self, kspace_full, accel, seed=None):
+        accel = int(accel)
+        if accel not in self.mask_funcs:
+            raise ValueError(f"Acceleration R={accel} was not configured")
+
+        kspace_ri = torch.view_as_real(kspace_full)
+        masked_ri, mask, num_low_frequencies = apply_mask(
+            kspace_ri,
+            self.mask_funcs[accel],
+            seed=seed,
+        )
+        masked_kspace = torch.view_as_complex(masked_ri.contiguous())
+        mask = mask.squeeze(-1).to(kspace_full.real.dtype)
+        return masked_kspace, mask, num_low_frequencies
 
 
 _NORMALIZERS = {
@@ -164,7 +192,7 @@ _NORMALIZERS = {
 }
 
 
-def simulate_undersampling(kspace_full, mask, learning="k_space", norm="none"):
+def simulate_undersampling(kspace_full, mask, learning="k_space", norm="none", kspace_us=None):
     """
     norm="zscore" : z-score normalise real/imag separately using undersampled image stats
     norm=None     : no normalisation — tensors left in raw k-space units
@@ -172,4 +200,4 @@ def simulate_undersampling(kspace_full, mask, learning="k_space", norm="none"):
     fn = _NORMALIZERS.get(norm)
     if fn is None:
         raise ValueError(f"Unknown norm '{norm}'. Choose from: {list(_NORMALIZERS)}")
-    return fn(kspace_full, mask, learning)
+    return fn(kspace_full, mask, learning, kspace_us=kspace_us)

@@ -21,7 +21,7 @@ import torch
 
 from DcTNN.dc import ifft_2d
 from dataset import H5MRIDataset
-from train_utils import build_model_from_config_dict, generate_column_mask, simulate_undersampling
+from train_utils import FastMRIMaskGenerator, build_model_from_config_dict, simulate_undersampling
 
 
 _DATA_KEYS = {
@@ -30,6 +30,9 @@ _DATA_KEYS = {
     "image_size",
     "num_channels",
     "acceleration_factors",
+    "center_fractions",
+    "mask_type",
+    "norm",
     "val_fraction",
     "seed",
     "kspace_key",
@@ -48,6 +51,7 @@ _MODEL_KEYS = {
     "attn_type",
     "rope_theta",
     "rope_mixed_rotate",
+    "axial_row_stride",
 }
 
 
@@ -75,11 +79,19 @@ def _magnitude_image(tensor):
     return np.sqrt(array[0, 0] ** 2 + array[0, 1] ** 2)
 
 
-def _denormalize_image(img_norm, mn, scale):
-    """Invert min-max normalisation. Handles complex (k-space) and real (image) tensors."""
-    if img_norm.is_complex():
-        return torch.complex(img_norm.real * scale + mn, img_norm.imag)
-    return img_norm * scale + mn
+def _denormalize_image(img_norm, stats):
+    norm_type = stats.get("normalization", "none")
+    if norm_type == "zscore":
+        mean_r = stats["mean_r"]
+        std_r = stats["std_r"]
+        mean_i = stats["mean_i"]
+        std_i = stats["std_i"]
+        if img_norm.is_complex():
+            return torch.complex(img_norm.real * std_r + mean_r, img_norm.imag * std_i + mean_i)
+        real = img_norm * std_r + mean_r
+        imag = torch.zeros_like(real)
+        return torch.complex(real, imag)
+    return img_norm
 
 
 def _save_reconstruction_figure(output_path, gt_img, zf_img, recon_img, title):
@@ -170,6 +182,7 @@ def reconstruct_dataset_samples(
     else:
         img_h = img_w = image_size
     learning = model_cfg.get("learning", "k_space")
+    norm = data_cfg.get("norm", "none")
     if accel is None:
         accel = data_cfg.get("acceleration_factors", [8])[0]
 
@@ -187,24 +200,42 @@ def reconstruct_dataset_samples(
 
     num_images = min(num_images, len(dataset))
     indices = np.linspace(0, len(dataset) - 1, num_images, dtype=int)
-    mask = generate_column_mask((img_h, img_w), accel, device)
+    configured_accels = list(data_cfg.get("acceleration_factors", [accel]))
+    if accel not in configured_accels:
+        configured_accels.append(accel)
+    configured_center_fractions = data_cfg.get("center_fractions")
+    if configured_center_fractions is not None and len(configured_center_fractions) != len(configured_accels):
+        configured_center_fractions = None
+    mask_generator = FastMRIMaskGenerator(
+        configured_accels,
+        center_fractions=configured_center_fractions,
+        mask_type=data_cfg.get("mask_type", "random"),
+    )
 
     results = []
     for sample_idx in indices:
         kspace_full = dataset[int(sample_idx)].unsqueeze(0).to(device)
-        model_input, kspace_norm, _, stats = simulate_undersampling(kspace_full, mask, learning)
+        kspace_us, mask, _ = mask_generator.apply(
+            kspace_full,
+            accel,
+            seed=(data_cfg.get("seed", 0), int(sample_idx), int(accel)),
+        )
+        model_input, kspace_norm, _, stats = simulate_undersampling(
+            kspace_full,
+            mask,
+            learning,
+            norm,
+            kspace_us=kspace_us,
+        )
         recon_norm = model(model_input, kspace_norm, mask)
-
-        mn    = stats["min"]
-        scale = stats["scale"]
         gt_img = ifft_2d(kspace_full)
 
         if learning == "k_space":
-            zf_img    = _denormalize_image(ifft_2d(kspace_norm), mn, scale)
-            recon_img = _denormalize_image(ifft_2d(recon_norm), mn, scale)
+            zf_img    = _denormalize_image(ifft_2d(kspace_norm), stats)
+            recon_img = _denormalize_image(ifft_2d(recon_norm), stats)
         else:
-            zf_img    = _denormalize_image(model_input, mn, scale)
-            recon_img = _denormalize_image(recon_norm, mn, scale)
+            zf_img    = _denormalize_image(model_input, stats)
+            recon_img = _denormalize_image(recon_norm, stats)
 
         gt_np = _magnitude_image(gt_img)
         zf_np = _magnitude_image(zf_img)

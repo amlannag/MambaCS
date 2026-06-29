@@ -12,9 +12,10 @@ import torch
 from DcTNN.dc import fft_2d, ifft_2d
 
 
-def zscore(kspace_full, mask, learning="k_space"):
+def zscore(kspace_full, mask, learning="k_space", kspace_us=None):
     """Z-score normalise real and imaginary channels separately using undersampled image stats."""
-    kspace_us = kspace_full * mask
+    if kspace_us is None:
+        kspace_us = kspace_full * mask
     img_us    = ifft_2d(kspace_us)
     img_gt    = ifft_2d(kspace_full)
 
@@ -28,17 +29,23 @@ def zscore(kspace_full, mask, learning="k_space"):
     img_gt_norm = torch.complex((img_gt.real - mean_r) / std_r,
                                 (img_gt.imag - mean_i) / std_i)
 
-    metric = {"mean_r": mean_r, "std_r": std_r,
-              "mean_i": mean_i, "std_i": std_i}
+    metric = {
+        "normalization": "zscore",
+        "mean_r": mean_r,
+        "std_r": std_r,
+        "mean_i": mean_i,
+        "std_i": std_i,
+    }
     return _build_outputs(img_us_norm, img_gt_norm, metric, learning)
 
 
-def none(kspace_full, mask, learning="k_space"):
+def none(kspace_full, mask, learning="k_space", kspace_us=None):
     """No normalisation — tensors passed through in raw k-space units."""
-    kspace_us = kspace_full * mask
+    if kspace_us is None:
+        kspace_us = kspace_full * mask
     img_us    = ifft_2d(kspace_us)
     img_gt    = ifft_2d(kspace_full)
-    return _build_outputs(img_us, img_gt, {}, learning)
+    return _build_outputs(img_us, img_gt, {"normalization": "none"}, learning)
 
 
 def _build_outputs(img_us_norm, img_gt_norm, metric, learning):
@@ -48,5 +55,5 @@ def _build_outputs(img_us_norm, img_gt_norm, metric, learning):
         model_input = DC_input
     else:  # "image"
         model_input = torch.abs(img_us_norm)
-        DC_input    = fft_2d(model_input)
+        DC_input    = fft_2d(img_us_norm)   # actual measured k-space, not FFT of magnitude
     return model_input, DC_input, gt, metric

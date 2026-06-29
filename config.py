@@ -42,6 +42,8 @@ class Config:
     num_channels: int = 1
 
     acceleration_factors: List[int] = field(default_factory=lambda: [8])
+    center_fractions: Optional[List[float]] = None
+    mask_type: str = "random"
 
     val_fraction: float = 0.1
     seed: int = 42
