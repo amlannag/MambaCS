@@ -62,15 +62,24 @@ class OASISDataset(Dataset):
 # Mask utilities — TCS convention: DC at corner (no fftshift in FFT)
 # ---------------------------------------------------------------------------
 
-def load_tcs_mask(mask_path, device):
+def load_tcs_mask(mask_path, device, target_size=None):
     """
     Load a 2D mask PNG in TCS-main convention.
     ifftshift moves the ACS from display-center to FFT-corner,
     matching torch.fft.fft2 which puts DC at [0,0].
+
+    If target_size=(H, W) is given and differs from the PNG size, the mask is
+    resized with nearest-neighbour interpolation to preserve binary values.
     """
     mask_np = np.array(Image.open(mask_path).convert('L'), dtype=np.float32)
-    mask_np = np.fft.ifftshift(mask_np)
     mask_np = mask_np / mask_np.max()
+
+    if target_size is not None and tuple(mask_np.shape) != tuple(target_size):
+        mask_img = Image.fromarray((mask_np * 255).astype(np.uint8))
+        mask_img = mask_img.resize((target_size[1], target_size[0]), Image.NEAREST)
+        mask_np  = np.array(mask_img, dtype=np.float32) / 255.0
+
+    mask_np = np.fft.ifftshift(mask_np)
     mask = torch.tensor(mask_np, device=device)  # [H, W]
     print(f"  Loaded TCS mask: {mask_path}  shape={tuple(mask.shape)}  "
           f"sampled_frac={mask.mean():.4f}")
@@ -238,7 +247,7 @@ def main():
         mask_path = os.path.join(
             _SCRIPT_DIR, 'TCS-main', 'masks', f'mask_R{args.accel}.png'
         )
-        mask = load_tcs_mask(mask_path, device)   # [H, W], loaded once
+        mask = load_tcs_mask(mask_path, device, target_size=image_size)  # [H, W]
     else:
         mask = None   # generated fresh each batch in train/validate
 
