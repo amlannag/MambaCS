@@ -74,6 +74,7 @@ def simulate_undersampling_png(img_batch, mask_generator, accel, device, seed=No
     kspace_full = fft_2d(img_complex)                    # [B,1,H,W] complex64
 
     kspace_us, mask, _ = mask_generator.apply(kspace_full, accel, seed=seed)
+    mask = mask.to(kspace_full.device)
 
     img_us = ifft_2d(kspace_us)                          # [B,1,H,W] complex
     model_input = torch.abs(img_us)                      # [B,1,H,W] float — zero-filled mag
