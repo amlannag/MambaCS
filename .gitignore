@@ -9,3 +9,7 @@ file1000001.h5
 src/
 *.ipynb
 Experiments/
+
+
+
+data/
