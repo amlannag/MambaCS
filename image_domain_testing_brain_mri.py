@@ -79,7 +79,7 @@ class GPUMaskGenerator:
 
         mask = mask.view(1, 1, 1, W)  # broadcast over [B, 1, H, W]
         kspace_us = kspace_full * mask
-        return kspace_us, mask.squeeze(0), None  # mask: [1, 1, W]
+        return kspace_us, mask, None  # mask: [1, 1, 1, W]
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +141,8 @@ def psnr(pred, target):
     mse = torch.mean((pred - target) ** 2)
     if mse == 0:
         return torch.tensor(float('inf'))
-    return 20.0 * torch.log10(target.max() / torch.sqrt(mse))
+    max_val = target.max().clamp(min=1e-8)
+    return 20.0 * torch.log10(max_val / torch.sqrt(mse))
 
 
 # ---------------------------------------------------------------------------
