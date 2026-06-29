@@ -31,18 +31,16 @@ echo "Start time : $(date)"
 echo "Working dir: $(pwd)"
 echo ""
 
-pip install fastmri
-
 unset SLURM_MEM_PER_GPU SLURM_MEM_PER_CPU SLURM_MEM_PER_NODE
 srun --cpu-bind=none python image_domain_testing_brain_mri.py \
     --train_dir /scratch/user/uqanag/OASIS/keras_png_slices_train \
     --val_dir   /scratch/user/uqanag/OASIS/keras_png_slices_validate \
     --image_size 256 \
     --encoders axial axial axial \
-    --accel 4 \
+    --accel 8 \
     --epochs 100 \
     --batch_size 16 \
-    --out_dir ../Experiments/oasis_image_domain_4x
+    --out_dir ../Experiments/oasis_image_domain_8x
 
 echo ""
 echo "End time: $(date)"
