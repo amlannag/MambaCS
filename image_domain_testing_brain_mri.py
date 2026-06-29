@@ -24,7 +24,62 @@ from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 
 from DcTNN.dc import fft_2d, ifft_2d
-from train_utils import FastMRIMaskGenerator, build_model
+from train_utils import build_model
+
+
+# ---------------------------------------------------------------------------
+# GPU-native mask generator
+# ---------------------------------------------------------------------------
+
+class GPUMaskGenerator:
+    """
+    Generates 1D random column undersampling masks entirely on GPU.
+    Always samples a central ACS (auto-calibration signal) region,
+    then randomly samples outer columns to hit the target acceleration.
+    """
+    _DEFAULT_CENTER = {4: 0.08, 8: 0.04}
+
+    def __init__(self, accelerations, center_fractions=None):
+        self.accelerations = [int(a) for a in accelerations]
+        if center_fractions is None:
+            center_fractions = [self._DEFAULT_CENTER.get(a, 0.04) for a in self.accelerations]
+        self.center_fractions = {int(a): float(c) for a, c in zip(accelerations, center_fractions)}
+
+    def apply(self, kspace_full, accel, seed=None):
+        """
+        Args:
+            kspace_full : [B, 1, H, W] complex64 on any device
+            accel       : int acceleration factor
+        Returns:
+            kspace_us   : [B, 1, H, W] complex64 — undersampled k-space
+            mask        : [1, 1, W] float32       — 1D column mask (broadcast-ready)
+        """
+        device = kspace_full.device
+        W = kspace_full.shape[-1]
+        cf = self.center_fractions[int(accel)]
+
+        num_center = max(1, int(round(W * cf)))
+        num_total  = max(num_center, W // int(accel))
+
+        mask = torch.zeros(W, device=device)
+
+        # Central ACS region
+        c0 = (W - num_center) // 2
+        mask[c0:c0 + num_center] = 1.0
+
+        # Random outer columns
+        num_outer = num_total - num_center
+        if num_outer > 0:
+            outer = (mask == 0).nonzero(as_tuple=True)[0]
+            g = torch.Generator(device=device)
+            if seed is not None:
+                g.manual_seed(hash(seed) & 0xFFFFFFFF)
+            perm = torch.randperm(len(outer), device=device, generator=g)
+            mask[outer[perm[:num_outer]]] = 1.0
+
+        mask = mask.view(1, 1, 1, W)  # broadcast over [B, 1, H, W]
+        kspace_us = kspace_full * mask
+        return kspace_us, mask.squeeze(0), None  # mask: [1, 1, W]
 
 
 # ---------------------------------------------------------------------------
@@ -54,32 +109,26 @@ class OASISDataset(Dataset):
 # Undersampling
 # ---------------------------------------------------------------------------
 
-def simulate_undersampling_png(img_batch, mask_generator, accel, device, seed=None):
+def simulate_undersampling_png(img_batch, mask_generator, accel, seed=None):
     """
     Convert a batch of real-valued PNG images into model inputs for image-domain learning.
-
-    Args:
-        img_batch : [B, 1, H, W] float32 — normalised PNG images
-        mask_generator : FastMRIMaskGenerator
-        accel     : acceleration factor (int)
-        seed      : optional seed for reproducible validation masks
+    Everything runs on the same device as img_batch.
 
     Returns:
-        model_input : [B, 1, H, W] float32  — zero-filled magnitude (encoder input)
-        DC_input    : [B, 1, H, W] complex64 — undersampled k-space (DC reference)
-        gt          : [B, 1, H, W] float32  — ground truth magnitude
-        mask        : [1, H, W] float32      — sampling mask
+        model_input : [B, 1, H, W] float32   — zero-filled magnitude (encoder input)
+        DC_input    : [B, 1, H, W] complex64  — undersampled k-space (DC reference)
+        gt          : [B, 1, H, W] float32    — ground truth magnitude
+        mask        : [1, 1, W]   float32     — 1D column sampling mask
     """
-    img_complex = img_batch.to(torch.complex64)          # purely real, zero imaginary
-    kspace_full = fft_2d(img_complex)                    # [B,1,H,W] complex64
+    img_complex = img_batch.to(torch.complex64)
+    kspace_full = fft_2d(img_complex)                    # [B,1,H,W] complex64 — on GPU
 
     kspace_us, mask, _ = mask_generator.apply(kspace_full, accel, seed=seed)
-    mask = mask.to(kspace_full.device)
 
-    img_us = ifft_2d(kspace_us)                          # [B,1,H,W] complex
-    model_input = torch.abs(img_us)                      # [B,1,H,W] float — zero-filled mag
-    DC_input    = kspace_us                              # [B,1,H,W] complex — measured k-space
-    gt          = img_batch                              # [B,1,H,W] float — original image
+    img_us      = ifft_2d(kspace_us)
+    model_input = torch.abs(img_us)                      # zero-filled magnitude
+    DC_input    = kspace_us                              # measured k-space
+    gt          = img_batch
 
     return model_input, DC_input, gt, mask
 
@@ -109,7 +158,7 @@ def train_one_epoch(model, loader, mask_generator, accel_factors, optimizer, dev
         R = int(accel_factors[np.random.randint(len(accel_factors))])
 
         model_input, DC_input, gt, mask = simulate_undersampling_png(
-            img_batch, mask_generator, R, device)
+            img_batch, mask_generator, R)
 
         optimizer.zero_grad()
         recon = model(model_input, DC_input, mask)
@@ -138,7 +187,7 @@ def validate(model, loader, mask_generator, accel_factors, device, seed_base=42)
         R = int(accel_factors[np.random.randint(len(accel_factors))])
 
         model_input, DC_input, gt, mask = simulate_undersampling_png(
-            img_batch, mask_generator, R, device,
+            img_batch, mask_generator, R,
             seed=(seed_base, batch_idx, R))
 
         recon = model(model_input, DC_input, mask)
@@ -218,7 +267,7 @@ def main():
     print(f"Train : {len(train_ds)} images  |  Val : {len(val_ds)} images")
 
     # ---- Mask generator ----
-    mask_generator = FastMRIMaskGenerator(args.accel, mask_type='random')
+    mask_generator = GPUMaskGenerator(args.accel)
 
     # ---- Model ----
     model    = build_model(cfg).to(device)
