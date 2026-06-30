@@ -193,14 +193,16 @@ class FastMRIMaskGenerator:
         if accel not in self.mask_funcs:
             raise ValueError(f"Acceleration R={accel} was not configured")
 
-        kspace_ri = torch.view_as_real(kspace_full)
+        device = kspace_full.device
+        # fastmri's apply_mask creates its mask on CPU, so run on CPU then restore device
+        kspace_ri = torch.view_as_real(kspace_full).cpu()
         masked_ri, mask, num_low_frequencies = apply_mask(
             kspace_ri,
             self.mask_funcs[accel],
             seed=seed,
         )
-        masked_kspace = torch.view_as_complex(masked_ri.contiguous())
-        mask = mask.squeeze(-1).to(kspace_full.real.dtype)
+        masked_kspace = torch.view_as_complex(masked_ri.contiguous()).to(device)
+        mask = mask.squeeze(-1).to(device=device, dtype=kspace_full.real.dtype)
         return masked_kspace, mask, num_low_frequencies
 
 
