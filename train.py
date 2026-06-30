@@ -14,12 +14,12 @@ import torch.nn as nn
 import wandb
 from torch.utils.data import DataLoader
 
-from dataset import H5MRIDataset
+from dataset import H5MRIDataset, OASISDataset
 from config import Config
 from train_config import EXPERIMENTS
 from DcTNN.lambda_scheduler import LambdaScheduler
 from train_utils import FastMRIMaskGenerator, build_model, resolve_data_dirs, simulate_undersampling
-from loss import MagnitudeL1Loss
+from DcTNN.loss import MagnitudeL1Loss
 from DcTNN.dc import ifft_2d
 
 
@@ -161,8 +161,9 @@ def main():
     with open(config_path, 'w') as f:
         json.dump(config_to_dict(cfg), f, indent=2)
 
+    _WANDB_PROJECT = {"fastmri": "fastMRI", "oasis": "OASIS"}
     wandb.init(
-        project="MambaCS",
+        project=_WANDB_PROJECT.get(cfg.dataset, "MambaCS"),
         name=f"{cfg.prefix}_{cfg.name}",
         config=config_to_dict(cfg),
     )
@@ -177,11 +178,15 @@ def main():
 
     # ---- Datasets ----
     train_data_dir, val_data_dir = resolve_data_dirs(cfg)
-    train_ds = H5MRIDataset(train_data_dir, image_size=cfg.image_size,
-                            kspace_key=cfg.kspace_key)
-    val_ds   = H5MRIDataset(val_data_dir, image_size=cfg.image_size,
-                            kspace_key=cfg.kspace_key,
-                            max_files=cfg.max_val_files)
+
+    def _make_dataset(data_dir, max_files=None):
+        if cfg.dataset == "oasis":
+            return OASISDataset(data_dir, image_size=cfg.image_size, max_files=max_files)
+        return H5MRIDataset(data_dir, image_size=cfg.image_size,
+                            kspace_key=cfg.kspace_key, max_files=max_files)
+
+    train_ds = _make_dataset(train_data_dir)
+    val_ds   = _make_dataset(val_data_dir, max_files=cfg.max_val_files)
 
     train_loader = DataLoader(train_ds, batch_size=cfg.batch_size,
                               shuffle=True,  num_workers=cfg.num_workers,
@@ -193,10 +198,11 @@ def main():
                             pin_memory=True,
                             persistent_workers=cfg.num_workers > 0)
 
+    file_list = getattr(val_ds, 'h5_files', None) or getattr(val_ds, 'image_files', None)
     print(f"Train dir   : {train_data_dir}")
     print(f"Val dir     : {val_data_dir}")
-    if cfg.max_val_files is not None:
-        print(f"Val files   : {len(val_ds.h5_files)} capped")
+    if cfg.max_val_files is not None and file_list is not None:
+        print(f"Val files   : {len(file_list)} capped")
     print(f"Train / Val : {len(train_ds)} / {len(val_ds)} samples")
 
     # ---- Model ----

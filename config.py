@@ -32,9 +32,13 @@ class Config:
     # Data
     # ---------------------------------------------------------------------------
 
-    # Folder of training .h5 MRI files (fastMRI format, one file per scan)
-    data_dir: str = "/scratch/user/uqanag/fastmri/singlecoil_train"
-    val_data_dir: Optional[str] = "/scratch/user/uqanag/fastmri/singlecoil_val"
+    # "fastmri" — .h5 k-space files (already centered, passed directly to model)
+    # "oasis"   — PNG brain slices (converted to centered k-space via FFT)
+    dataset: str = "fastmri"
+
+    # Data directories — if None, auto-selected from DATASET_DIRS in train_utils.py
+    data_dir: Optional[str] = None
+    val_data_dir: Optional[str] = None
 
     kspace_key: str = "kspace"
     image_size: Tuple[int, int] = (320, 320)

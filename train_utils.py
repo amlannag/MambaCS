@@ -10,10 +10,29 @@ from DcTNN.model import TokenVIT, axVIT, cascadeNet
 import normalizer as _norm
 
 
+DATASET_DIRS = {
+    "fastmri": (
+        "/scratch/user/uqanag/fastmri/singlecoil_train",
+        "/scratch/user/uqanag/fastmri/singlecoil_val",
+    ),
+    "oasis": (
+        "/scratch/user/uqanag/OASIS/keras_png_slices_train",
+        "/scratch/user/uqanag/OASIS/keras_png_slices_validate",
+    ),
+}
+
+
 def resolve_data_dirs(cfg):
-    if cfg.val_data_dir:
-        return cfg.data_dir, cfg.val_data_dir
-    return cfg.data_dir, cfg.data_dir
+    """Return (train_dir, val_dir). Falls back to DATASET_DIRS[cfg.dataset] if not set."""
+    default_train, default_val = DATASET_DIRS.get(cfg.dataset, (None, None))
+    train_dir = cfg.data_dir    or default_train
+    val_dir   = cfg.val_data_dir or default_val or train_dir
+    if train_dir is None:
+        raise ValueError(
+            f"No data_dir for dataset='{cfg.dataset}'. "
+            f"Set data_dir in train_config.py or add an entry to DATASET_DIRS."
+        )
+    return train_dir, val_dir
 
 
 def psnr(pred, target, max_val=None):

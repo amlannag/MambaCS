@@ -1,6 +1,8 @@
 import os
 import h5py
+import numpy as np
 import torch
+from PIL import Image
 from torch.utils.data import Dataset
 from torch.utils.data import get_worker_info
 
@@ -72,3 +74,45 @@ class H5MRIDataset(Dataset):
                 handle.close()
             except Exception:
                 pass
+
+
+class OASISDataset(Dataset):
+    """
+    Loads grayscale PNG/JPEG brain slices (OASIS format) and returns centered
+    k-space so the downstream pipeline is identical to the fastMRI path.
+
+    Pipeline per sample:
+      image [0,1] float32  →  fftshift(fft2(ifftshift(img), norm='ortho'))
+                           →  [1, H, W] complex64  (centered k-space)
+
+    The FFT convention matches fft_2d/ifft_2d in DcTNN/dc.py, so
+    FastMRIMaskGenerator, simulate_undersampling, and all DC layers need
+    no changes.
+    """
+
+    def __init__(self, data_dir, image_size=(256, 256), max_files=None):
+        self.image_size = image_size
+
+        _EXTS = {'.png', '.jpg', '.jpeg'}
+        self.image_files = sorted(
+            os.path.join(data_dir, f)
+            for f in os.listdir(data_dir)
+            if os.path.splitext(f)[1].lower() in _EXTS
+        )
+        if not self.image_files:
+            raise ValueError(f"No PNG/JPEG files found in {data_dir}")
+        if max_files is not None:
+            self.image_files = self.image_files[:max_files]
+
+    def __len__(self):
+        return len(self.image_files)
+
+    def __getitem__(self, idx):
+        img = Image.open(self.image_files[idx]).convert('L')
+        img = img.resize((self.image_size[1], self.image_size[0]), Image.LANCZOS)
+        img_t = torch.tensor(np.array(img, dtype='float32') / 255.0)   # [H, W] in [0, 1]
+        # Convert to centered k-space — same convention as fft_2d in DcTNN/dc.py
+        kspace = torch.fft.fftshift(
+            torch.fft.fft2(torch.fft.ifftshift(img_t), norm='ortho')
+        )
+        return kspace.unsqueeze(0).to(torch.complex64)                  # [1, H, W]

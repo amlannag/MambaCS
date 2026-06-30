@@ -2,7 +2,7 @@
 
 ## Goal
 
-Add `train_tcs_oasis.py` — a training script that uses **TCS-main's exact model architecture** (Post-LN, `real()` DC, standard `nn.TransformerEncoderLayer`) on the OASIS PNG dataset, with two mask modes to isolate the effect of the undersampling convention. Ship a companion `submit_tcs_oasis.sh` SLURM script that runs both modes sequentially.
+Add `train_oasis_tcs.py` — a training script that uses **TCS-main's exact model architecture** (Post-LN, `real()` DC, standard `nn.TransformerEncoderLayer`) on the OASIS PNG dataset, with two mask modes to isolate the effect of the undersampling convention. Ship a companion `submit_tcs_oasis.sh` SLURM script that runs both modes sequentially.
 
 ---
 
@@ -26,11 +26,11 @@ Add `train_tcs_oasis.py` — a training script that uses **TCS-main's exact mode
 
 ---
 
-## Phase 1 — `train_tcs_oasis.py`
+## Phase 1 — `train_oasis_tcs.py`
 
 ### What to build
 
-Single self-contained script at `/Users/amlannag/Desktop/MambaCS/train_tcs_oasis.py`.
+Single self-contained script at `/Users/amlannag/Desktop/MambaCS/train_oasis_tcs.py`.
 
 **Import strategy** — use `sys.path` to pull TCS-main in without touching it:
 ```python
@@ -108,7 +108,7 @@ Model call:
 
 ### Optimiser, scheduler, checkpointing
 
-Copy directly from `image_domain_testing_brain_mri.py`:
+Copy directly from `train_oasis_image.py`:
 - Adam lr=1e-4, weight_decay=1e-5
 - CosineAnnealingLR(T_max=epochs, eta_min=lr*0.01)
 - Save `best_model.pth` (lowest val L1) + `latest.pth`
@@ -143,10 +143,10 @@ wandb.init(
 
 ### Verification checklist
 
-- [ ] `python train_tcs_oasis.py --mask_type tcs --epochs 1 --batch_size 2 --train_dir data/oasis_test --val_dir data/oasis_test --num_workers 0` runs to completion without error
-- [ ] `python train_tcs_oasis.py --mask_type gpu --epochs 1 --batch_size 2 --train_dir data/oasis_test --val_dir data/oasis_test --num_workers 0` runs to completion without error
-- [ ] `grep 'TCS-main' train_tcs_oasis.py` shows path insertion
-- [ ] `grep 'norm1\|norm2' train_tcs_oasis.py` returns nothing — model is from TCS-main, not from MambaCS's custom layer
+- [ ] `python train_oasis_tcs.py --mask_type tcs --epochs 1 --batch_size 2 --train_dir data/oasis_test --val_dir data/oasis_test --num_workers 0` runs to completion without error
+- [ ] `python train_oasis_tcs.py --mask_type gpu --epochs 1 --batch_size 2 --train_dir data/oasis_test --val_dir data/oasis_test --num_workers 0` runs to completion without error
+- [ ] `grep 'TCS-main' train_oasis_tcs.py` shows path insertion
+- [ ] `grep 'norm1\|norm2' train_oasis_tcs.py` returns nothing — model is from TCS-main, not from MambaCS's custom layer
 - [ ] Output dir contains `best_model.pth`, `latest.pth`, `metrics.json` after epoch 1
 
 ---
@@ -183,7 +183,7 @@ mkdir -p logs
 unset SLURM_MEM_PER_GPU SLURM_MEM_PER_CPU SLURM_MEM_PER_NODE
 
 echo "=== Run 1: TCS mask convention ==="
-srun --cpu-bind=none python train_tcs_oasis.py \
+srun --cpu-bind=none python train_oasis_tcs.py \
     --train_dir /scratch/user/uqanag/OASIS/keras_png_slices_train \
     --val_dir   /scratch/user/uqanag/OASIS/keras_png_slices_validate \
     --mask_type tcs \
@@ -193,7 +193,7 @@ srun --cpu-bind=none python train_tcs_oasis.py \
     --out_dir ../Experiments/tcs_oasis_8x_tcs_mask
 
 echo "=== Run 2: GPU column mask convention ==="
-srun --cpu-bind=none python train_tcs_oasis.py \
+srun --cpu-bind=none python train_oasis_tcs.py \
     --train_dir /scratch/user/uqanag/OASIS/keras_png_slices_train \
     --val_dir   /scratch/user/uqanag/OASIS/keras_png_slices_validate \
     --mask_type gpu \
