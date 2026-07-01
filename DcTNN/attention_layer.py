@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .rope_vit import apply_rotary_emb, apply_rotary_emb_complex
 from .util import FeedForward, ComplexLayerNorm, ComplexDropout, get_attention, _COMPLEX_ATTN_TYPES
+from .complex_init import apply_trabelsi_
 # ---------------------------------------------------------------------------
 # Attention classes
 # ---------------------------------------------------------------------------
@@ -23,6 +24,10 @@ class BaseAttention(nn.Module):
         self.qkv = nn.Linear(d_model, 3 * d_model, dtype=dtype)
         self.proj = nn.Linear(d_model, d_model, dtype=dtype)
         self.attn_drop = ComplexDropout(dropout) if dtype == torch.cfloat else nn.Dropout(dropout)
+        if dtype == torch.cfloat:
+            # glorot: Q/K/V feed softmax (not a rectifier); proj feeds dropout→residual
+            apply_trabelsi_(self.qkv, criterion="glorot")
+            apply_trabelsi_(self.proj, criterion="glorot")
         self.use_rope = freqs_cis is not None
         if self.use_rope:
             self.register_buffer('freqs_cis', freqs_cis)
