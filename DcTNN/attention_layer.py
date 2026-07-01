@@ -4,7 +4,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .rope_vit import apply_rotary_emb, apply_rotary_emb_complex
 from .util import FeedForward, ComplexLayerNorm, ComplexDropout, get_attention, _COMPLEX_ATTN_TYPES
-
 # ---------------------------------------------------------------------------
 # Attention classes
 # ---------------------------------------------------------------------------

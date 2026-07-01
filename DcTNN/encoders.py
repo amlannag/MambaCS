@@ -7,7 +7,7 @@ from .util import get_to_embedding, get_mlp_head, ComplexDropout, _COMPLEX_ATTN_
 
 
 def pair(t):
-    return t if isinstance(t, tuple) else (t, t)
+    return tuple(t) if isinstance(t, (tuple, list)) else (t, t)
 
 
 # ---------------------------------------------------------------------------

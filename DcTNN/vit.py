@@ -87,7 +87,7 @@ class axVIT(BaseVIT):
                     pos_emb_type="APE", rope_theta=100.0, rope_mixed_rotate=True, attn_type="standard",
                     row_stride=1):
         if d_model is None:
-            _, image_width = N if isinstance(N, tuple) else (N, N)
+            _, image_width = N if isinstance(N, (tuple, list)) else (N, N)
             d_model = image_width * numCh
         if dim_feedforward is None:
             dim_feedforward = int(d_model ** (3 / 2))
