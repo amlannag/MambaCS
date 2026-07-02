@@ -59,6 +59,7 @@ _ENCODER_ARGS = {
             rope_mixed_rotate=cfg.rope_mixed_rotate,
             attn_type=cfg.attn_type,
             row_stride=cfg.axial_row_stride,
+            mask_vertical_attn=cfg.mask_vertical_attn,
         ),
     ),
     "kaleidoscope": lambda cfg: (
@@ -148,6 +149,7 @@ def build_model_from_config_dict(cfg_dict):
     cfg.rope_theta = model_cfg.get("rope_theta", 100.0)
     cfg.rope_mixed_rotate = model_cfg.get("rope_mixed_rotate", True)
     cfg.axial_row_stride = model_cfg.get("axial_row_stride", 1)
+    cfg.mask_vertical_attn = model_cfg.get("mask_vertical_attn", "none")
     return _build_model_impl(cfg)
 
 

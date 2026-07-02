@@ -6,6 +6,28 @@ from .attention_layer import TransformerEncoderLayer, TransformerEncoder
 from .util import get_to_embedding, get_mlp_head, ComplexDropout, _COMPLEX_ATTN_TYPES
 
 
+def _build_vertical_attn_mask(sampled: torch.Tensor, mode: str) -> torch.Tensor:
+    """
+    Build an additive [W, W] attention mask for vertical (column) attention.
+
+    sampled : bool tensor [W] — True where column is sampled (mask=1).
+    mode    : "lenient" — sampled queries attend only to sampled keys;
+                          unsampled queries attend to all.
+              "strict"  — all queries attend only to sampled keys.
+    Returns float tensor [W, W] with 0 (allow) or -inf (block).
+    """
+    W = sampled.shape[0]
+    mask = torch.zeros(W, W, device=sampled.device)
+    unsampled = ~sampled
+    if mode == "strict":
+        # Block all queries from attending to unsampled keys
+        mask[:, unsampled] = float("-inf")
+    elif mode == "lenient":
+        # Block only sampled queries from attending to unsampled keys
+        mask[sampled.unsqueeze(1).expand(W, W) & unsampled.unsqueeze(0).expand(W, W)] = float("-inf")
+    return mask
+
+
 def pair(t):
     return tuple(t) if isinstance(t, (tuple, list)) else (t, t)
 
@@ -112,12 +134,14 @@ class axialEncoder(nn.Module):
     def __init__(self, image_size, numCh=1, d_model=512, nhead=8, num_layers=6, dim_feedforward=None,
                     dropout=0.1, activation='relu', layer_norm_eps=1e-05, batch_first=True,
                     device=None, dtype=None, norm=None,
-                    pos_emb_type="APE", rope_theta=100.0, attn_type="standard", row_stride=1):
+                    pos_emb_type="APE", rope_theta=100.0, attn_type="standard", row_stride=1,
+                    mask_vertical_attn="none"):
         super().__init__()
 
         self.pos_emb_type = pos_emb_type
         self.d_model = d_model
         self.is_complex = attn_type in _COMPLEX_ATTN_TYPES
+        self.mask_vertical_attn = mask_vertical_attn
 
         image_height, image_width = pair(image_size)
         h_tokens = image_height // row_stride  # horizontal token count after row grouping
@@ -154,7 +178,7 @@ class axialEncoder(nn.Module):
         self.horizontalEncoder = TransformerEncoder(h_layer, numLayers)
         self.verticalEncoder = TransformerEncoder(v_layer, numLayers)
 
-    def forward(self, img):
+    def forward(self, img, col_mask=None):
         x = self.to_horizontal_embedding(img)
         if self.pos_emb_type == "APE":
             x = x + self.horizontal_pos_embedding
@@ -166,7 +190,24 @@ class axialEncoder(nn.Module):
         if self.pos_emb_type == "APE":
             x = x + self.vertical_pos_embedding
         x = self.dropout(x)
-        x = self.verticalEncoder(x)
+
+        if col_mask is not None and self.mask_vertical_attn != "none":
+            W = x.shape[1]
+            sampled = col_mask.reshape(-1, W)[0].bool()
+
+            if self.mask_vertical_attn == "cross":
+                # True cross-attention: unsampled columns update by attending only to
+                # sampled keys; sampled columns are context providers and don't change.
+                strict_mask = _build_vertical_attn_mask(sampled, "strict")
+                x_out = self.verticalEncoder(x, attn_mask=strict_mask)
+                x_out[:, sampled, :] = x[:, sampled, :]
+                x = x_out
+            else:
+                attn_mask = _build_vertical_attn_mask(sampled, self.mask_vertical_attn)
+                x = self.verticalEncoder(x, attn_mask=attn_mask)
+        else:
+            x = self.verticalEncoder(x)
+
         x = self.vertical_mlp_head(x)
 
         return x

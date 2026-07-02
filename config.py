@@ -93,6 +93,15 @@ class Config:
     # Randomly rotate initial 2D frequencies in Rope-Mixed (ignored otherwise)
     rope_mixed_rotate: bool = True
 
+    # Masking strategy for vertical (column) attention in axial encoders.
+    # "none"    — standard self-attention, no masking
+    # "lenient" — sampled queries attend only to sampled keys;
+    #             unsampled queries attend to all (sampled + unsampled)
+    # "strict"  — all queries attend only to sampled keys
+    # "cross"   — true cross-attention: unsampled columns update from sampled keys only;
+    #             sampled columns pass through unchanged (they are context providers)
+    mask_vertical_attn: str = "none"
+
     # ---------------------------------------------------------------------------
     # Training hyperparameters
     # ---------------------------------------------------------------------------

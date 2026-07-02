@@ -17,7 +17,7 @@ class BaseVIT(nn.Module):
         self.numCh = numCh
         self.transformers = transformers
 
-    def forward(self, xPrev):
+    def forward(self, xPrev, col_mask=None):
         im = xPrev
         for transformer in self.transformers:
             im = transformer(im)
@@ -85,7 +85,7 @@ class axVIT(BaseVIT):
                     dim_feedforward=None, dropout=0.1, activation='relu',
                     layer_norm_eps=1e-05, batch_first=True, device=None, dtype=None,
                     pos_emb_type="APE", rope_theta=100.0, rope_mixed_rotate=True, attn_type="standard",
-                    row_stride=1):
+                    row_stride=1, mask_vertical_attn="none"):
         if d_model is None:
             _, image_width = N if isinstance(N, (tuple, list)) else (N, N)
             d_model = image_width * numCh
@@ -95,9 +95,15 @@ class axVIT(BaseVIT):
             axialEncoder(N, numCh, d_model, nhead, num_encoder_layers, dim_feedforward,
                          dropout, activation, layer_norm_eps, batch_first, device, dtype,
                          pos_emb_type=pos_emb_type, rope_theta=rope_theta, attn_type=attn_type,
-                         row_stride=row_stride)
+                         row_stride=row_stride, mask_vertical_attn=mask_vertical_attn)
             for _ in range(layerNo)
         ])
         super().__init__(N, layerNo, numCh, transformers)
+
+    def forward(self, xPrev, col_mask=None):
+        im = xPrev
+        for transformer in self.transformers:
+            im = transformer(im, col_mask=col_mask)
+        return im
 
 

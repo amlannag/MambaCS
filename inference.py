@@ -23,6 +23,7 @@ _MODEL_KEYS = {
     "layer_no", "num_encoder_layers", "learned_lambda", "learning",
     "lambda_schedule", "lambda_start", "lambda_end",
     "pos_emb_type", "attn_type", "rope_theta", "rope_mixed_rotate",
+    "mask_vertical_attn",
 }
 
 

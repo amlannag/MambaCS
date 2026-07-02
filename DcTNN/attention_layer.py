@@ -38,16 +38,16 @@ class BaseAttention(nn.Module):
             return apply_rotary_emb_complex(q, k, freqs_cis=freqs)
         return apply_rotary_emb(q, k, freqs_cis=freqs)
 
-    def _attend(self, q, k, v):
+    def _attend(self, q, k, v, attn_mask=None):
         raise NotImplementedError
 
-    def forward(self, x):
+    def forward(self, x, attn_mask=None):
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.nhead, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
         if self.use_rope:
             q, k = self._apply_rope(q, k)
-        x = self._attend(q, k, v).transpose(1, 2).reshape(B, N, C)
+        x = self._attend(q, k, v, attn_mask=attn_mask).transpose(1, 2).reshape(B, N, C)
         return self.proj(x)
 
 
@@ -55,9 +55,10 @@ class MultiHeadAttention(BaseAttention):
     def __init__(self, d_model, nhead, dropout=0.0, freqs_cis=None):
         super().__init__(d_model, nhead, dropout, freqs_cis, dtype=None)
 
-    def _attend(self, q, k, v):
+    def _attend(self, q, k, v, attn_mask=None):
         return F.scaled_dot_product_attention(
-            q,k,v,dropout_p=self.dropout_p if self.training else 0.0,
+            q, k, v, attn_mask=attn_mask,
+            dropout_p=self.dropout_p if self.training else 0.0,
         )
 
 
@@ -71,8 +72,10 @@ class ComplexMultiHeadAttention(BaseAttention):
     def __init__(self, d_model, nhead, dropout=0.0, freqs_cis=None):
         super().__init__(d_model, nhead, dropout, freqs_cis, dtype=torch.cfloat)
 
-    def _attend(self, q, k, v):
+    def _attend(self, q, k, v, attn_mask=None):
         attn = torch.matmul(q, k.transpose(-2, -1).conj()) * self.scale
+        if attn_mask is not None:
+            attn = torch.complex(attn.real + attn_mask, attn.imag + attn_mask)
         attn = torch.complex(F.softmax(attn.real, dim=-1), F.softmax(attn.imag, dim=-1))
         attn = self.attn_drop(attn)
         return torch.matmul(attn, v)
@@ -87,9 +90,11 @@ class RealValuedAttention(BaseAttention):
     def __init__(self, d_model, nhead, dropout=0.0, freqs_cis=None):
         super().__init__(d_model, nhead, dropout, freqs_cis, dtype=torch.cfloat)
 
-    def _attend(self, q, k, v):
-        attn = self.attn_drop(F.softmax(
-            torch.matmul(q, k.transpose(-2, -1).conj()).real * self.scale, dim=-1))
+    def _attend(self, q, k, v, attn_mask=None):
+        scores = torch.matmul(q, k.transpose(-2, -1).conj()).real * self.scale
+        if attn_mask is not None:
+            scores = scores + attn_mask
+        attn = self.attn_drop(F.softmax(scores, dim=-1))
         return torch.complex(torch.matmul(attn, v.real), torch.matmul(attn, v.imag))
 
 
@@ -104,13 +109,15 @@ class PhaseAwareAttention(BaseAttention):
         self.eps = eps
         self.alpha = nn.Parameter(torch.tensor(float(alpha)))
 
-    def _attend(self, q, k, v):
+    def _attend(self, q, k, v, attn_mask=None):
         corr = torch.matmul(q, k.transpose(-2, -1).conj())
         q_norm = q.abs().pow(2).sum(-1).sqrt()
         k_norm = k.abs().pow(2).sum(-1).sqrt()
         denom = q_norm.unsqueeze(-1) * k_norm.unsqueeze(-2) + self.eps
         dphi = torch.angle(corr)
         W = (corr.real / denom * self.scale) * torch.exp(-self.alpha * dphi.abs())
+        if attn_mask is not None:
+            W = W + attn_mask
         A = self.attn_drop(F.softmax(W, dim=-1))
         return torch.matmul(A * torch.exp(1j * dphi), v)
 
@@ -135,8 +142,8 @@ class TransformerEncoderLayer(nn.Module):
             self.norm2 = nn.LayerNorm(d_model, eps=layer_norm_eps)
             self.drop = nn.Dropout(dropout)
 
-    def forward(self, x):
-        x = x + self.drop(self.attn(self.norm1(x)))
+    def forward(self, x, attn_mask=None):
+        x = x + self.drop(self.attn(self.norm1(x), attn_mask=attn_mask))
         x = x + self.drop(self.ff(self.norm2(x)))
         return x
 
@@ -144,3 +151,8 @@ class TransformerEncoderLayer(nn.Module):
 class TransformerEncoder(nn.Sequential):
     def __init__(self, encoder_layer, num_layers):
         super().__init__(*[copy.deepcopy(encoder_layer) for _ in range(num_layers)])
+
+    def forward(self, x, attn_mask=None):
+        for layer in self:
+            x = layer(x, attn_mask=attn_mask)
+        return x

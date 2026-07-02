@@ -56,7 +56,7 @@ class cascadeNet(nn.Module):
                 lamb_i = self.scheduled_lamb
             else:
                 lamb_i = None
-            x = self._dc_func(x + transformer(x), y, sampleMask, lamb_i)
+            x = self._dc_func(x + transformer(x, col_mask=sampleMask), y, sampleMask, lamb_i)
             if self.learning == "image":
                 x = x.real    # FFT_DC IFFTs to complex; extract real for next encoder
         return x
