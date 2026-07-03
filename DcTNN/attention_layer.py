@@ -75,9 +75,13 @@ class ComplexMultiHeadAttention(BaseAttention):
     def _attend(self, q, k, v, attn_mask=None):
         attn = torch.matmul(q, k.transpose(-2, -1).conj()) * self.scale
         if attn_mask is not None:
-            attn = torch.complex(attn.real + attn_mask, attn.imag + attn_mask)
-        attn = torch.complex(F.softmax(attn.real, dim=-1), F.softmax(attn.imag, dim=-1))
-        attn = self.attn_drop(attn)
+            # Add mask directly to real/imag before softmax — avoids a [B,nhead,W,W] intermediate allocation
+            attn_r = F.softmax(attn.real + attn_mask, dim=-1)
+            attn_i = F.softmax(attn.imag + attn_mask, dim=-1)
+        else:
+            attn_r = F.softmax(attn.real, dim=-1)
+            attn_i = F.softmax(attn.imag, dim=-1)
+        attn = self.attn_drop(torch.complex(attn_r, attn_i))
         return torch.matmul(attn, v)
 
 
@@ -95,6 +99,7 @@ class RealValuedAttention(BaseAttention):
         if attn_mask is not None:
             scores = scores + attn_mask
         attn = self.attn_drop(F.softmax(scores, dim=-1))
+        # matmul on real/imag separately avoids materialising a complex [B,nhead,W,d] intermediate
         return torch.complex(torch.matmul(attn, v.real), torch.matmul(attn, v.imag))
 
 
@@ -115,10 +120,10 @@ class PhaseAwareAttention(BaseAttention):
         k_norm = k.abs().pow(2).sum(-1).sqrt()
         denom = q_norm.unsqueeze(-1) * k_norm.unsqueeze(-2) + self.eps
         dphi = torch.angle(corr)
-        W = (corr.real / denom * self.scale) * torch.exp(-self.alpha * dphi.abs())
+        scores = (corr.real / denom * self.scale) * torch.exp(-self.alpha * dphi.abs())
         if attn_mask is not None:
-            W = W + attn_mask
-        A = self.attn_drop(F.softmax(W, dim=-1))
+            scores = scores + attn_mask
+        A = self.attn_drop(F.softmax(scores, dim=-1))
         return torch.matmul(A * torch.exp(1j * dphi), v)
 
 

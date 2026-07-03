@@ -17,14 +17,18 @@ def _build_vertical_attn_mask(sampled: torch.Tensor, mode: str) -> torch.Tensor:
     Returns float tensor [W, W] with 0 (allow) or -inf (block).
     """
     W = sampled.shape[0]
-    mask = torch.zeros(W, W, device=sampled.device)
     unsampled = ~sampled
     if mode == "strict":
-        # Block all queries from attending to unsampled keys
+        # All queries blocked from unsampled keys: column mask on keys only
+        mask = torch.zeros(W, W, device=sampled.device)
         mask[:, unsampled] = float("-inf")
     elif mode == "lenient":
-        # Block only sampled queries from attending to unsampled keys
-        mask[sampled.unsqueeze(1).expand(W, W) & unsampled.unsqueeze(0).expand(W, W)] = float("-inf")
+        # Sampled queries blocked from unsampled keys; unsampled queries attend freely
+        # block[i,j] = True when query i is sampled AND key j is unsampled
+        block = sampled.unsqueeze(1) & unsampled.unsqueeze(0)   # [W, W] bool, no large intermediates
+        mask = torch.zeros(W, W, device=sampled.device).masked_fill(block, float("-inf"))
+    else:
+        mask = torch.zeros(W, W, device=sampled.device)
     return mask
 
 
