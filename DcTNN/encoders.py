@@ -2,7 +2,12 @@ import torch
 from torch import nn
 from .rope_vit import (compute_axial_cis, compute_mixed_cis,
                         compute_axial_cis_complex, compute_mixed_cis_complex)
-from .attention_layer import TransformerEncoderLayer, TransformerEncoder
+from .attention_layer import (
+    TransformerEncoderLayer,
+    TransformerEncoder,
+    CrossAttentionEncoderLayer,
+    CrossAttentionEncoder,
+)
 from .util import get_to_embedding, get_mlp_head, ComplexDropout, _COMPLEX_ATTN_TYPES
 
 
@@ -30,6 +35,28 @@ def _build_vertical_attn_mask(sampled: torch.Tensor, mode: str) -> torch.Tensor:
     else:
         mask = torch.zeros(W, W, device=sampled.device)
     return mask
+
+
+def _extract_shared_column_mask(col_mask: torch.Tensor, width: int) -> torch.Tensor:
+    """
+    Collapse a broadcast column mask to [W].
+
+    Current training uses a single broadcast mask shared across the batch.
+    Reject per-example masks so the assumption stays explicit.
+    """
+    if col_mask.shape[-1] != width:
+        raise ValueError(
+            f"Column mask width {col_mask.shape[-1]} does not match token width {width}"
+        )
+
+    flat_mask = col_mask.reshape(-1, width)
+    reference = flat_mask[0]
+    if flat_mask.shape[0] > 1 and not torch.equal(flat_mask, reference.unsqueeze(0).expand_as(flat_mask)):
+        raise ValueError(
+            "Per-example column masks are not supported in axial attention. "
+            "Expected one broadcast mask shared across the batch."
+        )
+    return reference.bool()
 
 
 def pair(t):
@@ -179,8 +206,13 @@ class axialEncoder(nn.Module):
                                           layer_norm_eps, freqs_cis=freqs_h, attn_type=attn_type)
         v_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation,
                                           layer_norm_eps, freqs_cis=freqs_v, attn_type=attn_type)
+        v_cross_layer = CrossAttentionEncoderLayer(
+            d_model, nhead, dim_feedforward, dropout, activation,
+            layer_norm_eps, freqs_cis=freqs_v, attn_type=attn_type
+        )
         self.horizontalEncoder = TransformerEncoder(h_layer, numLayers)
         self.verticalEncoder = TransformerEncoder(v_layer, numLayers)
+        self.verticalCrossEncoder = CrossAttentionEncoder(v_cross_layer, numLayers)
 
     def forward(self, img, col_mask=None):
         x = self.to_horizontal_embedding(img)
@@ -197,15 +229,24 @@ class axialEncoder(nn.Module):
 
         if col_mask is not None and self.mask_vertical_attn != "none":
             W = x.shape[1]
-            sampled = col_mask.reshape(-1, W)[0].bool()
+            sampled = _extract_shared_column_mask(col_mask, W)
 
             if self.mask_vertical_attn == "cross":
-                # True cross-attention: unsampled columns update by attending only to
-                # sampled keys; sampled columns are context providers and don't change.
-                strict_mask = _build_vertical_attn_mask(sampled, "strict")
-                x_out = self.verticalEncoder(x, attn_mask=strict_mask)
-                x_out[:, sampled, :] = x[:, sampled, :]
-                x = x_out
+                sampled_idx = sampled.nonzero(as_tuple=True)[0]
+                unsampled_idx = (~sampled).nonzero(as_tuple=True)[0]
+                if sampled_idx.numel() == 0:
+                    raise ValueError("Cross attention requires at least one sampled column")
+                if unsampled_idx.numel() > 0:
+                    x_unsampled = x.index_select(1, unsampled_idx)
+                    x_sampled = x.index_select(1, sampled_idx)
+                    x_updated = self.verticalCrossEncoder(
+                        x_unsampled,
+                        x_sampled,
+                        q_positions=unsampled_idx,
+                        kv_positions=sampled_idx,
+                    )
+                    x = x.clone()
+                    x[:, unsampled_idx, :] = x_updated
             else:
                 attn_mask = _build_vertical_attn_mask(sampled, self.mask_vertical_attn)
                 x = self.verticalEncoder(x, attn_mask=attn_mask)
