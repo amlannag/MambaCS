@@ -2,7 +2,7 @@
 Defines ViT denoising blocks — cascades of encoder instances with a shared forward loop.
 """
 from torch import nn
-from .encoders import TokenEncoder, axialEncoder, pair
+from .encoders import TokenEncoder, axialEncoder, crossAxialEncoder, pair
 
 
 class BaseVIT(nn.Module):
@@ -107,3 +107,38 @@ class axVIT(BaseVIT):
         return im
 
 
+class CrossAttentionVIT(BaseVIT):
+    """
+    Cascade of crossAxialEncoder blocks (vertical-only sampled<->unsampled routing).
+    """
+    def __init__(self, N, layerNo=2, numCh=1, d_model=None, nhead=8, num_encoder_layers=2,
+                    dim_feedforward=None, dropout=0.1, activation='relu',
+                    layer_norm_eps=1e-05, batch_first=True, device=None, dtype=None,
+                    pos_emb_type="APE", rope_theta=100.0, rope_mixed_rotate=True, attn_type="complex",
+                    row_stride=1):
+        if attn_type != "complex":
+            raise ValueError(
+                "CrossAttentionVIT only supports attn_type='complex'. "
+                f"Received '{attn_type}'."
+            )
+        if d_model is None:
+            _, image_width = N if isinstance(N, (tuple, list)) else (N, N)
+            d_model = image_width * numCh
+        if dim_feedforward is None:
+            dim_feedforward = int(d_model ** (3 / 2))
+        transformers = nn.ModuleList([
+            crossAxialEncoder(
+                N, numCh, d_model, nhead, num_encoder_layers, dim_feedforward,
+                dropout, activation, layer_norm_eps, batch_first, device, dtype,
+                pos_emb_type=pos_emb_type, rope_theta=rope_theta, attn_type=attn_type,
+                row_stride=row_stride
+            )
+            for _ in range(layerNo)
+        ])
+        super().__init__(N, layerNo, numCh, transformers)
+
+    def forward(self, xPrev, col_mask=None):
+        im = xPrev
+        for transformer in self.transformers:
+            im = transformer(im, col_mask=col_mask)
+        return im

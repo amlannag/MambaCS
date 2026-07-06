@@ -1,15 +1,23 @@
+import copy
 import torch
 from torch import nn
+from einops.layers.torch import Rearrange
 from .rope_vit import (compute_axial_cis, compute_mixed_cis,
                         compute_axial_cis_complex, compute_mixed_cis_complex)
 from .attention_layer import (
     TransformerEncoderLayer,
     TransformerEncoder,
     CrossAttentionEncoderLayer,
-    CrossAttentionEncoder,
 )
-from .util import get_to_embedding, get_mlp_head, ComplexDropout, _COMPLEX_ATTN_TYPES
-
+from .util import (
+    get_to_embedding,
+    get_from_embedding,
+    get_mlp_head,
+    ComplexLayerNorm,
+    ComplexDropout,
+    _COMPLEX_ATTN_TYPES,
+)
+from .complex_init import apply_trabelsi_
 
 def _build_vertical_attn_mask(sampled: torch.Tensor, mode: str) -> torch.Tensor:
     """
@@ -24,13 +32,10 @@ def _build_vertical_attn_mask(sampled: torch.Tensor, mode: str) -> torch.Tensor:
     W = sampled.shape[0]
     unsampled = ~sampled
     if mode == "strict":
-        # All queries blocked from unsampled keys: column mask on keys only
         mask = torch.zeros(W, W, device=sampled.device)
         mask[:, unsampled] = float("-inf")
     elif mode == "lenient":
-        # Sampled queries blocked from unsampled keys; unsampled queries attend freely
-        # block[i,j] = True when query i is sampled AND key j is unsampled
-        block = sampled.unsqueeze(1) & unsampled.unsqueeze(0)   # [W, W] bool, no large intermediates
+        block = sampled.unsqueeze(1) & unsampled.unsqueeze(0)
         mask = torch.zeros(W, W, device=sampled.device).masked_fill(block, float("-inf"))
     else:
         mask = torch.zeros(W, W, device=sampled.device)
@@ -61,6 +66,73 @@ def _extract_shared_column_mask(col_mask: torch.Tensor, width: int) -> torch.Ten
 
 def pair(t):
     return tuple(t) if isinstance(t, (tuple, list)) else (t, t)
+
+
+class _CrossAxialInnerLayer(nn.Module):
+    """
+    One vertical-only block:
+    1. sampled -> unsampled cross-attention
+    2. unsampled -> unsampled self-attention
+    3. sampled -> unsampled cross-attention
+    4. unsampled -> unsampled self-attention
+    5. scatter updated unsampled tokens back into the full token tensor
+    """
+    def __init__(self, d_model, nhead, dim_feedforward, dropout, activation, layer_norm_eps,
+                 freqs_cis=None, attn_type="complex"):
+        super().__init__()
+        self.cross1 = CrossAttentionEncoderLayer(
+            d_model, nhead, dim_feedforward, dropout, activation,
+            layer_norm_eps, freqs_cis=freqs_cis, attn_type=attn_type
+        )
+        self.self_attn1 = TransformerEncoderLayer(
+            d_model, nhead, dim_feedforward, dropout, activation,
+            layer_norm_eps, freqs_cis=freqs_cis, attn_type=attn_type
+        )
+        self.cross2 = CrossAttentionEncoderLayer(
+            d_model, nhead, dim_feedforward, dropout, activation,
+            layer_norm_eps, freqs_cis=freqs_cis, attn_type=attn_type
+        )
+        self.self_attn2 = TransformerEncoderLayer(
+            d_model, nhead, dim_feedforward, dropout, activation,
+            layer_norm_eps, freqs_cis=freqs_cis, attn_type=attn_type
+        )
+
+    def forward(self, x, sampled_idx, unsampled_idx):
+        if unsampled_idx.numel() == 0:
+            return x
+        if sampled_idx.numel() == 0:
+            raise ValueError("cross_axial requires at least one sampled column")
+
+        x_unsampled = x.index_select(1, unsampled_idx)
+        x_sampled = x.index_select(1, sampled_idx)
+        x_unsampled = self.cross1(
+            x_unsampled,
+            x_sampled,
+            q_positions=unsampled_idx,
+            kv_positions=sampled_idx,
+        )
+        x_unsampled = self.self_attn1(x_unsampled, positions=unsampled_idx)
+        x_unsampled = self.cross2(
+            x_unsampled,
+            x_sampled,
+            q_positions=unsampled_idx,
+            kv_positions=sampled_idx,
+        )
+        x_unsampled = self.self_attn2(x_unsampled, positions=unsampled_idx)
+
+        x = x.clone()
+        x[:, unsampled_idx, :] = x_unsampled
+        return x
+
+
+class _CrossAxialEncoderStack(nn.Sequential):
+    def __init__(self, encoder_layer, num_layers):
+        super().__init__(*[copy.deepcopy(encoder_layer) for _ in range(num_layers)])
+
+    def forward(self, x, sampled_idx, unsampled_idx):
+        for layer in self:
+            x = layer(x, sampled_idx, unsampled_idx)
+        return x
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +245,11 @@ class axialEncoder(nn.Module):
         self.d_model = d_model
         self.is_complex = attn_type in _COMPLEX_ATTN_TYPES
         self.mask_vertical_attn = mask_vertical_attn
+        if mask_vertical_attn == "cross":
+            raise ValueError(
+                "mask_vertical_attn='cross' is no longer supported on axialEncoder. "
+                "Use the 'cross_axial' encoder family instead."
+            )
 
         image_height, image_width = pair(image_size)
         h_tokens = image_height // row_stride  # horizontal token count after row grouping
@@ -206,13 +283,8 @@ class axialEncoder(nn.Module):
                                           layer_norm_eps, freqs_cis=freqs_h, attn_type=attn_type)
         v_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation,
                                           layer_norm_eps, freqs_cis=freqs_v, attn_type=attn_type)
-        v_cross_layer = CrossAttentionEncoderLayer(
-            d_model, nhead, dim_feedforward, dropout, activation,
-            layer_norm_eps, freqs_cis=freqs_v, attn_type=attn_type
-        )
         self.horizontalEncoder = TransformerEncoder(h_layer, numLayers)
         self.verticalEncoder = TransformerEncoder(v_layer, numLayers)
-        self.verticalCrossEncoder = CrossAttentionEncoder(v_cross_layer, numLayers)
 
     def forward(self, img, col_mask=None):
         x = self.to_horizontal_embedding(img)
@@ -226,33 +298,93 @@ class axialEncoder(nn.Module):
         if self.pos_emb_type == "APE":
             x = x + self.vertical_pos_embedding
         x = self.dropout(x)
-
         if col_mask is not None and self.mask_vertical_attn != "none":
             W = x.shape[1]
             sampled = _extract_shared_column_mask(col_mask, W)
-
-            if self.mask_vertical_attn == "cross":
-                sampled_idx = sampled.nonzero(as_tuple=True)[0]
-                unsampled_idx = (~sampled).nonzero(as_tuple=True)[0]
-                if sampled_idx.numel() == 0:
-                    raise ValueError("Cross attention requires at least one sampled column")
-                if unsampled_idx.numel() > 0:
-                    x_unsampled = x.index_select(1, unsampled_idx)
-                    x_sampled = x.index_select(1, sampled_idx)
-                    x_updated = self.verticalCrossEncoder(
-                        x_unsampled,
-                        x_sampled,
-                        q_positions=unsampled_idx,
-                        kv_positions=sampled_idx,
-                    )
-                    x = x.clone()
-                    x[:, unsampled_idx, :] = x_updated
-            else:
-                attn_mask = _build_vertical_attn_mask(sampled, self.mask_vertical_attn)
-                x = self.verticalEncoder(x, attn_mask=attn_mask)
+            attn_mask = _build_vertical_attn_mask(sampled, self.mask_vertical_attn)
+            x = self.verticalEncoder(x, attn_mask=attn_mask)
         else:
             x = self.verticalEncoder(x)
 
         x = self.vertical_mlp_head(x)
 
+        return x
+
+
+class crossAxialEncoder(nn.Module):
+    """
+    Vertical-only encoder:
+    each inner layer does sampled->unsampled cross-attention followed by
+    unsampled-only self-attention, then scatters unsampled updates back into
+    the full vertical token tensor before the shared vertical output head.
+    """
+    def __init__(self, image_size, numCh=1, d_model=512, nhead=8, num_layers=6, dim_feedforward=None,
+                    dropout=0.1, activation='relu', layer_norm_eps=1e-05, batch_first=True,
+                    device=None, dtype=None, norm=None,
+                    pos_emb_type="APE", rope_theta=100.0, attn_type="complex", row_stride=1):
+        super().__init__()
+        if row_stride != 1:
+            raise ValueError("crossAxialEncoder supports vertical tokens only and requires row_stride=1")
+        if attn_type != "complex":
+            raise ValueError(
+                "crossAxialEncoder only supports attn_type='complex'. "
+                f"Received '{attn_type}'."
+            )
+
+        self.pos_emb_type = pos_emb_type
+        self.d_model = d_model
+        self.is_complex = attn_type in _COMPLEX_ATTN_TYPES
+
+        image_height, image_width = pair(image_size)
+        head_dim = d_model // nhead
+        cis_fn = compute_axial_cis_complex if self.is_complex else compute_axial_cis
+        dtype = torch.cfloat if self.is_complex else None
+        norm = ComplexLayerNorm if self.is_complex else nn.LayerNorm
+        v_from = get_from_embedding("axial", numCh=numCh, image_height=image_height, image_width=image_width)[1]
+
+        self.to_vertical_embedding = nn.Sequential(
+            Rearrange('b c h w -> b w (h c)'),
+            nn.Linear(image_height * numCh, d_model, dtype=dtype),
+        )
+        self.vertical_mlp_head = nn.Sequential(
+            norm(d_model),
+            nn.Linear(d_model, image_height * numCh, dtype=dtype),
+            v_from,
+        )
+        if self.is_complex:
+            apply_trabelsi_(self.to_vertical_embedding[1], criterion="glorot")
+            apply_trabelsi_(self.vertical_mlp_head[1], criterion="glorot")
+        self.dropout = ComplexDropout(dropout) if self.is_complex else nn.Dropout(dropout)
+
+        if pos_emb_type == "APE":
+            freqs_v = None
+            ape_dtype = torch.cfloat if self.is_complex else None
+            self.vertical_pos_embedding = nn.Parameter(torch.randn(1, image_width, d_model, dtype=ape_dtype))
+        elif pos_emb_type in ("Rope-Axial", "Rope-Mixed"):
+            freqs_v = cis_fn(dim=head_dim, end_x=image_width, end_y=1, theta=rope_theta)
+        else:
+            freqs_v = None
+
+        inner_layer = _CrossAxialInnerLayer(
+            d_model, nhead, dim_feedforward, dropout, activation,
+            layer_norm_eps, freqs_cis=freqs_v, attn_type=attn_type
+        )
+        self.verticalEncoder = _CrossAxialEncoderStack(inner_layer, num_layers)
+
+    def forward(self, img, col_mask=None):
+        if col_mask is None:
+            raise ValueError("crossAxialEncoder requires col_mask for sampled/unsampled routing")
+
+        x = self.to_vertical_embedding(img)
+        if self.pos_emb_type == "APE":
+            x = x + self.vertical_pos_embedding
+        x = self.dropout(x)
+
+        W = x.shape[1]
+        sampled = _extract_shared_column_mask(col_mask, W)
+        sampled_idx = sampled.nonzero(as_tuple=True)[0]
+        unsampled_idx = (~sampled).nonzero(as_tuple=True)[0]
+
+        x = self.verticalEncoder(x, sampled_idx, unsampled_idx)
+        x = self.vertical_mlp_head(x)
         return x

@@ -6,7 +6,7 @@ import torch
 from fastmri.data.subsample import EquiSpacedMaskFunc, RandomMaskFunc
 from fastmri.data.transforms import apply_mask
 
-from DcTNN.model import TokenVIT, axVIT, cascadeNet
+from DcTNN.model import TokenVIT, axVIT, CrossAttentionVIT, cascadeNet
 import normalizer as _norm
 
 
@@ -60,6 +60,22 @@ _ENCODER_ARGS = {
             attn_type=cfg.attn_type,
             row_stride=cfg.axial_row_stride,
             mask_vertical_attn=cfg.mask_vertical_attn,
+        ),
+    ),
+    "cross_axial": lambda cfg: (
+        CrossAttentionVIT,
+        dict(
+            layerNo=cfg.layer_no,
+            numCh=cfg.num_channels,
+            d_model=None,
+            nhead=cfg.nhead_axial,
+            num_encoder_layers=cfg.num_encoder_layers,
+            dim_feedforward=None,
+            pos_emb_type=cfg.pos_emb_type,
+            rope_theta=cfg.rope_theta,
+            rope_mixed_rotate=cfg.rope_mixed_rotate,
+            attn_type=cfg.attn_type,
+            row_stride=cfg.axial_row_stride,
         ),
     ),
     "kaleidoscope": lambda cfg: (

@@ -5,6 +5,7 @@ To run experiments, define overrides in train_config.py and run:
     python train.py --exp_idx <N>
 
 Encoder options for `encoders`:
+    "cross_axial"   — vertical-only sampled/unsampled complex cross-attention
     "axial"         — axial row/column transformer (global structure)
     "kaleidoscope"  — kaleidoscope patch transformer (non-local features)
     "patch"         — standard patch transformer (local texture)
@@ -86,7 +87,8 @@ class Config:
 
     pos_emb_type: str = "APE"
     # Attention implementation used inside transformer blocks.
-    # Options: "standard", "complex", "real_valued", "phase_aware"
+    # Options for self-attention: "standard", "complex", "real_valued", "phase_aware"
+    # The "cross_axial" encoder family is complex-only.
     attn_type: str = "standard"
     # Base frequency for RoPE (ignored when pos_emb_type == "APE")
     rope_theta: float = 100.0
@@ -98,8 +100,7 @@ class Config:
     # "lenient" — sampled queries attend only to sampled keys;
     #             unsampled queries attend to all (sampled + unsampled)
     # "strict"  — all queries attend only to sampled keys
-    # "cross"   — true cross-attention: unsampled columns update from sampled keys only;
-    #             sampled columns pass through unchanged (they are context providers)
+    # Cross-attention routing now lives in the separate "cross_axial" encoder family.
     mask_vertical_attn: str = "none"
 
     # ---------------------------------------------------------------------------
