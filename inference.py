@@ -83,7 +83,7 @@ def load_experiment_model(exp_dir: str, device=None):
     Returns a dict with:
         'model':      the loaded nn.Module in eval mode
         'config':     nested dict {'data': {...}, 'model': {...}, 'train': {...}}
-        'checkpoint': raw checkpoint metadata (epoch, val_psnr, best_val_loss)
+        'checkpoint': raw checkpoint metadata (epoch, val_psnr, best_val_psnr)
         'cfg':        Config dataclass (for code that prefers attribute access)
     """
     if device is None:

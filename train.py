@@ -19,7 +19,7 @@ from config import Config
 from train_config import EXPERIMENTS
 from DcTNN.lambda_scheduler import LambdaScheduler
 from train_utils import FastMRIMaskGenerator, build_model, resolve_data_dirs, simulate_undersampling
-from DcTNN.loss import MagnitudeL1Loss
+from DcTNN.loss import build_loss
 from DcTNN.dc import ifft_2d
 
 
@@ -37,9 +37,6 @@ def build_cfg(exp_idx: int) -> Config:
 
 _parser = argparse.ArgumentParser()
 _parser.add_argument('--exp_idx', type=int, default=0)
-_args = _parser.parse_args()
-cfg = build_cfg(_args.exp_idx)
-print(f"Experiment {_args.exp_idx}: {cfg.prefix}_{cfg.name}")
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -80,10 +77,48 @@ def append_metrics(path, record):
 # Epoch helpers
 # ---------------------------------------------------------------------------
 
-def train_one_epoch(model, loader, accel_factors, mask_generator, optimizer, criterion, device):
+def _compute_losses(recon, intermediates, gt, final_criterion, intermediate_criterion, loss_mode):
+    final_loss = final_criterion(recon, gt)
+    stage_losses = [intermediate_criterion(stage_out, gt) for stage_out in intermediates]
+    if stage_losses:
+        intermediate_loss_sum = torch.stack(stage_losses).sum()
+    else:
+        intermediate_loss_sum = torch.zeros((), device=final_loss.device, dtype=final_loss.dtype)
+
+    if loss_mode == "final_only":
+        total_loss = final_loss
+    elif loss_mode == "intermediate_unweighted":
+        total_loss = final_loss + intermediate_loss_sum
+    else:
+        raise ValueError(
+            f"Unknown loss_mode '{loss_mode}'. Choose from: ['final_only', 'intermediate_unweighted']"
+        )
+
+    return total_loss, final_loss, intermediate_loss_sum, stage_losses
+
+
+def _init_stage_totals(num_stages):
+    return [0.0 for _ in range(num_stages)]
+
+
+def _build_epoch_metrics(total_loss, final_loss, intermediate_loss_sum, total_psnr, stage_totals, n):
+    return {
+        "total_loss": total_loss / n,
+        "final_loss": final_loss / n,
+        "intermediate_loss_sum": intermediate_loss_sum / n,
+        "psnr": total_psnr / n,
+        "stage_losses": [loss / n for loss in stage_totals],
+    }
+
+
+def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer,
+                    final_criterion, intermediate_criterion, loss_mode, device):
     model.train()
     total_loss = 0.0
+    total_final_loss = 0.0
+    total_intermediate_loss_sum = 0.0
     total_psnr = 0.0
+    stage_totals = _init_stage_totals(len(model.transformers))
 
     for kspace_full in loader:
         kspace_full = kspace_full.to(device)
@@ -95,27 +130,39 @@ def train_one_epoch(model, loader, accel_factors, mask_generator, optimizer, cri
                 kspace_full, mask, cfg.learning, cfg.norm, kspace_us=kspace_us)
 
         optimizer.zero_grad()
-        recon = model(model_input, DC_input, mask)
-        loss  = criterion(recon, gt)
-        loss.backward()
+        recon, intermediates = model(model_input, DC_input, mask, return_intermediates=True)
+        total_batch_loss, final_loss, intermediate_loss_sum, stage_losses = _compute_losses(
+            recon, intermediates, gt, final_criterion, intermediate_criterion, loss_mode
+        )
+        total_batch_loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.grad_clip)
         optimizer.step()
 
         with torch.no_grad():
             recon_mag = torch.abs(ifft_2d(recon)) if recon.is_complex() else recon
-            total_loss += loss.item()
+            total_loss += total_batch_loss.item()
+            total_final_loss += final_loss.item()
+            total_intermediate_loss_sum += intermediate_loss_sum.item()
             total_psnr += psnr(recon_mag, gt).item()
+            for i, stage_loss in enumerate(stage_losses):
+                stage_totals[i] += stage_loss.item()
 
     n = len(loader)
-    return total_loss / n, total_psnr / n
+    return _build_epoch_metrics(
+        total_loss, total_final_loss, total_intermediate_loss_sum, total_psnr, stage_totals, n
+    )
 
 
 @torch.no_grad()
-def validate(model, loader, accel_factors, image_size, criterion, device):
+def validate(cfg, model, loader, accel_factors, image_size, final_criterion,
+             intermediate_criterion, loss_mode, device):
     model.eval()
     total_loss = 0.0
+    total_final_loss = 0.0
+    total_intermediate_loss_sum = 0.0
     total_psnr = 0.0
     total_zf_psnr = 0.0
+    stage_totals = _init_stage_totals(len(model.transformers))
 
     mask_generator = FastMRIMaskGenerator(
         accel_factors,
@@ -130,16 +177,27 @@ def validate(model, loader, accel_factors, image_size, criterion, device):
 
         model_input, DC_input, gt, _ = simulate_undersampling(
             kspace_full, mask, cfg.learning, cfg.norm, kspace_us=kspace_us)
-        recon = model(model_input, DC_input, mask)
+        recon, intermediates = model(model_input, DC_input, mask, return_intermediates=True)
+        total_batch_loss, final_loss, intermediate_loss_sum, stage_losses = _compute_losses(
+            recon, intermediates, gt, final_criterion, intermediate_criterion, loss_mode
+        )
 
         recon_mag = torch.abs(ifft_2d(recon)) if recon.is_complex() else recon
         zf_mag    = torch.abs(ifft_2d(DC_input)) if DC_input.is_complex() else model_input
-        total_loss    += criterion(recon, gt).item()
+        total_loss    += total_batch_loss.item()
+        total_final_loss += final_loss.item()
+        total_intermediate_loss_sum += intermediate_loss_sum.item()
         total_psnr    += psnr(recon_mag, gt).item()
         total_zf_psnr += psnr(zf_mag, gt).item()
+        for i, stage_loss in enumerate(stage_losses):
+            stage_totals[i] += stage_loss.item()
 
     n = len(loader)
-    return total_loss / n, total_psnr / n, total_zf_psnr / n
+    metrics = _build_epoch_metrics(
+        total_loss, total_final_loss, total_intermediate_loss_sum, total_psnr, stage_totals, n
+    )
+    metrics["zf_psnr"] = total_zf_psnr / n
+    return metrics
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +205,10 @@ def validate(model, loader, accel_factors, image_size, criterion, device):
 # ---------------------------------------------------------------------------
 
 def main():
+    args = _parser.parse_args()
+    cfg = build_cfg(args.exp_idx)
+    print(f"Experiment {args.exp_idx}: {cfg.prefix}_{cfg.name}")
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # ---- Output directory ----
@@ -224,11 +286,12 @@ def main():
         T_max=cfg.epochs,
         eta_min=cfg.lr * 1e-2,
     )
-    criterion = MagnitudeL1Loss()
+    final_criterion = build_loss(cfg.final_loss_type)
+    intermediate_criterion = build_loss(cfg.intermediate_loss_type)
 
     # ---- Resume ----
     start_epoch    = 0
-    best_val_loss  = float('inf')
+    best_val_psnr  = float('-inf')
 
     if cfg.resume and os.path.exists(cfg.resume):
         ckpt = torch.load(cfg.resume, map_location=device)
@@ -236,7 +299,7 @@ def main():
         optimizer.load_state_dict(ckpt['optimizer'])
         scheduler.load_state_dict(ckpt['scheduler'])
         start_epoch   = ckpt['epoch'] + 1
-        best_val_loss = ckpt.get('best_val_loss', float('inf'))
+        best_val_psnr = ckpt.get('best_val_psnr', ckpt.get('val_psnr', float('-inf')))
         print(f"Resumed from epoch {start_epoch}  ({cfg.resume})")
 
     # ---- Lambda scheduler (if active) ----
@@ -253,30 +316,51 @@ def main():
         if lamb_sched is not None:
             model.set_scheduled_lamb(lamb_sched.get_lambda(epoch))
 
-        train_loss, train_psnr = train_one_epoch(model, train_loader, cfg.acceleration_factors,
-                                                mask_generator, optimizer, criterion, device)
-        val_loss, val_psnr, val_zf_psnr = validate(model, val_loader, cfg.acceleration_factors,
-                                                    cfg.image_size, criterion, device)
+        train_metrics = train_one_epoch(
+            cfg, model, train_loader, cfg.acceleration_factors, mask_generator, optimizer,
+            final_criterion, intermediate_criterion, cfg.loss_mode, device
+        )
+        val_metrics = validate(
+            cfg, model, val_loader, cfg.acceleration_factors, cfg.image_size,
+            final_criterion, intermediate_criterion, cfg.loss_mode, device
+        )
         scheduler.step()
 
         lr      = scheduler.get_last_lr()[0]
         elapsed = time.time() - t0
+        train_stage_str = " ".join(
+            f"E{i+1}:{loss:.6f}" for i, loss in enumerate(train_metrics["stage_losses"])
+        )
+        val_stage_str = " ".join(
+            f"E{i+1}:{loss:.6f}" for i, loss in enumerate(val_metrics["stage_losses"])
+        )
 
         print(f"Epoch {epoch+1:03d}/{cfg.epochs}  |  "
-              f"Train L1: {train_loss:.6f}  Train PSNR: {train_psnr:.2f} dB  |  "
-              f"Val L1: {val_loss:.6f}  Val PSNR: {val_psnr:.2f} dB  (ZF: {val_zf_psnr:.2f} dB)  |  "
+              f"Train final: {train_metrics['final_loss']:.6f}  Train total: {train_metrics['total_loss']:.6f}  "
+              f"Train PSNR: {train_metrics['psnr']:.2f} dB  |  "
+              f"Val final: {val_metrics['final_loss']:.6f}  Val total: {val_metrics['total_loss']:.6f}  "
+              f"Val PSNR: {val_metrics['psnr']:.2f} dB  (ZF: {val_metrics['zf_psnr']:.2f} dB)  |  "
+              f"Train stages [{train_stage_str}]  |  Val stages [{val_stage_str}]  |  "
               f"LR: {lr:.2e}  |  {elapsed:.1f}s")
 
         metrics = {
             'epoch':        epoch + 1,
-            'train_l1':     round(train_loss,    6),
-            'train_psnr':   round(train_psnr,    4),
-            'val_l1':       round(val_loss,      6),
-            'val_psnr':     round(val_psnr,      4),
-            'val_zf_psnr':  round(val_zf_psnr,   4),
+            'train_final_loss': round(train_metrics['final_loss'], 6),
+            'train_total_loss': round(train_metrics['total_loss'], 6),
+            'train_intermediate_loss_sum': round(train_metrics['intermediate_loss_sum'], 6),
+            'train_psnr':   round(train_metrics['psnr'], 4),
+            'val_final_loss': round(val_metrics['final_loss'], 6),
+            'val_total_loss': round(val_metrics['total_loss'], 6),
+            'val_intermediate_loss_sum': round(val_metrics['intermediate_loss_sum'], 6),
+            'val_psnr':     round(val_metrics['psnr'], 4),
+            'val_zf_psnr':  round(val_metrics['zf_psnr'], 4),
             'lr':           lr,
             'time_s':       round(elapsed, 1),
         }
+        for i, stage_loss in enumerate(train_metrics["stage_losses"]):
+            metrics[f'train_encoder_{i+1}_loss'] = round(stage_loss, 6)
+        for i, stage_loss in enumerate(val_metrics["stage_losses"]):
+            metrics[f'val_encoder_{i+1}_loss'] = round(stage_loss, 6)
         if model.lamb is not False:
             for i, lv in enumerate(model.lamb):
                 metrics[f'lambda_{i}'] = round(lv.item(), 6)
@@ -285,24 +369,24 @@ def main():
         append_metrics(metrics_path, metrics)
         wandb.log(metrics, step=epoch + 1)
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if val_metrics['psnr'] > best_val_psnr:
+            best_val_psnr = val_metrics['psnr']
             torch.save({
                 'epoch':         epoch,
                 'model':         model.state_dict(),
                 'optimizer':     optimizer.state_dict(),
                 'scheduler':     scheduler.state_dict(),
-                'best_val_loss': best_val_loss,
-                'val_psnr':      val_psnr,
+                'best_val_psnr': best_val_psnr,
+                'val_psnr':      val_metrics['psnr'],
             }, best_path)
-            print(f"  -> Best model saved  (val_l1={best_val_loss:.6f})")
+            print(f"  -> Best model saved  (val_psnr={best_val_psnr:.4f})")
 
         torch.save({
             'epoch':         epoch,
             'model':         model.state_dict(),
             'optimizer':     optimizer.state_dict(),
             'scheduler':     scheduler.state_dict(),
-            'best_val_loss': best_val_loss,
+            'best_val_psnr': best_val_psnr,
         }, latest_path)
 
     wandb.finish()

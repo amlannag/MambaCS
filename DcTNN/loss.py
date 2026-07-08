@@ -36,6 +36,16 @@ class MagnitudeL1Loss(nn.Module):
         return torch.mean(torch.abs(_to_magnitude(pred) - _to_magnitude(gt)))
 
 
+def build_loss(loss_type: str) -> nn.Module:
+    """Factory for magnitude-domain reconstruction losses."""
+    loss_type = loss_type.lower()
+    if loss_type == "l1":
+        return MagnitudeL1Loss()
+    if loss_type == "l2":
+        return MagnitudeImageLoss()
+    raise ValueError(f"Unknown loss_type '{loss_type}'. Choose from: ['l1', 'l2']")
+
+
 class SSIMLoss(nn.Module):
     """
     1 - SSIM, computed in the magnitude image domain.

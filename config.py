@@ -76,15 +76,11 @@ class Config:
     learned_lambda: bool = True
     # Domain the model operates in: "k_space" or "image"
     learning: str = "k_space"
-
     # Normalisation applied during undersampling simulation: "zscore" or None
     norm: str = "zscore"
-
     lambda_schedule: str = "none"
     lambda_start: float = 1.0
     lambda_end: float = 0.1
-
-
     pos_emb_type: str = "APE"
     # Attention implementation used inside transformer blocks.
     # Options for self-attention: "standard", "complex", "real_valued", "phase_aware"
@@ -94,7 +90,6 @@ class Config:
     rope_theta: float = 100.0
     # Randomly rotate initial 2D frequencies in Rope-Mixed (ignored otherwise)
     rope_mixed_rotate: bool = True
-
     # Masking strategy for vertical (column) attention in axial encoders.
     # "none"    — standard self-attention, no masking
     # "lenient" — sampled queries attend only to sampled keys;
@@ -102,11 +97,12 @@ class Config:
     # "strict"  — all queries attend only to sampled keys
     # Cross-attention routing now lives in the separate "cross_axial" encoder family.
     mask_vertical_attn: str = "none"
-
     # ---------------------------------------------------------------------------
     # Training hyperparameters
     # ---------------------------------------------------------------------------
-
+    loss_mode: str = "final_only"
+    final_loss_type: str = "l1"
+    intermediate_loss_type: str = "l1"
     epochs: int = 400
     batch_size: int = 32
     lr: float = 1e-4

@@ -39,15 +39,17 @@ class cascadeNet(nn.Module):
     def set_scheduled_lamb(self, value):
         self.scheduled_lamb = value
 
-    def forward(self, xPrev, y, sampleMask):
+    def forward(self, xPrev, y, sampleMask, return_intermediates=False):
         """
         xPrev      : [B,1,H,W] complex undersampled k-space  (learning="k_space")
                      [B,1,H,W] real magnitude undersampled    (learning="image")
         y          : [B,1,H,W] complex k-space DC reference (always complex)
         sampleMask : [H, W]
-        Returns same domain as xPrev.
+        Returns same domain as xPrev. When return_intermediates=True, also returns
+        the ordered list of post-DC stage states.
         """
         x = xPrev
+        intermediates = []
         for i, transformer in enumerate(self.transformers):
             
             if self.lamb is not False:
@@ -59,4 +61,8 @@ class cascadeNet(nn.Module):
             x = self._dc_func(x + transformer(x, col_mask=sampleMask), y, sampleMask, lamb_i)
             if self.learning == "image":
                 x = x.real    # FFT_DC IFFTs to complex; extract real for next encoder
+            if return_intermediates:
+                intermediates.append(x)
+        if return_intermediates:
+            return x, intermediates
         return x
