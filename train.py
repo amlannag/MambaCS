@@ -77,7 +77,7 @@ def append_metrics(path, record):
 # Epoch helpers
 # ---------------------------------------------------------------------------
 
-def _compute_losses(recon, intermediates, gt, final_criterion, intermediate_criterion, loss_mode):
+def _compute_losses(recon, intermediates, gt, final_criterion, intermediate_criterion, loss_mode, zf_recon=None):
     final_loss = final_criterion(recon, gt)
     stage_losses = [intermediate_criterion(stage_out, gt) for stage_out in intermediates]
     if stage_losses:
@@ -94,20 +94,31 @@ def _compute_losses(recon, intermediates, gt, final_criterion, intermediate_crit
             f"Unknown loss_mode '{loss_mode}'. Choose from: ['final_only', 'intermediate_unweighted']"
         )
 
-    return total_loss, final_loss, intermediate_loss_sum, stage_losses
+    # Per-block loss reduction: how much each block improves over its input
+    # Block 1: zero-fill loss - block1 loss; Block N: block(N-1) loss - blockN loss
+    loss_reductions = []
+    if zf_recon is not None and stage_losses:
+        with torch.no_grad():
+            prev = intermediate_criterion(zf_recon, gt)
+            for sl in stage_losses:
+                loss_reductions.append(prev - sl.detach())
+                prev = sl.detach()
+
+    return total_loss, final_loss, intermediate_loss_sum, stage_losses, loss_reductions
 
 
 def _init_stage_totals(num_stages):
     return [0.0 for _ in range(num_stages)]
 
 
-def _build_epoch_metrics(total_loss, final_loss, intermediate_loss_sum, total_psnr, stage_totals, n):
+def _build_epoch_metrics(total_loss, final_loss, intermediate_loss_sum, total_psnr, stage_totals, n, reduction_totals=None):
     return {
         "total_loss": total_loss / n,
         "final_loss": final_loss / n,
         "intermediate_loss_sum": intermediate_loss_sum / n,
         "psnr": total_psnr / n,
         "stage_losses": [loss / n for loss in stage_totals],
+        "stage_reductions": [r / n for r in reduction_totals] if reduction_totals else [],
     }
 
 
@@ -119,6 +130,7 @@ def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer
     total_intermediate_loss_sum = 0.0
     total_psnr = 0.0
     stage_totals = _init_stage_totals(len(model.transformers))
+    reduction_totals = _init_stage_totals(len(model.transformers))
 
     for kspace_full in loader:
         kspace_full = kspace_full.to(device)
@@ -131,8 +143,8 @@ def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer
 
         optimizer.zero_grad()
         recon, intermediates = model(model_input, DC_input, mask, return_intermediates=True)
-        total_batch_loss, final_loss, intermediate_loss_sum, stage_losses = _compute_losses(
-            recon, intermediates, gt, final_criterion, intermediate_criterion, loss_mode
+        total_batch_loss, final_loss, intermediate_loss_sum, stage_losses, loss_reductions = _compute_losses(
+            recon, intermediates, gt, final_criterion, intermediate_criterion, loss_mode, zf_recon=DC_input
         )
         total_batch_loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.grad_clip)
@@ -146,10 +158,12 @@ def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer
             total_psnr += psnr(recon_mag, gt).item()
             for i, stage_loss in enumerate(stage_losses):
                 stage_totals[i] += stage_loss.item()
+            for i, reduction in enumerate(loss_reductions):
+                reduction_totals[i] += reduction.item()
 
     n = len(loader)
     return _build_epoch_metrics(
-        total_loss, total_final_loss, total_intermediate_loss_sum, total_psnr, stage_totals, n
+        total_loss, total_final_loss, total_intermediate_loss_sum, total_psnr, stage_totals, n, reduction_totals
     )
 
 
@@ -163,6 +177,7 @@ def validate(cfg, model, loader, accel_factors, image_size, final_criterion,
     total_psnr = 0.0
     total_zf_psnr = 0.0
     stage_totals = _init_stage_totals(len(model.transformers))
+    reduction_totals = _init_stage_totals(len(model.transformers))
 
     mask_generator = FastMRIMaskGenerator(
         accel_factors,
@@ -178,8 +193,8 @@ def validate(cfg, model, loader, accel_factors, image_size, final_criterion,
         model_input, DC_input, gt, _ = simulate_undersampling(
             kspace_full, mask, cfg.learning, cfg.norm, kspace_us=kspace_us)
         recon, intermediates = model(model_input, DC_input, mask, return_intermediates=True)
-        total_batch_loss, final_loss, intermediate_loss_sum, stage_losses = _compute_losses(
-            recon, intermediates, gt, final_criterion, intermediate_criterion, loss_mode
+        total_batch_loss, final_loss, intermediate_loss_sum, stage_losses, loss_reductions = _compute_losses(
+            recon, intermediates, gt, final_criterion, intermediate_criterion, loss_mode, zf_recon=DC_input
         )
 
         recon_mag = torch.abs(ifft_2d(recon)) if recon.is_complex() else recon
@@ -191,10 +206,12 @@ def validate(cfg, model, loader, accel_factors, image_size, final_criterion,
         total_zf_psnr += psnr(zf_mag, gt).item()
         for i, stage_loss in enumerate(stage_losses):
             stage_totals[i] += stage_loss.item()
+        for i, reduction in enumerate(loss_reductions):
+            reduction_totals[i] += reduction.item()
 
     n = len(loader)
     metrics = _build_epoch_metrics(
-        total_loss, total_final_loss, total_intermediate_loss_sum, total_psnr, stage_totals, n
+        total_loss, total_final_loss, total_intermediate_loss_sum, total_psnr, stage_totals, n, reduction_totals
     )
     metrics["zf_psnr"] = total_zf_psnr / n
     return metrics
@@ -361,6 +378,10 @@ def main():
             metrics[f'train_encoder_{i+1}_loss'] = round(stage_loss, 6)
         for i, stage_loss in enumerate(val_metrics["stage_losses"]):
             metrics[f'val_encoder_{i+1}_loss'] = round(stage_loss, 6)
+        for i, reduction in enumerate(train_metrics["stage_reductions"]):
+            metrics[f'train_encoder_{i+1}_loss_reduction'] = round(reduction, 6)
+        for i, reduction in enumerate(val_metrics["stage_reductions"]):
+            metrics[f'val_encoder_{i+1}_loss_reduction'] = round(reduction, 6)
         if model.lamb is not False:
             for i, lv in enumerate(model.lamb):
                 metrics[f'lambda_{i}'] = round(lv.item(), 6)
