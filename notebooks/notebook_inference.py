@@ -563,6 +563,174 @@ def tv_recon_singlecoil(us_ks_centered, mask_2d, lam, num_iters=200, step_size=0
                 'step_size': step_size, 'use_momentum': use_momentum, 'lambda': lam}
 
 
+def plot_val_psnr_comparison(experiments, baseline_name='Image'):
+    """
+    Horizontal bar chart of val PSNR relative to a baseline experiment.
+    experiments: dict of {pretty_name: {'checkpoint': {'val_psnr': float}, ...}}
+    baseline_name: key in experiments to use as the zero reference.
+    """
+    names, psnrs = [], []
+    for name, exp_data in experiments.items():
+        vp = exp_data['checkpoint'].get('val_psnr', float('nan'))
+        names.append(name)
+        psnrs.append(vp)
+
+    if baseline_name not in experiments:
+        raise ValueError(f"Baseline '{baseline_name}' not found in experiments.")
+
+    baseline_psnr = experiments[baseline_name]['checkpoint'].get('val_psnr', float('nan'))
+    deltas = [p - baseline_psnr for p in psnrs]
+
+    # sort by delta descending (best on top)
+    order = sorted(range(len(names)), key=lambda i: deltas[i], reverse=True)
+    names_s  = [names[i]  for i in order]
+    psnrs_s  = [psnrs[i]  for i in order]
+    deltas_s = [deltas[i] for i in order]
+
+    colors = ['#4C72B0' if n != baseline_name else '#888888' for n in names_s]
+
+    fig, ax = plt.subplots(figsize=(14, 0.55 * len(names_s) + 1.2))
+    bars = ax.barh(range(len(names_s)), deltas_s, color=colors, edgecolor='white', height=0.6)
+
+    # annotate each bar with absolute PSNR and delta
+    for i, (delta, abs_p) in enumerate(zip(deltas_s, psnrs_s)):
+        x_off = 0.03 * (max(deltas_s) - min(deltas_s) + 1e-6)
+        ha = 'left' if delta >= 0 else 'right'
+        sign = '+' if delta > 0 else ''
+        ax.text(delta + (x_off if delta >= 0 else -x_off), i,
+                f'{abs_p:.2f} dB  ({sign}{delta:.2f})',
+                va='center', ha=ha, fontsize=9)
+
+    ax.set_yticks(range(len(names_s)))
+    ax.set_yticklabels(names_s, fontsize=10)
+    ax.axvline(0, color='black', linewidth=1.0, linestyle='--')
+    ax.set_xlabel(f'ΔPSNR relative to {baseline_name} (dB)', fontsize=10)
+    ax.set_title('Val PSNR comparison (best checkpoint)', fontsize=12, fontweight='bold')
+
+    # pad x-axis so labels aren't clipped
+    spread = max(abs(min(deltas_s)), abs(max(deltas_s)), 0.5)
+    ax.set_xlim(-spread * 1.8, spread * 1.8)
+    ax.invert_yaxis()
+    plt.tight_layout()
+    plt.show()
+    plt.close(fig)
+
+
+def plot_kspace_error_heatmap(experiments, test_images, device, img_idx=0, seed=42):
+    """
+    For one test image, run inference on all experiments and plot log|FFT(gt) - FFT(recon)|
+    as a heatmap grid — one panel per model, shared colour scale.
+    """
+    fname, img_np = test_images[img_idx]
+    results = run_inference_png(img_np, experiments, device, seed=seed)
+
+    # keep only experiment models (drop TV baseline)
+    exp_keys = [k for k in results if k in experiments]
+
+    # compute log-magnitude k-space error for each model
+    error_maps = {}
+    for name in exp_keys:
+        r = results[name]
+        gt_ks  = fft2c_np(r['gt'].astype(np.complex64))
+        rec_ks = fft2c_np(r['recon'].astype(np.complex64))
+        error_maps[name] = np.log1p(np.abs(gt_ks - rec_ks))
+
+    # shared colour scale at 99th percentile across all maps
+    all_vals = np.concatenate([e.ravel() for e in error_maps.values()])
+    vmax = float(np.percentile(all_vals, 99))
+
+    n = len(exp_keys)
+    fig, axes = plt.subplots(1, n, figsize=(4.5 * n, 4.5),
+                             gridspec_kw={'wspace': 0.05})
+    if n == 1:
+        axes = [axes]
+
+    for ax, name in zip(axes, exp_keys):
+        im = ax.imshow(np.fft.fftshift(error_maps[name]),
+                       cmap='inferno', vmin=0, vmax=vmax, origin='upper')
+        ax.set_title(name, fontsize=9, fontweight='bold', pad=4)
+        ax.axis('off')
+
+    fig.colorbar(im, ax=axes, shrink=0.75, pad=0.01, label='log(1 + |K-space error|)')
+    fig.suptitle(f'K-space error heatmap — {fname}', fontsize=11, fontweight='bold', y=1.01)
+    plt.show()
+    plt.close(fig)
+
+
+def forward_no_dc(model, x, mask):
+    """E1→E2→E3 with residual adds, no DC at any stage. Returns raw k-space [B,1,H,W]."""
+    for transformer in model.transformers:
+        x = x + transformer(x, col_mask=mask)
+    return x
+
+
+def forward_no_last_dc(model, x, y, mask, lamb_val=1.0):
+    """E1→DC→...→E(N-1)→DC→EN, skip final DC. Returns raw k-space [B,1,H,W]."""
+    n = len(model.transformers)
+    for i, transformer in enumerate(model.transformers):
+        x_enc = x + transformer(x, col_mask=mask)
+        if i < n - 1:
+            x = model._dc_func(x_enc, y, mask, lamb_val)
+        else:
+            x = x_enc
+    return x
+
+
+def _kspace_freq_mask(H, W, low_radius_frac=0.1):
+    """Boolean masks for low/high frequency regions (centred on DC)."""
+    cy, cx = H // 2, W // 2
+    ys, xs = np.ogrid[:H, :W]
+    r = np.sqrt(((ys - cy) / H) ** 2 + ((xs - cx) / W) ** 2)
+    low_mask  = r <= low_radius_frac
+    high_mask = ~low_mask
+    return low_mask, high_mask
+
+
+def plot_kspace_freq_error_bars(experiments, test_images, device,
+                                img_idx=0, seed=42, low_radius_frac=0.1):
+    """
+    Grouped bar chart of total k-space error in low vs high frequency regions per model.
+    low_radius_frac: radius of the low-freq circle as a fraction of image dimensions.
+    """
+    fname, img_np = test_images[img_idx]
+    results = run_inference_png(img_np, experiments, device, seed=seed)
+    exp_keys = [k for k in results if k in experiments]
+
+    ref_shape = results[exp_keys[0]]['gt'].shape
+    low_mask, high_mask = _kspace_freq_mask(*ref_shape, low_radius_frac=low_radius_frac)
+
+    low_errors, high_errors = [], []
+    for name in exp_keys:
+        r = results[name]
+        gt_ks  = fft2c_np(r['gt'].astype(np.complex64))
+        rec_ks = fft2c_np(r['recon'].astype(np.complex64))
+        err    = np.abs(gt_ks - rec_ks)
+        err_shifted = np.fft.fftshift(err)
+        low_errors.append(float(err_shifted[low_mask].sum()))
+        high_errors.append(float(err_shifted[high_mask].sum()))
+
+    x      = np.arange(len(exp_keys))
+    width  = 0.35
+    fig, ax = plt.subplots(figsize=(max(10, 2.2 * len(exp_keys)), 5))
+    ax.bar(x - width / 2, low_errors,  width, label='Low frequency',  color='#4C72B0', edgecolor='white')
+    ax.bar(x + width / 2, high_errors, width, label='High frequency', color='#DD8452', edgecolor='white')
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(exp_keys, fontsize=9, rotation=15, ha='right')
+    ax.set_ylabel('Sum of |K-space error|', fontsize=10)
+    ax.set_title(
+        f'K-space error by frequency region — {fname}\n'
+        f'(low freq: r ≤ {low_radius_frac:.0%} of image size)',
+        fontsize=11, fontweight='bold'
+    )
+    ax.legend(fontsize=10)
+    ax.yaxis.grid(True, linestyle='--', alpha=0.5)
+    ax.set_axisbelow(True)
+    plt.tight_layout()
+    plt.show()
+    plt.close(fig)
+
+
 def run_tv_lambda_sweep(full_ks, accel, lam_values, seed=1234, num_iters=200, step_size=0.1,
                         use_momentum=False, crop_shape=(320, 320), center_fractions=None):
     """
