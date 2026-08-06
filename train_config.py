@@ -20,10 +20,10 @@ EXPERIMENTS = [
     # linear lambda schedule 0→1 with intermediate loss at every encoder stage
     {
         **_BASE,
-        "name": "lambda_scheduled_intermediate_l1_4x",
+        "name": "lambda_scheduled_1to0_4x",
         "lambda_schedule": "linear",
-        "lambda_start": 0.0,
-        "lambda_end": 1.0,
-        "loss_mode": "intermediate_unweighted",
+        "lambda_start": 1.0,
+        "lambda_end": 0.0,
+        "loss_mode": "final_only",
     },
 ]
