@@ -6,6 +6,7 @@ import argparse
 import dataclasses
 import json
 import os
+import random
 import time
 
 import numpy as np
@@ -77,6 +78,21 @@ def append_metrics(path, record):
 # Epoch helpers
 # ---------------------------------------------------------------------------
 
+def _seed_everything(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+def _seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
 def _compute_losses(recon, intermediates, gt, final_criterion, intermediate_criterion, loss_mode, zf_recon=None):
     final_loss = final_criterion(recon, gt)
     stage_losses = [intermediate_criterion(stage_out, gt) for stage_out in intermediates]
@@ -123,7 +139,7 @@ def _build_epoch_metrics(total_loss, final_loss, intermediate_loss_sum, total_ps
 
 
 def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer,
-                    final_criterion, intermediate_criterion, loss_mode, device):
+                    final_criterion, intermediate_criterion, loss_mode, device, epoch):
     model.train()
     total_loss = 0.0
     total_final_loss = 0.0
@@ -131,11 +147,16 @@ def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer
     total_psnr = 0.0
     stage_totals = _init_stage_totals(len(model.transformers))
     reduction_totals = _init_stage_totals(len(model.transformers))
+    accel_rng = np.random.default_rng(cfg.seed + epoch)
 
-    for kspace_full in loader:
+    for batch_idx, kspace_full in enumerate(loader):
         kspace_full = kspace_full.to(device)
-        R    = accel_factors[np.random.randint(len(accel_factors))]
-        kspace_us, mask, _ = mask_generator.apply(kspace_full, R)
+        R    = accel_factors[int(accel_rng.integers(len(accel_factors)))]
+        kspace_us, mask, _ = mask_generator.apply(
+            kspace_full,
+            R,
+            seed=(cfg.seed, epoch, batch_idx, int(R)),
+        )
 
         with torch.no_grad():
             model_input, DC_input, gt, _ = simulate_undersampling(
@@ -187,7 +208,7 @@ def validate(cfg, model, loader, accel_factors, image_size, final_criterion,
 
     for batch_idx, kspace_full in enumerate(loader):
         kspace_full = kspace_full.to(device)
-        R    = accel_factors[np.random.randint(len(accel_factors))]
+        R    = accel_factors[batch_idx % len(accel_factors)]
         kspace_us, mask, _ = mask_generator.apply(kspace_full, R, seed=(cfg.seed, batch_idx, int(R)))
 
         model_input, DC_input, gt, _ = simulate_undersampling(
@@ -225,6 +246,7 @@ def main():
     args = _parser.parse_args()
     cfg = build_cfg(args.exp_idx)
     print(f"Experiment {args.exp_idx}: {cfg.prefix}_{cfg.name}")
+    _seed_everything(cfg.seed)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -266,16 +288,22 @@ def main():
 
     train_ds = _make_dataset(train_data_dir)
     val_ds   = _make_dataset(val_data_dir, max_files=cfg.max_val_files)
+    train_generator = torch.Generator().manual_seed(cfg.seed)
+    val_generator = torch.Generator().manual_seed(cfg.seed)
 
     train_loader = DataLoader(train_ds, batch_size=cfg.batch_size,
                               shuffle=True,  num_workers=cfg.num_workers,
                               pin_memory=True,
-                              persistent_workers=cfg.num_workers > 0)
+                              persistent_workers=cfg.num_workers > 0,
+                              worker_init_fn=_seed_worker,
+                              generator=train_generator)
 
     val_loader = DataLoader(val_ds, batch_size=cfg.batch_size,
                             shuffle=False, num_workers=cfg.num_workers,
                             pin_memory=True,
-                            persistent_workers=cfg.num_workers > 0)
+                            persistent_workers=cfg.num_workers > 0,
+                            worker_init_fn=_seed_worker,
+                            generator=val_generator)
 
     file_list = getattr(val_ds, 'h5_files', None) or getattr(val_ds, 'image_files', None)
     print(f"Train dir   : {train_data_dir}")
@@ -335,7 +363,7 @@ def main():
 
         train_metrics = train_one_epoch(
             cfg, model, train_loader, cfg.acceleration_factors, mask_generator, optimizer,
-            final_criterion, intermediate_criterion, cfg.loss_mode, device
+            final_criterion, intermediate_criterion, cfg.loss_mode, device, epoch
         )
         val_metrics = validate(
             cfg, model, val_loader, cfg.acceleration_factors, cfg.image_size,
@@ -372,6 +400,7 @@ def main():
             'val_psnr':     round(val_metrics['psnr'], 4),
             'val_zf_psnr':  round(val_metrics['zf_psnr'], 4),
             'lr':           lr,
+            'seed':         cfg.seed,
             'time_s':       round(elapsed, 1),
         }
         for i, stage_loss in enumerate(train_metrics["stage_losses"]):
