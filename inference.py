@@ -10,13 +10,14 @@ import torch
 
 from config import Config
 from train_utils import build_model
+from normalizer import kspace_to_image_magnitude
 
 
 # Fields that belong in cfg['data'] vs cfg['model'] for notebook consumers.
 _DATA_KEYS = {
     "dataset", "data_dir", "val_data_dir", "kspace_key", "image_size",
     "num_channels", "acceleration_factors", "center_fractions", "mask_type",
-    "val_fraction", "seed", "max_val_files", "norm",
+    "val_fraction", "seed", "max_val_files", "norm", "companding_p", "companding_a",
 }
 _MODEL_KEYS = {
     "encoders", "patch_size", "axial_row_stride", "nhead_patch", "nhead_axial",
@@ -129,6 +130,8 @@ def _denormalize_image(recon: torch.Tensor, stats: dict) -> torch.Tensor:
     Invert zscore normalisation on a reconstructed tensor (IFFT already applied
     for k_space mode). Returns a complex or real tensor; caller applies to_magnitude.
     """
+    if recon.is_complex() and stats and stats.get("normalization") == "kspace_companding":
+        return kspace_to_image_magnitude(recon, stats)
     if not stats or "mean_r" not in stats:
         return recon
     mean_r, std_r = stats["mean_r"], stats["std_r"]

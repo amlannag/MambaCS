@@ -21,7 +21,7 @@ from train_config import EXPERIMENTS
 from DcTNN.lambda_scheduler import LambdaScheduler
 from train_utils import FastMRIMaskGenerator, build_model, resolve_data_dirs, simulate_undersampling
 from DcTNN.loss import build_loss
-from DcTNN.dc import ifft_2d
+from normalizer import kspace_to_image_magnitude
 
 
 def build_cfg(exp_idx: int) -> Config:
@@ -93,9 +93,9 @@ def _seed_worker(worker_id):
     np.random.seed(worker_seed)
     random.seed(worker_seed)
 
-def _compute_losses(recon, intermediates, gt, final_criterion, intermediate_criterion, loss_mode, zf_recon=None):
-    final_loss = final_criterion(recon, gt)
-    stage_losses = [intermediate_criterion(stage_out, gt) for stage_out in intermediates]
+def _compute_losses(recon, intermediates, gt, final_criterion, intermediate_criterion, loss_mode, stats=None, zf_recon=None):
+    final_loss = final_criterion(recon, gt, stats=stats)
+    stage_losses = [intermediate_criterion(stage_out, gt, stats=stats) for stage_out in intermediates]
     if stage_losses:
         intermediate_loss_sum = torch.stack(stage_losses).sum()
     else:
@@ -115,7 +115,7 @@ def _compute_losses(recon, intermediates, gt, final_criterion, intermediate_crit
     loss_reductions = []
     if zf_recon is not None and stage_losses:
         with torch.no_grad():
-            prev = intermediate_criterion(zf_recon, gt)
+            prev = intermediate_criterion(zf_recon, gt, stats=stats)
             for sl in stage_losses:
                 loss_reductions.append(prev - sl.detach())
                 prev = sl.detach()
@@ -159,20 +159,27 @@ def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer
         )
 
         with torch.no_grad():
-            model_input, DC_input, gt, _ = simulate_undersampling(
-                kspace_full, mask, cfg.learning, cfg.norm, kspace_us=kspace_us)
+            model_input, DC_input, gt, stats = simulate_undersampling(
+                kspace_full,
+                mask,
+                cfg.learning,
+                cfg.norm,
+                kspace_us=kspace_us,
+                companding_p=cfg.companding_p,
+                companding_a=cfg.companding_a,
+            )
 
         optimizer.zero_grad()
         recon, intermediates = model(model_input, DC_input, mask, return_intermediates=True)
         total_batch_loss, final_loss, intermediate_loss_sum, stage_losses, loss_reductions = _compute_losses(
-            recon, intermediates, gt, final_criterion, intermediate_criterion, loss_mode, zf_recon=DC_input
+            recon, intermediates, gt, final_criterion, intermediate_criterion, loss_mode, stats=stats, zf_recon=DC_input
         )
         total_batch_loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.grad_clip)
         optimizer.step()
 
         with torch.no_grad():
-            recon_mag = torch.abs(ifft_2d(recon)) if recon.is_complex() else recon
+            recon_mag = kspace_to_image_magnitude(recon, stats)
             total_loss += total_batch_loss.item()
             total_final_loss += final_loss.item()
             total_intermediate_loss_sum += intermediate_loss_sum.item()
@@ -211,15 +218,22 @@ def validate(cfg, model, loader, accel_factors, image_size, final_criterion,
         R    = accel_factors[batch_idx % len(accel_factors)]
         kspace_us, mask, _ = mask_generator.apply(kspace_full, R, seed=(cfg.seed, batch_idx, int(R)))
 
-        model_input, DC_input, gt, _ = simulate_undersampling(
-            kspace_full, mask, cfg.learning, cfg.norm, kspace_us=kspace_us)
+        model_input, DC_input, gt, stats = simulate_undersampling(
+            kspace_full,
+            mask,
+            cfg.learning,
+            cfg.norm,
+            kspace_us=kspace_us,
+            companding_p=cfg.companding_p,
+            companding_a=cfg.companding_a,
+        )
         recon, intermediates = model(model_input, DC_input, mask, return_intermediates=True)
         total_batch_loss, final_loss, intermediate_loss_sum, stage_losses, loss_reductions = _compute_losses(
-            recon, intermediates, gt, final_criterion, intermediate_criterion, loss_mode, zf_recon=DC_input
+            recon, intermediates, gt, final_criterion, intermediate_criterion, loss_mode, stats=stats, zf_recon=DC_input
         )
 
-        recon_mag = torch.abs(ifft_2d(recon)) if recon.is_complex() else recon
-        zf_mag    = torch.abs(ifft_2d(DC_input)) if DC_input.is_complex() else model_input
+        recon_mag = kspace_to_image_magnitude(recon, stats)
+        zf_mag    = kspace_to_image_magnitude(DC_input, stats)
         total_loss    += total_batch_loss.item()
         total_final_loss += final_loss.item()
         total_intermediate_loss_sum += intermediate_loss_sum.item()

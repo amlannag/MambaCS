@@ -25,6 +25,7 @@ from fastmri.data.subsample import RandomMaskFunc
 from DcTNN.dc import fft_2d, ifft_2d
 from train_utils import simulate_undersampling, build_model, FastMRIMaskGenerator
 from config import Config
+from normalizer import kspace_to_image_magnitude
 
 
 # ── Metrics ───────────────────────────────────────────────────────────────────
@@ -275,7 +276,7 @@ def denormalize_recon(recon, stats, learning):
     """
     if not stats or 'mean_r' not in stats:
         if recon.is_complex():
-            return torch.abs(ifft_2d(recon))[0, 0].cpu().numpy()
+            return kspace_to_image_magnitude(recon, stats)[0, 0].cpu().numpy()
         return recon[0, 0].cpu().numpy()
     mean_r, std_r = stats['mean_r'], stats['std_r']
     mean_i, std_i = stats['mean_i'], stats['std_i']
@@ -305,7 +306,12 @@ def run_inference_kspace(kspace_tensor, models, cfgs, image_size, accel, device,
         learning = cfgs[label].learning
         norm = cfgs[label].norm or 'none'
         model_input, dc_input, _, stats = simulate_undersampling(
-            ks, mask, learning=learning, norm=norm
+            ks,
+            mask,
+            learning=learning,
+            norm=norm,
+            companding_p=getattr(cfgs[label], 'companding_p', 0.8),
+            companding_a=getattr(cfgs[label], 'companding_a', 0.5),
         )
         with torch.no_grad():
             recon = model(model_input, dc_input, mask)
@@ -341,13 +347,19 @@ def run_inference_png(img_np, experiments, device, seed=42, tv_weight=0.1):
         kspace_us, mask, _ = mask_gen.apply(kspace_full, accel, seed=seed)
 
         model_input, dc_input, _gt_norm, stats = simulate_undersampling(
-            kspace_full, mask, learning=learning, norm=norm, kspace_us=kspace_us
+            kspace_full,
+            mask,
+            learning=learning,
+            norm=norm,
+            kspace_us=kspace_us,
+            companding_p=data_cfg.get('companding_p', 0.8),
+            companding_a=data_cfg.get('companding_a', 0.5),
         )
         with torch.no_grad():
             recon_norm = model(model_input, dc_input, mask)
 
         if learning == 'k_space':
-            recon_img = _denormalize_image(ifft_2d(recon_norm), stats)
+            recon_img = _denormalize_image(recon_norm, stats)
         else:
             recon_img = _denormalize_image(recon_norm, stats)
         recon_np = to_magnitude(recon_img)

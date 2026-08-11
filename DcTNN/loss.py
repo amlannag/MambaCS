@@ -2,17 +2,17 @@
 import torch
 import torch.nn.functional as F
 from torch import nn
-from DcTNN.dc import ifft_2d
+from normalizer import kspace_to_image_magnitude
 
 
-def _to_magnitude(x):
+def _to_magnitude(x, stats=None):
     """
     Bring x into the real magnitude image domain.
     - complex (k-space): ifft2 → abs → real magnitude, values ≥ 0
     - real (image domain): pass through as-is
     """
     if x.is_complex():
-        return torch.abs(ifft_2d(x))
+        return kspace_to_image_magnitude(x, stats)
     return x
 
 
@@ -26,14 +26,14 @@ def _gaussian_kernel(size: int = 11, sigma: float = 1.5, device=None) -> torch.T
 
 class MagnitudeImageLoss(nn.Module):
     """MSE in the normalised magnitude image domain."""
-    def forward(self, pred, gt):
-        return torch.mean((_to_magnitude(pred) - _to_magnitude(gt)) ** 2)
+    def forward(self, pred, gt, stats=None):
+        return torch.mean((_to_magnitude(pred, stats) - _to_magnitude(gt)) ** 2)
 
 
 class MagnitudeL1Loss(nn.Module):
     """L1 loss in the normalised magnitude image domain."""
-    def forward(self, pred, gt):
-        return torch.mean(torch.abs(_to_magnitude(pred) - _to_magnitude(gt)))
+    def forward(self, pred, gt, stats=None):
+        return torch.mean(torch.abs(_to_magnitude(pred, stats) - _to_magnitude(gt)))
 
 
 def build_loss(loss_type: str) -> nn.Module:
@@ -77,7 +77,7 @@ class SSIMLoss(nn.Module):
         den = (mu_x ** 2 + mu_y ** 2 + self.C1) * (sigma_x + sigma_y + self.C2)
         return (num / den).mean()
 
-    def forward(self, pred: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
-        p = _to_magnitude(pred)
+    def forward(self, pred: torch.Tensor, gt: torch.Tensor, stats=None) -> torch.Tensor:
+        p = _to_magnitude(pred, stats)
         g = _to_magnitude(gt)
         return 1.0 - self._ssim(p, g)

@@ -225,18 +225,35 @@ class FastMRIMaskGenerator:
 
 
 _NORMALIZERS = {
-    "zscore": _norm.zscore,
-    None:     _norm.none,
-    "none":   _norm.none,
+    "zscore":            _norm.zscore,
+    "kspace_companding": _norm.kspace_companding,
+    None:                _norm.none,
+    "none":              _norm.none,
 }
 
 
-def simulate_undersampling(kspace_full, mask, learning="k_space", norm="none", kspace_us=None):
+def simulate_undersampling(
+    kspace_full,
+    mask,
+    learning="k_space",
+    norm="none",
+    kspace_us=None,
+    companding_p: float = 0.8,
+    companding_a: float = 0.5,
+):
     """
     norm="zscore" : z-score normalise real/imag separately using undersampled image stats
+    norm="kspace_companding" : radial magnitude companding in k-space (k_space learning only)
     norm=None     : no normalisation — tensors left in raw k-space units
     """
     fn = _NORMALIZERS.get(norm)
     if fn is None:
         raise ValueError(f"Unknown norm '{norm}'. Choose from: {list(_NORMALIZERS)}")
-    return fn(kspace_full, mask, learning, kspace_us=kspace_us)
+    return fn(
+        kspace_full,
+        mask,
+        learning,
+        kspace_us=kspace_us,
+        companding_p=companding_p,
+        companding_a=companding_a,
+    )

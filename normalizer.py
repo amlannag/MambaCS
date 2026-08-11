@@ -11,8 +11,51 @@ learning="image"   : model_input is real magnitude    [B,1,H,W]
 import torch
 from DcTNN.dc import fft_2d, ifft_2d
 
+COMPANDING_EPS = 1e-6
 
-def zscore(kspace_full, mask, learning="k_space", kspace_us=None):
+
+def _companding_weight_like(kspace: torch.Tensor, a: float, p: float, eps: float = COMPANDING_EPS) -> torch.Tensor:
+    """Build a centered radial companding weight map matching the notebook convention."""
+    _, _, h, w = kspace.shape
+    y = torch.linspace(-h / 2, h / 2, h, device=kspace.device, dtype=kspace.real.dtype)
+    x = torch.linspace(-w / 2, w / 2, w, device=kspace.device, dtype=kspace.real.dtype)
+    yy, xx = torch.meshgrid(y, x, indexing="ij")
+    weight = torch.clamp((a * (xx.square() + yy.square())).pow(p), min=eps)
+    return weight.unsqueeze(0).unsqueeze(0)
+
+
+def apply_kspace_companding(kspace: torch.Tensor, a: float, p: float, eps: float = COMPANDING_EPS) -> torch.Tensor:
+    """Scale k-space magnitude radially while preserving complex phase."""
+    if not kspace.is_complex():
+        raise TypeError("k-space companding requires a complex tensor")
+    return kspace * _companding_weight_like(kspace, a=a, p=p, eps=eps)
+
+
+def invert_kspace_companding(kspace: torch.Tensor, a: float, p: float, eps: float = COMPANDING_EPS) -> torch.Tensor:
+    """Invert radial k-space companding while preserving complex phase."""
+    if not kspace.is_complex():
+        raise TypeError("k-space companding inversion requires a complex tensor")
+    return kspace / _companding_weight_like(kspace, a=a, p=p, eps=eps)
+
+
+def kspace_to_image_magnitude(kspace: torch.Tensor, metric: dict | None = None) -> torch.Tensor:
+    """
+    Convert complex k-space into image magnitude.
+    Companded tensors are first inverse-companded, then transformed via IFFT.
+    """
+    if not kspace.is_complex():
+        return kspace
+    if metric and metric.get("normalization") == "kspace_companding":
+        kspace = invert_kspace_companding(
+            kspace,
+            a=metric["companding_a"],
+            p=metric["companding_p"],
+            eps=metric.get("companding_eps", COMPANDING_EPS),
+        )
+    return torch.abs(ifft_2d(kspace))
+
+
+def zscore(kspace_full, mask, learning="k_space", kspace_us=None, **_unused):
     """Z-score normalise real and imaginary channels separately using undersampled image stats."""
     if kspace_us is None:
         kspace_us = kspace_full * mask
@@ -39,13 +82,41 @@ def zscore(kspace_full, mask, learning="k_space", kspace_us=None):
     return _build_outputs(img_us_norm, img_gt_norm, metric, learning)
 
 
-def none(kspace_full, mask, learning="k_space", kspace_us=None):
+def none(kspace_full, mask, learning="k_space", kspace_us=None, **_unused):
     """No normalisation — tensors passed through in raw k-space units."""
     if kspace_us is None:
         kspace_us = kspace_full * mask
     img_us    = ifft_2d(kspace_us)
     img_gt    = ifft_2d(kspace_full)
     return _build_outputs(img_us, img_gt, {"normalization": "none"}, learning)
+
+
+def kspace_companding(
+    kspace_full,
+    mask,
+    learning="k_space",
+    kspace_us=None,
+    companding_p: float = 0.8,
+    companding_a: float = 0.5,
+    companding_eps: float = COMPANDING_EPS,
+):
+    """Radially compand k-space magnitude while keeping the model entirely in companded k-space."""
+    if learning != "k_space":
+        raise ValueError("norm='kspace_companding' is only supported when learning='k_space'")
+    if kspace_us is None:
+        kspace_us = kspace_full * mask
+
+    kspace_us_comp = apply_kspace_companding(kspace_us, a=companding_a, p=companding_p, eps=companding_eps)
+    kspace_full_comp = apply_kspace_companding(kspace_full, a=companding_a, p=companding_p, eps=companding_eps)
+    metric = {
+        "normalization": "kspace_companding",
+        "companding_p": companding_p,
+        "companding_a": companding_a,
+        "companding_eps": companding_eps,
+        "image_shape": tuple(int(v) for v in kspace_full.shape[-2:]),
+    }
+    gt = kspace_to_image_magnitude(kspace_full_comp, metric)
+    return kspace_us_comp, kspace_us_comp, gt, metric
 
 
 def _build_outputs(img_us_norm, img_gt_norm, metric, learning):
