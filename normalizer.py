@@ -2,7 +2,7 @@
 Normalisation strategies for the MRI undersampling pipeline.
 
 Each function takes (kspace_full, mask, learning) and returns
-(model_input, DC_input, gt, metric) — identical contract to simulate_undersampling.
+(model_input, DC_input, target, metric) — identical contract to simulate_undersampling.
 
 learning="k_space" : model_input is complex k-space  [B,1,H,W]
 learning="image"   : model_input is real magnitude    [B,1,H,W]
@@ -115,16 +115,24 @@ def kspace_companding(
         "companding_eps": companding_eps,
         "image_shape": tuple(int(v) for v in kspace_full.shape[-2:]),
     }
-    gt = kspace_to_image_magnitude(kspace_full_comp, metric)
-    return kspace_us_comp, kspace_us_comp, gt, metric
+    target = {
+        "image": kspace_to_image_magnitude(kspace_full_comp, metric),
+        "kspace": kspace_full_comp,
+    }
+    return kspace_us_comp, kspace_us_comp, target, metric
 
 
 def _build_outputs(img_us_norm, img_gt_norm, metric, learning):
-    gt = torch.abs(img_gt_norm)
+    gt_image = torch.abs(img_gt_norm)
+    gt_kspace = fft_2d(img_gt_norm)
+    target = {
+        "image": gt_image,
+        "kspace": gt_kspace,
+    }
     if learning == "k_space":
         DC_input    = fft_2d(img_us_norm)
         model_input = DC_input
     else:  # "image"
         model_input = torch.abs(img_us_norm)
         DC_input    = fft_2d(img_us_norm)   # actual measured k-space, not FFT of magnitude
-    return model_input, DC_input, gt, metric
+    return model_input, DC_input, target, metric

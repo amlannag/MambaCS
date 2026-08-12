@@ -11,7 +11,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 wandb_stub = types.SimpleNamespace(init=lambda *a, **k: None, log=lambda *a, **k: None, finish=lambda *a, **k: None)
 sys.modules.setdefault("wandb", wandb_stub)
 
-from DcTNN.loss import MagnitudeImageLoss, MagnitudeL1Loss, build_loss
+from DcTNN.loss import (
+    ComplexL1Loss,
+    ComplexL2Loss,
+    MagnitudeImageLoss,
+    MagnitudeL1Loss,
+    PerpendicularLoss,
+    build_loss,
+)
 from DcTNN.model import cascadeNet
 from normalizer import apply_kspace_companding, invert_kspace_companding, kspace_to_image_magnitude
 from train import _compute_losses
@@ -31,15 +38,20 @@ class IntermediateLossTest(unittest.TestCase):
     def test_build_loss_supports_l1_and_l2(self):
         self.assertIsInstance(build_loss("l1"), MagnitudeL1Loss)
         self.assertIsInstance(build_loss("l2"), MagnitudeImageLoss)
+        self.assertIsInstance(build_loss("image_domain_l1"), MagnitudeL1Loss)
+        self.assertIsInstance(build_loss("image_domain_l2"), MagnitudeImageLoss)
+        self.assertIsInstance(build_loss("complex_l1"), ComplexL1Loss)
+        self.assertIsInstance(build_loss("complex_l2"), ComplexL2Loss)
+        self.assertIsInstance(build_loss("perpendicular_loss"), PerpendicularLoss)
         with self.assertRaisesRegex(ValueError, "Unknown loss_type"):
             build_loss("bad")
 
     def test_compute_losses_final_only_logs_intermediates_without_optimizing_them(self):
-        gt = torch.ones(1, 1, 2, 2)
+        gt = {"image": torch.ones(1, 1, 2, 2), "kspace": torch.ones(1, 1, 2, 2, dtype=torch.complex64)}
         recon = torch.full((1, 1, 2, 2), 2.0)
         intermediates = [torch.full((1, 1, 2, 2), 3.0), torch.full((1, 1, 2, 2), 4.0)]
 
-        total_loss, final_loss, intermediate_loss_sum, stage_losses, loss_reductions = _compute_losses(
+        total_loss, final_loss, intermediate_loss_sum, stage_losses, stage_psnr_gains = _compute_losses(
             recon, intermediates, gt, build_loss("l1"), build_loss("l2"), "final_only"
         )
 
@@ -48,14 +60,14 @@ class IntermediateLossTest(unittest.TestCase):
         self.assertAlmostEqual(stage_losses[1].item(), 9.0, places=6)
         self.assertAlmostEqual(intermediate_loss_sum.item(), 13.0, places=6)
         self.assertAlmostEqual(total_loss.item(), final_loss.item(), places=6)
-        self.assertEqual(loss_reductions, [])
+        self.assertEqual(stage_psnr_gains, [])
 
     def test_compute_losses_intermediate_unweighted_sums_stage_losses(self):
-        gt = torch.zeros(1, 1, 2, 2)
+        gt = {"image": torch.zeros(1, 1, 2, 2), "kspace": torch.zeros(1, 1, 2, 2, dtype=torch.complex64)}
         recon = torch.ones(1, 1, 2, 2)
         intermediates = [torch.ones(1, 1, 2, 2), torch.full((1, 1, 2, 2), 2.0)]
 
-        total_loss, final_loss, intermediate_loss_sum, stage_losses, loss_reductions = _compute_losses(
+        total_loss, final_loss, intermediate_loss_sum, stage_losses, stage_psnr_gains = _compute_losses(
             recon, intermediates, gt, build_loss("l2"), build_loss("l1"), "intermediate_unweighted"
         )
 
@@ -64,7 +76,27 @@ class IntermediateLossTest(unittest.TestCase):
         self.assertAlmostEqual(stage_losses[1].item(), 2.0, places=6)
         self.assertAlmostEqual(intermediate_loss_sum.item(), 3.0, places=6)
         self.assertAlmostEqual(total_loss.item(), 4.0, places=6)
-        self.assertEqual(loss_reductions, [])
+        self.assertEqual(stage_psnr_gains, [])
+
+    def test_compute_losses_reports_stage_psnr_gains_in_image_domain(self):
+        gt_img = torch.ones(1, 1, 2, 2)
+        target = {"image": gt_img, "kspace": torch.zeros(1, 1, 2, 2, dtype=torch.complex64)}
+        zf = torch.zeros(1, 1, 2, 2)
+        stage1 = torch.full((1, 1, 2, 2), 0.5)
+        stage2 = torch.full((1, 1, 2, 2), 0.75)
+        recon = torch.full((1, 1, 2, 2), 0.9)
+
+        _, _, _, _, stage_psnr_gains = _compute_losses(
+            recon, [stage1, stage2], target, build_loss("image_domain_l1"), build_loss("image_domain_l1"),
+            "intermediate_unweighted", zf_recon=zf
+        )
+
+        self.assertEqual(len(stage_psnr_gains), 2)
+        expected0 = 20.0 * torch.log10(gt_img.max() / torch.sqrt(torch.mean((stage1 - gt_img) ** 2)))
+        expected_zf = 20.0 * torch.log10(gt_img.max() / torch.sqrt(torch.mean((zf - gt_img) ** 2)))
+        expected1 = 20.0 * torch.log10(gt_img.max() / torch.sqrt(torch.mean((stage2 - gt_img) ** 2)))
+        self.assertAlmostEqual(stage_psnr_gains[0].item(), (expected0 - expected_zf).item(), places=6)
+        self.assertAlmostEqual(stage_psnr_gains[1].item(), (expected1 - expected0).item(), places=6)
 
     def test_kspace_companding_forward_inverse_recovers_input_and_preserves_phase(self):
         real = torch.tensor([[[[1.0, -2.0], [0.5, -0.25]]]])
@@ -78,12 +110,12 @@ class IntermediateLossTest(unittest.TestCase):
         self.assertTrue(torch.allclose(torch.angle(companded), torch.angle(ks), atol=1e-6, rtol=1e-6))
         self.assertTrue(torch.isfinite(companded.abs()).all())
 
-    def test_simulate_undersampling_kspace_companding_returns_companded_kspace_and_image_gt(self):
+    def test_simulate_undersampling_kspace_companding_returns_companded_kspace_and_targets(self):
         img = torch.tensor([[[[1.0, 0.0], [0.0, 0.0]]]], dtype=torch.float32)
         kspace_full = torch.fft.fftshift(torch.fft.fft2(torch.fft.ifftshift(img), norm='ortho')).to(torch.complex64)
         mask = torch.ones_like(kspace_full.real)
 
-        model_input, dc_input, gt, stats = simulate_undersampling(
+        model_input, dc_input, target, stats = simulate_undersampling(
             kspace_full,
             mask,
             learning="k_space",
@@ -96,8 +128,9 @@ class IntermediateLossTest(unittest.TestCase):
         self.assertTrue(dc_input.is_complex())
         self.assertEqual(stats["normalization"], "kspace_companding")
         self.assertTrue(torch.allclose(model_input, apply_kspace_companding(kspace_full, a=0.5, p=0.8), atol=1e-6, rtol=1e-6))
-        expected_gt = kspace_to_image_magnitude(apply_kspace_companding(kspace_full, a=0.5, p=0.8), stats)
-        self.assertTrue(torch.allclose(gt, expected_gt, atol=1e-6, rtol=1e-6))
+        expected_image_gt = kspace_to_image_magnitude(apply_kspace_companding(kspace_full, a=0.5, p=0.8), stats)
+        self.assertTrue(torch.allclose(target["image"], expected_image_gt, atol=1e-6, rtol=1e-6))
+        self.assertTrue(torch.allclose(target["kspace"], apply_kspace_companding(kspace_full, a=0.5, p=0.8), atol=1e-6, rtol=1e-6))
 
     def test_simulate_undersampling_kspace_companding_rejects_image_learning(self):
         kspace_full = torch.ones(1, 1, 2, 2, dtype=torch.complex64)
@@ -117,10 +150,42 @@ class IntermediateLossTest(unittest.TestCase):
         pred_comp = apply_kspace_companding(pred_kspace, a=0.5, p=0.8)
 
         loss = build_loss("l1")
-        companded_loss = loss(pred_comp, img, stats=stats)
+        companded_loss = loss(pred_comp, {"image": img, "kspace": gt_comp}, stats=stats)
         image_loss = torch.mean(torch.abs(pred_img - img))
 
         self.assertAlmostEqual(companded_loss.item(), image_loss.item(), places=5)
+
+    def test_complex_losses_match_manual_definitions(self):
+        pred = torch.tensor([[[[1 + 2j, 3 + 4j]]]], dtype=torch.complex64)
+        gt = torch.tensor([[[[0 + 1j, 1 + 1j]]]], dtype=torch.complex64)
+        target = {"image": torch.zeros(1, 1, 1, 2), "kspace": gt}
+
+        complex_l1 = build_loss("complex_l1")(pred, target)
+        complex_l2 = build_loss("complex_l2")(pred, target)
+
+        manual_l1 = torch.mean(torch.abs(pred.real - gt.real) + torch.abs(pred.imag - gt.imag))
+        manual_l2 = torch.mean((pred.real - gt.real) ** 2 + (pred.imag - gt.imag) ** 2)
+        self.assertAlmostEqual(complex_l1.item(), manual_l1.item(), places=6)
+        self.assertAlmostEqual(complex_l2.item(), manual_l2.item(), places=6)
+
+    def test_perpendicular_loss_accepts_complex_kspace(self):
+        pred = torch.tensor([[[[1 + 1j, 0.5 + 2j]]]], dtype=torch.complex64)
+        gt = torch.tensor([[[[1 + 0j, 2 + 0.5j]]]], dtype=torch.complex64)
+        target = {"image": torch.zeros(1, 1, 1, 2), "kspace": gt}
+
+        loss = build_loss("perpendicular_loss")(pred, target)
+        self.assertTrue(torch.isfinite(loss))
+
+    def test_kspace_losses_reject_real_predictions(self):
+        pred = torch.ones(1, 1, 2, 2)
+        target = {"image": torch.ones(1, 1, 2, 2), "kspace": torch.ones(1, 1, 2, 2, dtype=torch.complex64)}
+
+        with self.assertRaisesRegex(ValueError, "complex k-space"):
+            build_loss("complex_l1")(pred, target)
+        with self.assertRaisesRegex(ValueError, "complex k-space"):
+            build_loss("complex_l2")(pred, target)
+        with self.assertRaisesRegex(ValueError, "complex k-space"):
+            build_loss("perpendicular_loss")(pred, target)
 
     def test_cascade_forward_default_contract_is_unchanged(self):
         model = cascadeNet(

@@ -1,8 +1,15 @@
 """Loss functions for MambaCS reconstruction."""
+import math
 import torch
 import torch.nn.functional as F
 from torch import nn
 from normalizer import kspace_to_image_magnitude
+
+
+def _resolve_target(target, domain: str):
+    if isinstance(target, dict):
+        return target[domain]
+    return target
 
 
 def _to_magnitude(x, stats=None):
@@ -26,24 +33,84 @@ def _gaussian_kernel(size: int = 11, sigma: float = 1.5, device=None) -> torch.T
 
 class MagnitudeImageLoss(nn.Module):
     """MSE in the normalised magnitude image domain."""
+    target_domain = "image"
+
     def forward(self, pred, gt, stats=None):
-        return torch.mean((_to_magnitude(pred, stats) - _to_magnitude(gt)) ** 2)
+        gt_image = _resolve_target(gt, self.target_domain)
+        return torch.mean((_to_magnitude(pred, stats) - _to_magnitude(gt_image)) ** 2)
 
 
 class MagnitudeL1Loss(nn.Module):
     """L1 loss in the normalised magnitude image domain."""
+    target_domain = "image"
+
     def forward(self, pred, gt, stats=None):
-        return torch.mean(torch.abs(_to_magnitude(pred, stats) - _to_magnitude(gt)))
+        gt_image = _resolve_target(gt, self.target_domain)
+        return torch.mean(torch.abs(_to_magnitude(pred, stats) - _to_magnitude(gt_image)))
+
+
+class ComplexL1Loss(nn.Module):
+    """L1 loss directly in complex k-space: |Re diff| + |Im diff|."""
+    target_domain = "kspace"
+
+    def forward(self, pred, gt, stats=None):
+        gt_kspace = _resolve_target(gt, self.target_domain)
+        if not pred.is_complex() or not gt_kspace.is_complex():
+            raise ValueError("complex_l1 requires complex k-space prediction and target tensors")
+        return torch.mean(torch.abs(pred.real - gt_kspace.real) + torch.abs(pred.imag - gt_kspace.imag))
+
+
+class ComplexL2Loss(nn.Module):
+    """L2 loss directly in complex k-space: squared real diff + squared imag diff."""
+    target_domain = "kspace"
+
+    def forward(self, pred, gt, stats=None):
+        gt_kspace = _resolve_target(gt, self.target_domain)
+        if not pred.is_complex() or not gt_kspace.is_complex():
+            raise ValueError("complex_l2 requires complex k-space prediction and target tensors")
+        return torch.mean((pred.real - gt_kspace.real) ** 2 + (pred.imag - gt_kspace.imag) ** 2)
+
+
+class PerpendicularLoss(nn.Module):
+    """Perpendicular complex k-space loss with magnitude L1 term."""
+    target_domain = "kspace"
+
+    def __init__(self, eps: float = 1e-8):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, pred, gt, stats=None):
+        gt_kspace = _resolve_target(gt, self.target_domain)
+        if not pred.is_complex() or not gt_kspace.is_complex():
+            raise ValueError("perpendicular_loss requires complex k-space prediction and target tensors")
+
+        cross = pred * gt_kspace.conj()
+        phi_hat = torch.angle(cross)
+        perp = torch.abs(pred * gt_kspace.conj() - pred.conj() * gt_kspace) / (pred.abs() + self.eps)
+        target_abs = gt_kspace.abs()
+        branched = torch.where(phi_hat.abs() < (math.pi / 2), perp, 2 * target_abs - perp)
+        magnitude_l1 = torch.abs(target_abs - pred.abs())
+        return torch.mean(branched + magnitude_l1)
 
 
 def build_loss(loss_type: str) -> nn.Module:
     """Factory for magnitude-domain reconstruction losses."""
     loss_type = loss_type.lower()
-    if loss_type == "l1":
+    if loss_type in {"l1", "image_domain_l1"}:
         return MagnitudeL1Loss()
-    if loss_type == "l2":
+    if loss_type in {"l2", "image_domain_l2"}:
         return MagnitudeImageLoss()
-    raise ValueError(f"Unknown loss_type '{loss_type}'. Choose from: ['l1', 'l2']")
+    if loss_type == "complex_l1":
+        return ComplexL1Loss()
+    if loss_type == "complex_l2":
+        return ComplexL2Loss()
+    if loss_type == "perpendicular_loss":
+        return PerpendicularLoss()
+    raise ValueError(
+        "Unknown loss_type "
+        f"'{loss_type}'. Choose from: ['l1', 'l2', 'image_domain_l1', 'image_domain_l2', "
+        "'complex_l1', 'complex_l2', 'perpendicular_loss']"
+    )
 
 
 class SSIMLoss(nn.Module):
@@ -78,6 +145,7 @@ class SSIMLoss(nn.Module):
         return (num / den).mean()
 
     def forward(self, pred: torch.Tensor, gt: torch.Tensor, stats=None) -> torch.Tensor:
+        gt_image = _resolve_target(gt, "image")
         p = _to_magnitude(pred, stats)
-        g = _to_magnitude(gt)
+        g = _to_magnitude(gt_image)
         return 1.0 - self._ssim(p, g)
