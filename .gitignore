@@ -10,6 +10,6 @@ src/
 *.ipynb
 Experiments/
 notebooks/
-
+Sync Bunya Script.sh
 bart/
 data/
