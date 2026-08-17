@@ -227,6 +227,7 @@ class FastMRIMaskGenerator:
 _NORMALIZERS = {
     "zscore":            _norm.zscore,
     "kspace_companding": _norm.kspace_companding,
+    "log_kspace":        _norm.log_kspace,
     None:                _norm.none,
     "none":              _norm.none,
 }
@@ -244,6 +245,7 @@ def simulate_undersampling(
     """
     norm="zscore" : z-score normalise real/imag separately using undersampled image stats
     norm="kspace_companding" : radial magnitude companding in k-space (k_space learning only)
+    norm="log_kspace" : log1p magnitude k-space normalization with preserved phase (k_space learning only)
     norm=None     : no normalisation — tensors left in raw k-space units
     """
     fn = _NORMALIZERS.get(norm)

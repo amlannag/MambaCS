@@ -142,7 +142,11 @@ class PhaseAwareAttention(BaseAttention):
     def __init__(self, d_model, nhead, dropout=0.0, alpha=1.0, eps=1e-8, freqs_cis=None):
         super().__init__(d_model, nhead, dropout, freqs_cis, dtype=torch.cfloat)
         self.eps = eps
-        self.alpha = nn.Parameter(torch.tensor(float(alpha)))
+        self._alpha = nn.Parameter(torch.tensor(float(alpha)))
+
+    @property
+    def alpha(self):
+        return F.softplus(self._alpha)
 
     def _attend(self, q, k, v, attn_mask=None):
         corr = torch.matmul(q, k.transpose(-2, -1).conj())

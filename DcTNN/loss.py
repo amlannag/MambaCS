@@ -6,10 +6,17 @@ from torch import nn
 from normalizer import kspace_to_image_magnitude
 
 
+_NORMALIZED_KSPACE_LOSS_NORMS = {"kspace_companding", "log_kspace"}
+
+
 def _resolve_target(target, domain: str):
     if isinstance(target, dict):
         return target[domain]
     return target
+
+
+def _use_normalized_kspace_loss(stats) -> bool:
+    return bool(stats and stats.get("normalization") in _NORMALIZED_KSPACE_LOSS_NORMS)
 
 
 def _to_magnitude(x, stats=None):
@@ -19,6 +26,8 @@ def _to_magnitude(x, stats=None):
     - real (image domain): pass through as-is
     """
     if x.is_complex():
+        if _use_normalized_kspace_loss(stats):
+            return x.abs()
         return kspace_to_image_magnitude(x, stats)
     return x
 
@@ -33,20 +42,18 @@ def _gaussian_kernel(size: int = 11, sigma: float = 1.5, device=None) -> torch.T
 
 class MagnitudeImageLoss(nn.Module):
     """MSE in the normalised magnitude image domain."""
-    target_domain = "image"
-
     def forward(self, pred, gt, stats=None):
-        gt_image = _resolve_target(gt, self.target_domain)
-        return torch.mean((_to_magnitude(pred, stats) - _to_magnitude(gt_image)) ** 2)
+        target_domain = "kspace" if _use_normalized_kspace_loss(stats) else "image"
+        gt_tensor = _resolve_target(gt, target_domain)
+        return torch.mean((_to_magnitude(pred, stats) - _to_magnitude(gt_tensor, stats)) ** 2)
 
 
 class MagnitudeL1Loss(nn.Module):
     """L1 loss in the normalised magnitude image domain."""
-    target_domain = "image"
-
     def forward(self, pred, gt, stats=None):
-        gt_image = _resolve_target(gt, self.target_domain)
-        return torch.mean(torch.abs(_to_magnitude(pred, stats) - _to_magnitude(gt_image)))
+        target_domain = "kspace" if _use_normalized_kspace_loss(stats) else "image"
+        gt_tensor = _resolve_target(gt, target_domain)
+        return torch.mean(torch.abs(_to_magnitude(pred, stats) - _to_magnitude(gt_tensor, stats)))
 
 
 class ComplexL1Loss(nn.Module):

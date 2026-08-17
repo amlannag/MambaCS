@@ -20,7 +20,15 @@ from DcTNN.loss import (
     build_loss,
 )
 from DcTNN.model import cascadeNet
-from normalizer import apply_kspace_companding, invert_kspace_companding, kspace_to_image_magnitude
+from inference import _denormalize_image, to_image_magnitude
+from normalizer import (
+    apply_kspace_companding,
+    apply_log_kspace,
+    invert_kspace_companding,
+    invert_log_kspace,
+    kspace_to_image_magnitude,
+    restore_original_kspace,
+)
 from train import _compute_losses
 from train_utils import simulate_undersampling
 
@@ -110,6 +118,18 @@ class IntermediateLossTest(unittest.TestCase):
         self.assertTrue(torch.allclose(torch.angle(companded), torch.angle(ks), atol=1e-6, rtol=1e-6))
         self.assertTrue(torch.isfinite(companded.abs()).all())
 
+    def test_log_kspace_forward_inverse_recovers_input_and_preserves_phase(self):
+        real = torch.tensor([[[[0.0, -2.0], [0.5, -0.25]]]])
+        imag = torch.tensor([[[[0.0, 1.5], [-0.75, 2.0]]]])
+        ks = torch.complex(real, imag)
+
+        logged = apply_log_kspace(ks)
+        restored = invert_log_kspace(logged)
+
+        self.assertTrue(torch.allclose(restored, ks, atol=1e-5, rtol=1e-5))
+        self.assertTrue(torch.allclose(torch.angle(logged), torch.angle(ks), atol=1e-6, rtol=1e-6))
+        self.assertTrue(torch.isfinite(logged.abs()).all())
+
     def test_simulate_undersampling_kspace_companding_returns_companded_kspace_and_targets(self):
         img = torch.tensor([[[[1.0, 0.0], [0.0, 0.0]]]], dtype=torch.float32)
         kspace_full = torch.fft.fftshift(torch.fft.fft2(torch.fft.ifftshift(img), norm='ortho')).to(torch.complex64)
@@ -139,7 +159,34 @@ class IntermediateLossTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "only supported when learning='k_space'"):
             simulate_undersampling(kspace_full, mask, learning="image", norm="kspace_companding")
 
-    def test_companded_loss_matches_image_loss_after_inverse_companding(self):
+    def test_simulate_undersampling_log_kspace_returns_logged_kspace_and_targets(self):
+        img = torch.tensor([[[[1.0, 0.0], [0.0, 0.0]]]], dtype=torch.float32)
+        kspace_full = torch.fft.fftshift(torch.fft.fft2(torch.fft.ifftshift(img), norm='ortho')).to(torch.complex64)
+        mask = torch.ones_like(kspace_full.real)
+
+        model_input, dc_input, target, stats = simulate_undersampling(
+            kspace_full,
+            mask,
+            learning="k_space",
+            norm="log_kspace",
+        )
+
+        self.assertTrue(model_input.is_complex())
+        self.assertTrue(dc_input.is_complex())
+        self.assertEqual(stats["normalization"], "log_kspace")
+        self.assertTrue(torch.allclose(model_input, apply_log_kspace(kspace_full), atol=1e-6, rtol=1e-6))
+        expected_image_gt = kspace_to_image_magnitude(apply_log_kspace(kspace_full), stats)
+        self.assertTrue(torch.allclose(target["image"], expected_image_gt, atol=1e-6, rtol=1e-6))
+        self.assertTrue(torch.allclose(target["kspace"], apply_log_kspace(kspace_full), atol=1e-6, rtol=1e-6))
+
+    def test_simulate_undersampling_log_kspace_rejects_image_learning(self):
+        kspace_full = torch.ones(1, 1, 2, 2, dtype=torch.complex64)
+        mask = torch.ones(1, 1, 2, 2)
+
+        with self.assertRaisesRegex(ValueError, "only supported when learning='k_space'"):
+            simulate_undersampling(kspace_full, mask, learning="image", norm="log_kspace")
+
+    def test_companded_l1_loss_uses_normalized_kspace_magnitude(self):
         img = torch.tensor([[[[1.0, 2.0], [3.0, 4.0]]]], dtype=torch.float32)
         pred_img = img * 1.1
         gt_kspace = torch.fft.fftshift(torch.fft.fft2(torch.fft.ifftshift(img), norm='ortho')).to(torch.complex64)
@@ -151,9 +198,64 @@ class IntermediateLossTest(unittest.TestCase):
 
         loss = build_loss("l1")
         companded_loss = loss(pred_comp, {"image": img, "kspace": gt_comp}, stats=stats)
-        image_loss = torch.mean(torch.abs(pred_img - img))
+        expected = torch.mean(torch.abs(pred_comp.abs() - gt_comp.abs()))
 
-        self.assertAlmostEqual(companded_loss.item(), image_loss.item(), places=5)
+        self.assertAlmostEqual(companded_loss.item(), expected.item(), places=5)
+
+    def test_log_kspace_l2_loss_uses_normalized_kspace_magnitude(self):
+        gt = torch.tensor([[[[1 + 2j, 0.5 + 0.25j]]]], dtype=torch.complex64)
+        pred = torch.tensor([[[[1.2 + 1.8j, 0.25 + 0.4j]]]], dtype=torch.complex64)
+        gt_log = apply_log_kspace(gt)
+        pred_log = apply_log_kspace(pred)
+        stats = {"normalization": "log_kspace"}
+
+        loss = build_loss("l2")
+        actual = loss(pred_log, {"image": torch.zeros(1, 1, 1, 2), "kspace": gt_log}, stats=stats)
+        expected = torch.mean((pred_log.abs() - gt_log.abs()) ** 2)
+
+        self.assertAlmostEqual(actual.item(), expected.item(), places=6)
+
+    def test_log_kspace_complex_losses_run_against_normalized_kspace(self):
+        gt = torch.tensor([[[[1 + 2j, 0.5 + 0.25j]]]], dtype=torch.complex64)
+        pred = torch.tensor([[[[1.2 + 1.8j, 0.25 + 0.4j]]]], dtype=torch.complex64)
+        gt_log = apply_log_kspace(gt)
+        pred_log = apply_log_kspace(pred)
+        target = {"image": torch.zeros(1, 1, 1, 2), "kspace": gt_log}
+
+        complex_l1 = build_loss("complex_l1")(pred_log, target, stats={"normalization": "log_kspace"})
+        expected = torch.mean(torch.abs(pred_log.real - gt_log.real) + torch.abs(pred_log.imag - gt_log.imag))
+        self.assertAlmostEqual(complex_l1.item(), expected.item(), places=6)
+
+    def test_restore_original_kspace_inverts_supported_normalizations(self):
+        ks = torch.tensor([[[[1 + 2j, 0.5 + 0.25j]]]], dtype=torch.complex64)
+        comp_stats = {"normalization": "kspace_companding", "companding_p": 0.8, "companding_a": 0.5}
+        log_stats = {"normalization": "log_kspace"}
+
+        self.assertTrue(torch.allclose(restore_original_kspace(apply_kspace_companding(ks, 0.5, 0.8), comp_stats), ks, atol=1e-5, rtol=1e-5))
+        self.assertTrue(torch.allclose(restore_original_kspace(apply_log_kspace(ks), log_stats), ks, atol=1e-5, rtol=1e-5))
+
+    def test_inference_denormalize_returns_original_kspace_for_supported_kspace_norms(self):
+        ks = torch.tensor([[[[1 + 2j, 0.5 + 0.25j]]]], dtype=torch.complex64)
+        comp_stats = {"normalization": "kspace_companding", "companding_p": 0.8, "companding_a": 0.5}
+        log_stats = {"normalization": "log_kspace"}
+
+        comp = apply_kspace_companding(ks, a=0.5, p=0.8)
+        logged = apply_log_kspace(ks)
+
+        self.assertTrue(torch.allclose(_denormalize_image(comp, comp_stats), ks, atol=1e-5, rtol=1e-5))
+        self.assertTrue(torch.allclose(_denormalize_image(logged, log_stats), ks, atol=1e-5, rtol=1e-5))
+
+    def test_to_image_magnitude_restores_kspace_before_ifft(self):
+        img = torch.tensor([[[[1.0, 2.0], [3.0, 4.0]]]], dtype=torch.float32)
+        kspace = torch.fft.fftshift(torch.fft.fft2(torch.fft.ifftshift(img), norm='ortho')).to(torch.complex64)
+        comp_stats = {"normalization": "kspace_companding", "companding_p": 0.8, "companding_a": 0.5}
+        log_stats = {"normalization": "log_kspace"}
+
+        comp_mag = to_image_magnitude(apply_kspace_companding(kspace, a=0.5, p=0.8), comp_stats)
+        log_mag = to_image_magnitude(apply_log_kspace(kspace), log_stats)
+
+        self.assertTrue(torch.allclose(comp_mag, img, atol=1e-5, rtol=1e-5))
+        self.assertTrue(torch.allclose(log_mag, img, atol=1e-5, rtol=1e-5))
 
     def test_complex_losses_match_manual_definitions(self):
         pred = torch.tensor([[[[1 + 2j, 3 + 4j]]]], dtype=torch.complex64)

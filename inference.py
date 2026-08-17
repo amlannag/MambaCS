@@ -1,6 +1,6 @@
 """
 Inference utilities for MambaCS experiments.
-Provides load_experiment_model (used by notebooks) and _denormalize_image.
+Provides load_experiment_model (used by notebooks) and denormalization helpers.
 """
 
 import json
@@ -10,7 +10,7 @@ import torch
 
 from config import Config
 from train_utils import build_model
-from normalizer import kspace_to_image_magnitude
+from normalizer import kspace_to_image_magnitude, restore_original_kspace
 
 
 # Fields that belong in cfg['data'] vs cfg['model'] for notebook consumers.
@@ -127,11 +127,12 @@ def load_experiment_model(exp_dir: str, device=None):
 
 def _denormalize_image(recon: torch.Tensor, stats: dict) -> torch.Tensor:
     """
-    Invert zscore normalisation on a reconstructed tensor (IFFT already applied
-    for k_space mode). Returns a complex or real tensor; caller applies to_magnitude.
+    Restore a reconstructed tensor toward original units.
+    For normalized k-space modes this returns original-scale complex k-space.
+    For z-score stats it preserves the previous real/complex affine restoration.
     """
-    if recon.is_complex() and stats and stats.get("normalization") == "kspace_companding":
-        return kspace_to_image_magnitude(recon, stats)
+    if recon.is_complex() and stats and stats.get("normalization") in {"kspace_companding", "log_kspace"}:
+        return restore_original_kspace(recon, stats)
     if not stats or "mean_r" not in stats:
         return recon
     mean_r, std_r = stats["mean_r"], stats["std_r"]
@@ -142,3 +143,10 @@ def _denormalize_image(recon: torch.Tensor, stats: dict) -> torch.Tensor:
             recon.imag * std_i + mean_i,
         )
     return recon * std_r + mean_r
+
+
+def to_image_magnitude(recon: torch.Tensor, stats: dict | None = None) -> torch.Tensor:
+    """Convert a reconstruction into image magnitude, restoring supported k-space norms first."""
+    if recon.is_complex():
+        return kspace_to_image_magnitude(recon, stats)
+    return recon

@@ -12,6 +12,7 @@ import torch
 from DcTNN.dc import fft_2d, ifft_2d
 
 COMPANDING_EPS = 1e-6
+LOG_KSPACE_EPS = 0.0
 
 
 def _companding_weight_like(kspace: torch.Tensor, a: float, p: float, eps: float = COMPANDING_EPS) -> torch.Tensor:
@@ -38,20 +39,51 @@ def invert_kspace_companding(kspace: torch.Tensor, a: float, p: float, eps: floa
     return kspace / _companding_weight_like(kspace, a=a, p=p, eps=eps)
 
 
-def kspace_to_image_magnitude(kspace: torch.Tensor, metric: dict | None = None) -> torch.Tensor:
-    """
-    Convert complex k-space into image magnitude.
-    Companded tensors are first inverse-companded, then transformed via IFFT.
-    """
+def apply_log_kspace(kspace: torch.Tensor, eps: float = LOG_KSPACE_EPS) -> torch.Tensor:
+    """Compress k-space magnitudes with log1p while preserving phase."""
     if not kspace.is_complex():
+        raise TypeError("log-k-space normalization requires a complex tensor")
+    magnitude = torch.log1p(kspace.abs().clamp_min(eps))
+    phase = torch.angle(kspace)
+    return torch.polar(magnitude, phase)
+
+
+def invert_log_kspace(kspace: torch.Tensor) -> torch.Tensor:
+    """Invert log-k-space normalization while preserving phase."""
+    if not kspace.is_complex():
+        raise TypeError("log-k-space inversion requires a complex tensor")
+    magnitude = torch.expm1(kspace.abs())
+    phase = torch.angle(kspace)
+    return torch.polar(magnitude, phase)
+
+
+def restore_original_kspace(kspace: torch.Tensor, metric: dict | None = None) -> torch.Tensor:
+    """Map normalized complex k-space back to original k-space units when supported."""
+    if not kspace.is_complex() or not metric:
         return kspace
-    if metric and metric.get("normalization") == "kspace_companding":
-        kspace = invert_kspace_companding(
+
+    normalization = metric.get("normalization")
+    if normalization == "kspace_companding":
+        return invert_kspace_companding(
             kspace,
             a=metric["companding_a"],
             p=metric["companding_p"],
             eps=metric.get("companding_eps", COMPANDING_EPS),
         )
+    if normalization == "log_kspace":
+        return invert_log_kspace(kspace)
+    return kspace
+
+
+def kspace_to_image_magnitude(kspace: torch.Tensor, metric: dict | None = None) -> torch.Tensor:
+    """
+    Convert complex k-space into image magnitude.
+    Normalized tensors are first restored to original k-space units when supported,
+    then transformed via IFFT.
+    """
+    if not kspace.is_complex():
+        return kspace
+    kspace = restore_original_kspace(kspace, metric)
     return torch.abs(ifft_2d(kspace))
 
 
@@ -120,6 +152,34 @@ def kspace_companding(
         "kspace": kspace_full_comp,
     }
     return kspace_us_comp, kspace_us_comp, target, metric
+
+
+def log_kspace(
+    kspace_full,
+    mask,
+    learning="k_space",
+    kspace_us=None,
+    log_eps: float = LOG_KSPACE_EPS,
+    **_unused,
+):
+    """Apply log1p to k-space magnitudes while preserving phase."""
+    if learning != "k_space":
+        raise ValueError("norm='log_kspace' is only supported when learning='k_space'")
+    if kspace_us is None:
+        kspace_us = kspace_full * mask
+
+    kspace_us_log = apply_log_kspace(kspace_us, eps=log_eps)
+    kspace_full_log = apply_log_kspace(kspace_full, eps=log_eps)
+    metric = {
+        "normalization": "log_kspace",
+        "log_eps": log_eps,
+        "image_shape": tuple(int(v) for v in kspace_full.shape[-2:]),
+    }
+    target = {
+        "image": kspace_to_image_magnitude(kspace_full_log, metric),
+        "kspace": kspace_full_log,
+    }
+    return kspace_us_log, kspace_us_log, target, metric
 
 
 def _build_outputs(img_us_norm, img_gt_norm, metric, learning):

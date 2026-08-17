@@ -2,10 +2,18 @@ import unittest
 
 import torch
 
-from DcTNN.attention_layer import ComplexMultiHeadAttention, TritonComplexMultiHeadAttention
+from DcTNN.attention_layer import (
+    ComplexMultiHeadAttention,
+    PhaseAwareAttention,
+    TritonComplexMultiHeadAttention,
+)
 
 
 class ComplexTritonAttentionTest(unittest.TestCase):
+    def test_phase_aware_alpha_stays_positive(self):
+        mod = PhaseAwareAttention(d_model=32, nhead=4, alpha=-10.0)
+        self.assertGreater(mod.alpha.item(), 0.0)
+
     def test_requires_cuda(self):
         mod = TritonComplexMultiHeadAttention(d_model=32, nhead=4, dropout=0.0)
         x = torch.randn(2, 8, 32, dtype=torch.cfloat)

@@ -76,7 +76,7 @@ class Config:
     learned_lambda: bool = True
     # Domain the model operates in: "k_space" or "image"
     learning: str = "k_space"
-    # Normalisation applied during undersampling simulation: "zscore", "kspace_companding", or None
+    # Normalisation applied during undersampling simulation: "zscore", "kspace_companding", "log_kspace", or None
     norm: str = "zscore"
     companding_p: float = 0.8
     companding_a: float = 0.5
