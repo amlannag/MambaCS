@@ -40,6 +40,26 @@ def _gaussian_kernel(size: int = 11, sigma: float = 1.5, device=None) -> torch.T
     return kernel.view(1, 1, size, size)
 
 
+def _radial_distance_grid_like(x: torch.Tensor) -> torch.Tensor:
+    if x.ndim != 4:
+        raise ValueError(f"Expected a [B, C, H, W] tensor, got shape {tuple(x.shape)}")
+    _, _, h, w = x.shape
+    ys = torch.arange(h, device=x.device, dtype=x.real.dtype if x.is_complex() else x.dtype)
+    xs = torch.arange(w, device=x.device, dtype=ys.dtype)
+    cy = h // 2
+    cx = w // 2
+    yy, xx = torch.meshgrid(ys, xs, indexing="ij")
+    dist = torch.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
+    return dist.unsqueeze(0).unsqueeze(0)
+
+
+def _perpendicular_mag_weight_map(x: torch.Tensor, m: float, k: float, p: float) -> torch.Tensor:
+    dist = _radial_distance_grid_like(x)
+    left = (m - 1.0) * torch.exp(k * (dist - p)) + 1.0
+    ones = torch.ones_like(left)
+    return torch.where(dist < p, left, ones)
+
+
 class MagnitudeImageLoss(nn.Module):
     """MSE in the normalised magnitude image domain."""
     def forward(self, pred, gt, stats=None):
@@ -82,9 +102,23 @@ class PerpendicularLoss(nn.Module):
     """Perpendicular complex k-space loss with magnitude L1 term."""
     target_domain = "kspace"
 
-    def __init__(self, eps: float = 1e-8):
+    def __init__(
+        self,
+        eps: float = 1e-8,
+        magnitude_weighting: bool = False,
+        magnitude_weight_m: float = 1.0,
+        magnitude_weight_k: float = 0.103,
+        magnitude_weight_p: float = 67.0,
+    ):
         super().__init__()
         self.eps = eps
+        self.magnitude_weighting = magnitude_weighting
+        self.magnitude_weight_k = float(magnitude_weight_k)
+        self.magnitude_weight_p = float(magnitude_weight_p)
+        self.current_m = float(magnitude_weight_m)
+
+    def set_current_m(self, value: float):
+        self.current_m = float(value)
 
     def forward(self, pred, gt, stats=None):
         gt_kspace = _resolve_target(gt, self.target_domain)
@@ -97,10 +131,14 @@ class PerpendicularLoss(nn.Module):
         target_abs = gt_kspace.abs()
         branched = torch.where(phi_hat.abs() < (math.pi / 2), perp, 2 * target_abs - perp)
         magnitude_l1 = torch.abs(target_abs - pred.abs())
+        if self.magnitude_weighting:
+            magnitude_l1 = magnitude_l1 * _perpendicular_mag_weight_map(
+                pred, m=self.current_m, k=self.magnitude_weight_k, p=self.magnitude_weight_p
+            )
         return torch.mean(branched + magnitude_l1)
 
 
-def build_loss(loss_type: str) -> nn.Module:
+def build_loss(loss_type: str, **kwargs) -> nn.Module:
     """Factory for magnitude-domain reconstruction losses."""
     loss_type = loss_type.lower()
     if loss_type in {"l1", "image_domain_l1"}:
@@ -112,7 +150,7 @@ def build_loss(loss_type: str) -> nn.Module:
     if loss_type == "complex_l2":
         return ComplexL2Loss()
     if loss_type == "perpendicular_loss":
-        return PerpendicularLoss()
+        return PerpendicularLoss(**kwargs)
     raise ValueError(
         "Unknown loss_type "
         f"'{loss_type}'. Choose from: ['l1', 'l2', 'image_domain_l1', 'image_domain_l2', "

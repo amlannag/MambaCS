@@ -20,7 +20,7 @@ from config import Config
 from train_config import EXPERIMENTS
 from DcTNN.lambda_scheduler import LambdaScheduler
 from train_utils import FastMRIMaskGenerator, build_model, resolve_data_dirs, simulate_undersampling
-from DcTNN.loss import build_loss
+from DcTNN.loss import PerpendicularLoss, build_loss
 from normalizer import kspace_to_image_magnitude
 
 
@@ -127,6 +127,12 @@ def _compute_losses(recon, intermediates, target, final_criterion, intermediate_
                 prev_psnr = curr_psnr
 
     return total_loss, final_loss, intermediate_loss_sum, stage_losses, stage_psnr_gains
+
+
+def _set_perpendicular_weight_m(criteria, value):
+    for criterion in criteria:
+        if isinstance(criterion, PerpendicularLoss):
+            criterion.set_current_m(value)
 
 
 def _init_stage_totals(num_stages):
@@ -353,8 +359,16 @@ def main():
         T_max=cfg.epochs,
         eta_min=cfg.lr * 1e-2,
     )
-    final_criterion = build_loss(cfg.final_loss_type)
-    intermediate_criterion = build_loss(cfg.intermediate_loss_type)
+    loss_kwargs = {}
+    if cfg.perpendicular_mag_weighting:
+        loss_kwargs = {
+            "magnitude_weighting": True,
+            "magnitude_weight_m": cfg.perpendicular_mag_weight_m,
+            "magnitude_weight_k": cfg.perpendicular_mag_weight_k,
+            "magnitude_weight_p": cfg.perpendicular_mag_weight_p,
+        }
+    final_criterion = build_loss(cfg.final_loss_type, **loss_kwargs)
+    intermediate_criterion = build_loss(cfg.intermediate_loss_type, **loss_kwargs)
 
     # ---- Resume ----
     start_epoch    = 0
@@ -374,6 +388,14 @@ def main():
     if cfg.lambda_schedule != "none":
         lamb_sched = LambdaScheduler(cfg.lambda_schedule, cfg.lambda_start,
                                      cfg.lambda_end, cfg.epochs)
+    perp_m_sched = None
+    if cfg.perpendicular_mag_weighting and cfg.perpendicular_mag_weight_m_schedule != "none":
+        perp_m_sched = LambdaScheduler(
+            cfg.perpendicular_mag_weight_m_schedule,
+            cfg.perpendicular_mag_weight_m_start,
+            cfg.perpendicular_mag_weight_m_end,
+            cfg.epochs,
+        )
 
     # ---- Training loop ----
     print()
@@ -382,6 +404,11 @@ def main():
 
         if lamb_sched is not None:
             model.set_scheduled_lamb(lamb_sched.get_lambda(epoch))
+        if cfg.perpendicular_mag_weighting:
+            current_perp_m = cfg.perpendicular_mag_weight_m
+            if perp_m_sched is not None:
+                current_perp_m = perp_m_sched.get_lambda(epoch)
+            _set_perpendicular_weight_m((final_criterion, intermediate_criterion), current_perp_m)
 
         train_metrics = train_one_epoch(
             cfg, model, train_loader, cfg.acceleration_factors, mask_generator, optimizer,
@@ -438,6 +465,8 @@ def main():
                 metrics[f'lambda_{i}'] = round(lv.item(), 6)
         elif lamb_sched is not None:
             metrics['lambda_scheduled'] = round(model.scheduled_lamb, 6)
+        if cfg.perpendicular_mag_weighting:
+            metrics['perpendicular_mag_weight_m'] = round(current_perp_m, 6)
         append_metrics(metrics_path, metrics)
         wandb.log(metrics, step=epoch + 1)
 

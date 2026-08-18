@@ -17,8 +17,10 @@ from DcTNN.loss import (
     MagnitudeImageLoss,
     MagnitudeL1Loss,
     PerpendicularLoss,
+    _perpendicular_mag_weight_map,
     build_loss,
 )
+from DcTNN.lambda_scheduler import LambdaScheduler
 from DcTNN.model import cascadeNet
 from inference import _denormalize_image, to_image_magnitude
 from normalizer import (
@@ -51,6 +53,9 @@ class IntermediateLossTest(unittest.TestCase):
         self.assertIsInstance(build_loss("complex_l1"), ComplexL1Loss)
         self.assertIsInstance(build_loss("complex_l2"), ComplexL2Loss)
         self.assertIsInstance(build_loss("perpendicular_loss"), PerpendicularLoss)
+        weighted_loss = build_loss("perpendicular_loss", magnitude_weighting=True, magnitude_weight_m=2.0)
+        self.assertTrue(weighted_loss.magnitude_weighting)
+        self.assertAlmostEqual(weighted_loss.current_m, 2.0, places=6)
         with self.assertRaisesRegex(ValueError, "Unknown loss_type"):
             build_loss("bad")
 
@@ -277,6 +282,79 @@ class IntermediateLossTest(unittest.TestCase):
 
         loss = build_loss("perpendicular_loss")(pred, target)
         self.assertTrue(torch.isfinite(loss))
+
+    def test_perpendicular_loss_weighting_disabled_matches_current_behavior(self):
+        pred = torch.tensor([[[[1 + 1j, 0.5 + 2j], [0.25 + 0.5j, 1.5 + 0.25j]]]], dtype=torch.complex64)
+        gt = torch.tensor([[[[1 + 0j, 2 + 0.5j], [0.5 + 0.5j, 0.75 + 1.0j]]]], dtype=torch.complex64)
+        target = {"image": torch.zeros(1, 1, 2, 2), "kspace": gt}
+
+        base_loss = PerpendicularLoss()(pred, target)
+        weighted_off_loss = PerpendicularLoss(magnitude_weighting=False, magnitude_weight_m=3.0)(pred, target)
+        self.assertAlmostEqual(base_loss.item(), weighted_off_loss.item(), places=6)
+
+    def test_perpendicular_loss_weighting_with_m_one_is_identity(self):
+        pred = torch.tensor([[[[1 + 1j, 0.5 + 2j], [0.25 + 0.5j, 1.5 + 0.25j]]]], dtype=torch.complex64)
+        gt = torch.tensor([[[[1 + 0j, 2 + 0.5j], [0.5 + 0.5j, 0.75 + 1.0j]]]], dtype=torch.complex64)
+        target = {"image": torch.zeros(1, 1, 2, 2), "kspace": gt}
+
+        base_loss = PerpendicularLoss()(pred, target)
+        weighted_identity_loss = PerpendicularLoss(magnitude_weighting=True, magnitude_weight_m=1.0)(pred, target)
+        self.assertAlmostEqual(base_loss.item(), weighted_identity_loss.item(), places=6)
+
+    def test_perpendicular_weight_map_has_expected_piecewise_shape(self):
+        x = torch.zeros(1, 1, 256, 256, dtype=torch.complex64)
+        weights = _perpendicular_mag_weight_map(x, m=3.0, k=0.103, p=67.0)
+
+        expected_center = ((3.0 - 1.0) * torch.exp(torch.tensor(0.103 * (0.0 - 67.0))) + 1.0).item()
+        self.assertAlmostEqual(weights[0, 0, 128, 128].item(), expected_center, places=6)
+        self.assertAlmostEqual(weights[0, 0, 128, 128 + 67].item(), 1.0, places=6)
+        self.assertGreater(weights[0, 0, 128, 128 + 10].item(), 1.0)
+        self.assertGreater(weights[0, 0, 128, 128 + 66].item(), 1.0)
+        left_near_cutoff = ((3.0 - 1.0) * torch.exp(torch.tensor(0.103 * (66.999 - 67.0))) + 1.0).item()
+        self.assertAlmostEqual(left_near_cutoff, 3.0, places=3)
+
+    def test_perpendicular_loss_weighting_only_scales_magnitude_term(self):
+        pred = torch.tensor([[[[1 + 1j, 0.5 + 2j], [0.25 + 0.5j, 1.5 + 0.25j]]]], dtype=torch.complex64)
+        gt = torch.tensor([[[[1 + 0j, 2 + 0.5j], [0.5 + 0.5j, 0.75 + 1.0j]]]], dtype=torch.complex64)
+        target = {"image": torch.zeros(1, 1, 2, 2), "kspace": gt}
+
+        criterion = PerpendicularLoss(magnitude_weighting=True, magnitude_weight_m=2.5, magnitude_weight_k=0.103, magnitude_weight_p=67.0)
+        actual = criterion(pred, target)
+
+        cross = pred * gt.conj()
+        phi_hat = torch.angle(cross)
+        perp = torch.abs(pred * gt.conj() - pred.conj() * gt) / (pred.abs() + criterion.eps)
+        target_abs = gt.abs()
+        branched = torch.where(phi_hat.abs() < (torch.pi / 2), perp, 2 * target_abs - perp)
+        magnitude_l1 = torch.abs(target_abs - pred.abs())
+        expected = torch.mean(branched + _perpendicular_mag_weight_map(pred, 2.5, 0.103, 67.0) * magnitude_l1)
+        self.assertAlmostEqual(actual.item(), expected.item(), places=6)
+
+    def test_perpendicular_loss_works_in_normalized_kspace_modes_with_weighting(self):
+        gt = torch.tensor([[[[1 + 2j, 0.5 + 0.25j]]]], dtype=torch.complex64)
+        pred = torch.tensor([[[[1.2 + 1.8j, 0.25 + 0.4j]]]], dtype=torch.complex64)
+        target_comp = {"image": torch.zeros(1, 1, 1, 2), "kspace": apply_kspace_companding(gt, a=0.5, p=0.8)}
+        target_log = {"image": torch.zeros(1, 1, 1, 2), "kspace": apply_log_kspace(gt)}
+        pred_comp = apply_kspace_companding(pred, a=0.5, p=0.8)
+        pred_log = apply_log_kspace(pred)
+        criterion = PerpendicularLoss(magnitude_weighting=True, magnitude_weight_m=2.0)
+
+        comp_loss = criterion(pred_comp, target_comp, stats={"normalization": "kspace_companding"})
+        log_loss = criterion(pred_log, target_log, stats={"normalization": "log_kspace"})
+        self.assertTrue(torch.isfinite(comp_loss))
+        self.assertTrue(torch.isfinite(log_loss))
+
+    def test_lambda_scheduler_can_schedule_perpendicular_m(self):
+        constant = LambdaScheduler("constant", 2.0, 5.0, 5)
+        linear = LambdaScheduler("linear", 2.0, 5.0, 5)
+        cosine = LambdaScheduler("cosine", 2.0, 5.0, 5)
+
+        self.assertAlmostEqual(constant.get_lambda(0), 2.0, places=6)
+        self.assertAlmostEqual(constant.get_lambda(4), 2.0, places=6)
+        self.assertAlmostEqual(linear.get_lambda(0), 2.0, places=6)
+        self.assertAlmostEqual(linear.get_lambda(4), 5.0, places=6)
+        self.assertAlmostEqual(cosine.get_lambda(0), 2.0, places=6)
+        self.assertAlmostEqual(cosine.get_lambda(4), 5.0, places=6)
 
     def test_kspace_losses_reject_real_predictions(self):
         pred = torch.ones(1, 1, 2, 2)

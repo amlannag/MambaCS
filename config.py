@@ -105,6 +105,13 @@ class Config:
     loss_mode: str = "final_only"
     final_loss_type: str = "l1"
     intermediate_loss_type: str = "l1"
+    perpendicular_mag_weighting: bool = False
+    perpendicular_mag_weight_m: float = 1.0
+    perpendicular_mag_weight_k: float = 0.103
+    perpendicular_mag_weight_p: float = 67.0
+    perpendicular_mag_weight_m_schedule: str = "none"
+    perpendicular_mag_weight_m_start: float = 1.0
+    perpendicular_mag_weight_m_end: float = 1.0
     epochs: int = 400
     batch_size: int = 32
     lr: float = 1e-4
