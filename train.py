@@ -287,6 +287,21 @@ def main():
     best_path    = os.path.join(out_dir, 'best_model.pth')
     latest_path  = os.path.join(out_dir, 'latest.pth')
 
+    # ---- Datasets ----
+    train_data_dir, val_data_dir = resolve_data_dirs(cfg)
+
+    def _make_dataset(data_dir, max_files=None):
+        if cfg.dataset == "oasis":
+            return OASISDataset(data_dir, image_size=cfg.image_size, max_files=max_files)
+        return H5MRIDataset(data_dir, image_size=cfg.image_size,
+                            kspace_key=cfg.kspace_key, max_files=max_files)
+
+    train_ds = _make_dataset(train_data_dir)
+    if cfg.dataset == "fastmri":
+        sample_shape = tuple(int(x) for x in train_ds[0].shape[-2:])
+        cfg.image_size = sample_shape
+    val_ds   = _make_dataset(val_data_dir, max_files=cfg.max_val_files)
+
     with open(config_path, 'w') as f:
         json.dump(config_to_dict(cfg), f, indent=2)
 
@@ -301,21 +316,9 @@ def main():
     print(f"Encoders   : {cfg.encoders}")
     print(f"Output dir : {out_dir}")
     print(f"Device     : {device}")
-
-    img_h, img_w = cfg.image_size if isinstance(cfg.image_size, tuple) else (cfg.image_size, cfg.image_size)
+    print(f"Image size : {cfg.image_size}")
     print(f"Accel      : R = {cfg.acceleration_factors}  |  mask={cfg.mask_type}  |  center_fractions={cfg.center_fractions}")
 
-    # ---- Datasets ----
-    train_data_dir, val_data_dir = resolve_data_dirs(cfg)
-
-    def _make_dataset(data_dir, max_files=None):
-        if cfg.dataset == "oasis":
-            return OASISDataset(data_dir, image_size=cfg.image_size, max_files=max_files)
-        return H5MRIDataset(data_dir, image_size=cfg.image_size,
-                            kspace_key=cfg.kspace_key, max_files=max_files)
-
-    train_ds = _make_dataset(train_data_dir)
-    val_ds   = _make_dataset(val_data_dir, max_files=cfg.max_val_files)
     train_generator = torch.Generator().manual_seed(cfg.seed)
     val_generator = torch.Generator().manual_seed(cfg.seed)
 

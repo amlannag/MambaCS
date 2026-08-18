@@ -7,24 +7,37 @@ from torch.utils.data import Dataset
 from torch.utils.data import get_worker_info
 
 
-def center_crop_kspace(kspace, image_size):
-    """Center-crop a (H, W) complex k-space array to (crop_H, crop_W)."""
-    crop_H, crop_W = image_size
-    H, W = kspace.shape
-    h0 = (H - crop_H) // 2
-    w0 = (W - crop_W) // 2
-    return kspace[h0:h0 + crop_H, w0:w0 + crop_W]
+def centered_ifft2(kspace: torch.Tensor) -> torch.Tensor:
+    return torch.fft.fftshift(
+        torch.fft.ifft2(torch.fft.ifftshift(kspace, dim=(-2, -1)), norm='ortho'),
+        dim=(-2, -1),
+    )
+
+
+def centered_fft2(image: torch.Tensor) -> torch.Tensor:
+    return torch.fft.fftshift(
+        torch.fft.fft2(torch.fft.ifftshift(image, dim=(-2, -1)), norm='ortho'),
+        dim=(-2, -1),
+    )
+
+
+def center_crop_complex(arr: torch.Tensor, out_h: int, out_w: int) -> torch.Tensor:
+    h, w = arr.shape[-2:]
+    h0 = (h - out_h) // 2
+    w0 = (w - out_w) // 2
+    return arr[..., h0:h0 + out_h, w0:w0 + out_w]
 
 
 class H5MRIDataset(Dataset):
     """
     Loads k-space slices from .h5 MRI files (fastMRI format).
     Each file contains kspace of shape (num_slices, H, W) complex64.
-    Returns one center-cropped slice as [1, crop_H, crop_W] complex64.
+    Returns one slice after centered IFFT -> centered square image crop -> centered FFT,
+    as [1, side, side] complex64 where side = min(H, W).
 
     Args:
         data_dir (str):              Directory containing .h5 files
-        image_size (tuple[int,int]): Output shape — k-space is center-cropped to this (H, W)
+        image_size (tuple[int,int]): Unused for fastMRI cropping; kept for interface compatibility
         kspace_key (str):            HDF5 dataset key for raw k-space (default: 'kspace')
     """
 
@@ -64,9 +77,12 @@ class H5MRIDataset(Dataset):
     def __getitem__(self, idx):
         fpath, s = self.index[idx]
         f = self._get_file_handle(fpath)
-        kspace = f[self.kspace_key][s]                          # (H, W) complex64
-        kspace = center_crop_kspace(kspace, self.image_size)   # (crop_H, crop_W) complex64
-        return torch.tensor(kspace, dtype=torch.complex64).unsqueeze(0)  # [1, crop_H, crop_W]
+        kspace = torch.tensor(f[self.kspace_key][s], dtype=torch.complex64)
+        image = centered_ifft2(kspace)
+        side = min(image.shape[-2], image.shape[-1])
+        image = center_crop_complex(image, side, side)
+        kspace = centered_fft2(image)
+        return kspace.unsqueeze(0)
 
     def __del__(self):
         for handle in self._file_handles.values():

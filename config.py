@@ -52,7 +52,7 @@ class Config:
 
     val_fraction: float = 0.1
     seed: int = 42
-    max_val_files: Optional[int] = 15
+    max_val_files: Optional[int] = 5
 
     # ---------------------------------------------------------------------------
     # Model architecture

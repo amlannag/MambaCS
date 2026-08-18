@@ -1,8 +1,11 @@
 import sys
 import types
 import unittest
+import tempfile
 from pathlib import Path
 
+import h5py
+import numpy as np
 import torch
 from torch import nn
 
@@ -11,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 wandb_stub = types.SimpleNamespace(init=lambda *a, **k: None, log=lambda *a, **k: None, finish=lambda *a, **k: None)
 sys.modules.setdefault("wandb", wandb_stub)
 
+from dataset import H5MRIDataset, OASISDataset, centered_fft2, centered_ifft2, center_crop_complex
 from DcTNN.loss import (
     ComplexL1Loss,
     ComplexL2Loss,
@@ -45,6 +49,40 @@ class _DummyEncoder(nn.Module):
 
 
 class IntermediateLossTest(unittest.TestCase):
+    def test_fastmri_dataset_crops_in_image_domain_to_center_square(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            kspace = np.zeros((1, 4, 6), dtype=np.complex64)
+            kspace[0, 2, 3] = 1.0 + 0.0j
+            fpath = Path(tmpdir) / "sample.h5"
+            with h5py.File(fpath, "w") as f:
+                f.create_dataset("kspace", data=kspace)
+
+            ds = H5MRIDataset(tmpdir, image_size=(2, 2))
+            sample = ds[0]
+
+            raw = torch.tensor(kspace[0], dtype=torch.complex64)
+            image = centered_ifft2(raw)
+            side = min(image.shape[-2], image.shape[-1])
+            expected = centered_fft2(center_crop_complex(image, side, side)).unsqueeze(0)
+
+            self.assertEqual(tuple(sample.shape), (1, 4, 4))
+            self.assertTrue(sample.is_complex())
+            self.assertTrue(torch.allclose(sample, expected, atol=1e-6, rtol=1e-6))
+
+    def test_fastmri_dataset_max_val_files_caps_files_not_slices(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            total_slices = 0
+            for idx in range(7):
+                slices = idx + 1
+                total_slices += slices
+                fpath = Path(tmpdir) / f"sample_{idx}.h5"
+                with h5py.File(fpath, "w") as f:
+                    f.create_dataset("kspace", data=np.zeros((slices, 4, 4), dtype=np.complex64))
+
+            ds = H5MRIDataset(tmpdir, max_files=5)
+            self.assertEqual(len(ds.h5_files), 5)
+            self.assertEqual(len(ds), sum(range(1, 6)))
+
     def test_build_loss_supports_l1_and_l2(self):
         self.assertIsInstance(build_loss("l1"), MagnitudeL1Loss)
         self.assertIsInstance(build_loss("l2"), MagnitudeImageLoss)
@@ -419,6 +457,20 @@ class IntermediateLossTest(unittest.TestCase):
         self.assertFalse(recon.is_complex())
         self.assertEqual(len(intermediates), 2)
         self.assertTrue(all(not stage.is_complex() for stage in intermediates))
+
+    def test_oasis_dataset_behavior_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            arr = np.array([[0, 64], [128, 255]], dtype=np.uint8)
+            from PIL import Image
+            Image.fromarray(arr).save(Path(tmpdir) / "sample.png")
+
+            ds = OASISDataset(tmpdir, image_size=(2, 2))
+            sample = ds[0]
+            img_t = torch.tensor(arr.astype('float32') / 255.0)
+            expected = torch.fft.fftshift(
+                torch.fft.fft2(torch.fft.ifftshift(img_t), norm='ortho')
+            ).unsqueeze(0).to(torch.complex64)
+            self.assertTrue(torch.allclose(sample, expected, atol=1e-6, rtol=1e-6))
 
 
 if __name__ == "__main__":
