@@ -79,8 +79,8 @@ class H5MRIDataset(Dataset):
         f = self._get_file_handle(fpath)
         kspace = torch.tensor(f[self.kspace_key][s], dtype=torch.complex64)
         image = centered_ifft2(kspace)
-        side = min(image.shape[-2], image.shape[-1])
-        image = center_crop_complex(image, side, side)
+        h, w = self.image_size
+        image = center_crop_complex(image, h, w)
         kspace = centered_fft2(image)
         return kspace.unsqueeze(0)
 
