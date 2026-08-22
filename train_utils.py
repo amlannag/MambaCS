@@ -225,11 +225,12 @@ class FastMRIMaskGenerator:
 
 
 _NORMALIZERS = {
-    "zscore":            _norm.zscore,
-    "kspace_companding": _norm.kspace_companding,
-    "log_kspace":        _norm.log_kspace,
-    None:                _norm.none,
-    "none":              _norm.none,
+    "zscore":              _norm.zscore,
+    "kspace_companding":   _norm.kspace_companding,
+    "log_kspace":          _norm.log_kspace,
+    "fastmri_magnitude":   _norm.fastmri_magnitude,
+    None:                  _norm.none,
+    "none":                _norm.none,
 }
 
 
