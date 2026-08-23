@@ -55,6 +55,18 @@ def psnr(pred, target, max_val=None):
     mv = target.max() if max_val is None else torch.tensor(max_val, device=pred.device)
     return 20.0 * torch.log10(mv.to(pred.device) / torch.sqrt(mse))
 
+
+def _psnr_per_sample(pred, target, max_val=None):
+    dims = tuple(range(1, pred.ndim))
+    mse = torch.mean(torch.abs(pred - target) ** 2, dim=dims)
+    if max_val is None:
+        peak = target.amax(dim=dims)
+    else:
+        peak = torch.as_tensor(max_val, device=pred.device, dtype=pred.real.dtype)
+    values = 20.0 * torch.log10(peak.to(pred.device) / torch.sqrt(mse))
+    return torch.where(mse == 0, torch.full_like(values, float("inf")), values)
+
+
 def config_to_dict(cfg):
     """
     Convert a config object to a dictionary.
@@ -133,6 +145,12 @@ def _set_perpendicular_weight_m(criteria, value):
     for criterion in criteria:
         if isinstance(criterion, PerpendicularLoss):
             criterion.set_current_m(value)
+
+
+def _build_lambda_scheduler(cfg):
+    if cfg.lambda_schedule in {"none", "hard"}:
+        return None
+    return LambdaScheduler(cfg.lambda_schedule, cfg.lambda_start, cfg.lambda_end, cfg.epochs)
 
 
 def _init_stage_totals(num_stages):
@@ -217,6 +235,7 @@ def validate(cfg, model, loader, accel_factors, image_size, final_criterion,
     total_intermediate_loss_sum = 0.0
     total_psnr = 0.0
     total_zf_psnr = 0.0
+    total_samples = 0
     stage_totals = _init_stage_totals(len(model.transformers))
     psnr_gain_totals = _init_stage_totals(len(model.transformers))
 
@@ -251,8 +270,9 @@ def validate(cfg, model, loader, accel_factors, image_size, final_criterion,
         total_loss    += total_batch_loss.item()
         total_final_loss += final_loss.item()
         total_intermediate_loss_sum += intermediate_loss_sum.item()
-        total_psnr    += psnr(recon_mag, gt_image).item()
-        total_zf_psnr += psnr(zf_mag, gt_image).item()
+        total_psnr += _psnr_per_sample(recon_mag, gt_image).sum().item()
+        total_zf_psnr += _psnr_per_sample(zf_mag, gt_image).sum().item()
+        total_samples += gt_image.shape[0]
         for i, stage_loss in enumerate(stage_losses):
             stage_totals[i] += stage_loss.item()
         for i, gain in enumerate(stage_psnr_gains):
@@ -262,7 +282,8 @@ def validate(cfg, model, loader, accel_factors, image_size, final_criterion,
     metrics = _build_epoch_metrics(
         total_loss, total_final_loss, total_intermediate_loss_sum, total_psnr, stage_totals, n, psnr_gain_totals
     )
-    metrics["zf_psnr"] = total_zf_psnr / n
+    metrics["psnr"] = total_psnr / total_samples
+    metrics["zf_psnr"] = total_zf_psnr / total_samples
     return metrics
 
 
@@ -387,10 +408,7 @@ def main():
         print(f"Resumed from epoch {start_epoch}  ({cfg.resume})")
 
     # ---- Lambda scheduler (if active) ----
-    lamb_sched = None
-    if cfg.lambda_schedule != "none":
-        lamb_sched = LambdaScheduler(cfg.lambda_schedule, cfg.lambda_start,
-                                     cfg.lambda_end, cfg.epochs)
+    lamb_sched = _build_lambda_scheduler(cfg)
     perp_m_sched = None
     if cfg.perpendicular_mag_weighting and cfg.perpendicular_mag_weight_m_schedule != "none":
         perp_m_sched = LambdaScheduler(

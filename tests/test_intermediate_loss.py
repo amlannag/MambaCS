@@ -35,7 +35,7 @@ from normalizer import (
     kspace_to_image_magnitude,
     restore_original_kspace,
 )
-from train import _compute_losses
+from train import _build_lambda_scheduler, _compute_losses, _psnr_per_sample
 from train_utils import simulate_undersampling
 
 
@@ -148,6 +148,16 @@ class IntermediateLossTest(unittest.TestCase):
         expected1 = 20.0 * torch.log10(gt_img.max() / torch.sqrt(torch.mean((stage2 - gt_img) ** 2)))
         self.assertAlmostEqual(stage_psnr_gains[0].item(), (expected0 - expected_zf).item(), places=6)
         self.assertAlmostEqual(stage_psnr_gains[1].item(), (expected1 - expected0).item(), places=6)
+
+    def test_psnr_per_sample_uses_each_sample_peak_and_error(self):
+        target = torch.stack((torch.ones(1, 2, 2), torch.full((1, 2, 2), 10.0)))
+        pred = torch.stack((torch.zeros(1, 2, 2), torch.full((1, 2, 2), 5.0)))
+
+        actual = _psnr_per_sample(pred, target)
+        expected = torch.tensor([0.0, 20.0 * torch.log10(torch.tensor(2.0))])
+
+        self.assertTrue(torch.allclose(actual, expected, atol=1e-6, rtol=1e-6))
+        self.assertAlmostEqual(actual.mean().item(), 3.0103, places=4)
 
     def test_kspace_companding_forward_inverse_recovers_input_and_preserves_phase(self):
         real = torch.tensor([[[[1.0, -2.0], [0.5, -0.25]]]])
@@ -277,16 +287,58 @@ class IntermediateLossTest(unittest.TestCase):
         self.assertTrue(torch.allclose(restore_original_kspace(apply_kspace_companding(ks, 0.5, 0.8), comp_stats), ks, atol=1e-5, rtol=1e-5))
         self.assertTrue(torch.allclose(restore_original_kspace(apply_log_kspace(ks), log_stats), ks, atol=1e-5, rtol=1e-5))
 
+    def test_restore_original_kspace_inverts_fastmri_magnitude_per_batch(self):
+        ks = torch.tensor([
+            [[[1 + 2j, 0.5 + 0.25j]]],
+            [[[3 + 4j, 1.5 + 0.75j]]],
+        ], dtype=torch.complex64)
+        p95 = torch.tensor([2.0, 4.0])
+        normalized = ks / p95.reshape(-1, 1, 1, 1)
+
+        restored = restore_original_kspace(
+            normalized,
+            {"normalization": "fastmri_magnitude", "p95": p95},
+        )
+        restored_single = restore_original_kspace(
+            normalized[:1],
+            {"normalization": "fastmri_magnitude", "p95": p95[0]},
+        )
+
+        self.assertTrue(torch.allclose(restored, ks, atol=1e-6, rtol=1e-6))
+        self.assertTrue(torch.allclose(restored_single, ks[:1], atol=1e-6, rtol=1e-6))
+
+    def test_fastmri_magnitude_restored_image_matches_raw_target(self):
+        image = torch.tensor([
+            [[[1.0, 2.0], [3.0, 4.0]]],
+            [[[2.0, 1.0], [4.0, 3.0]]],
+        ])
+        kspace = centered_fft2(image)
+        mask = torch.ones_like(kspace.real)
+
+        model_input, _, target, stats = simulate_undersampling(
+            kspace,
+            mask,
+            learning="k_space",
+            norm="fastmri_magnitude",
+        )
+
+        self.assertTrue(torch.allclose(restore_original_kspace(model_input, stats), kspace, atol=1e-5, rtol=1e-5))
+        self.assertTrue(torch.allclose(kspace_to_image_magnitude(model_input, stats), image, atol=1e-5, rtol=1e-5))
+        self.assertTrue(torch.allclose(target["image"], image, atol=1e-5, rtol=1e-5))
+
     def test_inference_denormalize_returns_original_kspace_for_supported_kspace_norms(self):
         ks = torch.tensor([[[[1 + 2j, 0.5 + 0.25j]]]], dtype=torch.complex64)
         comp_stats = {"normalization": "kspace_companding", "companding_p": 0.8, "companding_a": 0.5}
         log_stats = {"normalization": "log_kspace"}
+        fastmri_stats = {"normalization": "fastmri_magnitude", "p95": torch.tensor(2.0)}
 
         comp = apply_kspace_companding(ks, a=0.5, p=0.8)
         logged = apply_log_kspace(ks)
+        fastmri_normalized = ks / fastmri_stats["p95"]
 
         self.assertTrue(torch.allclose(_denormalize_image(comp, comp_stats), ks, atol=1e-5, rtol=1e-5))
         self.assertTrue(torch.allclose(_denormalize_image(logged, log_stats), ks, atol=1e-5, rtol=1e-5))
+        self.assertTrue(torch.allclose(_denormalize_image(fastmri_normalized, fastmri_stats), ks, atol=1e-5, rtol=1e-5))
 
     def test_to_image_magnitude_restores_kspace_before_ifft(self):
         img = torch.tensor([[[[1.0, 2.0], [3.0, 4.0]]]], dtype=torch.float32)
@@ -393,6 +445,13 @@ class IntermediateLossTest(unittest.TestCase):
         self.assertAlmostEqual(linear.get_lambda(4), 5.0, places=6)
         self.assertAlmostEqual(cosine.get_lambda(0), 2.0, places=6)
         self.assertAlmostEqual(cosine.get_lambda(4), 5.0, places=6)
+
+    def test_hard_data_consistency_does_not_create_lambda_scheduler(self):
+        hard_cfg = types.SimpleNamespace(lambda_schedule="hard", lambda_start=0.0, lambda_end=0.0, epochs=400)
+        constant_cfg = types.SimpleNamespace(lambda_schedule="constant", lambda_start=0.0, lambda_end=0.0, epochs=400)
+
+        self.assertIsNone(_build_lambda_scheduler(hard_cfg))
+        self.assertIsInstance(_build_lambda_scheduler(constant_cfg), LambdaScheduler)
 
     def test_kspace_losses_reject_real_predictions(self):
         pred = torch.ones(1, 1, 2, 2)

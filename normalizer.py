@@ -72,6 +72,14 @@ def restore_original_kspace(kspace: torch.Tensor, metric: dict | None = None) ->
         )
     if normalization == "log_kspace":
         return invert_log_kspace(kspace)
+    if normalization == "fastmri_magnitude":
+        p95 = torch.as_tensor(metric["p95"], device=kspace.device, dtype=kspace.real.dtype)
+        if p95.numel() not in (1, kspace.shape[0]):
+            raise ValueError(
+                f"Expected one p95 value or one per batch item, got {p95.numel()} "
+                f"for batch size {kspace.shape[0]}"
+            )
+        return kspace * p95.reshape(-1, *([1] * (kspace.ndim - 1)))
     return kspace
 
 
@@ -216,9 +224,11 @@ def fastmri_magnitude(kspace_full, mask, learning="k_space", kspace_us=None, **_
 
     metric = {
         "normalization": "fastmri_magnitude",
-        "p95": p95.squeeze(),
+        "p95": scale_factor,
     }
-    return _build_outputs(img_us_norm, img_gt_norm, metric, learning)
+    model_input, dc_input, target, metric = _build_outputs(img_us_norm, img_gt_norm, metric, learning)
+    target["image"] = torch.abs(img_gt)
+    return model_input, dc_input, target, metric
 
 
 def _build_outputs(img_us_norm, img_gt_norm, metric, learning):

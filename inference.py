@@ -131,7 +131,7 @@ def _denormalize_image(recon: torch.Tensor, stats: dict) -> torch.Tensor:
     For normalized k-space modes this returns original-scale complex k-space.
     For z-score stats it preserves the previous real/complex affine restoration.
     """
-    if recon.is_complex() and stats and stats.get("normalization") in {"kspace_companding", "log_kspace"}:
+    if recon.is_complex() and stats and stats.get("normalization") in {"kspace_companding", "log_kspace", "fastmri_magnitude"}:
         return restore_original_kspace(recon, stats)
     if not stats or "mean_r" not in stats:
         return recon
