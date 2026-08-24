@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from .dc import FFT_DC, KSpace_DC
+from .dc import ComplexFFT_DC, FFT_DC, KSpace_DC
 from .vit import TokenVIT, axVIT, CrossAttentionVIT
 from .encoders import TokenEncoder, axialEncoder, crossAxialEncoder
 
@@ -11,15 +11,16 @@ class cascadeNet(nn.Module):
     """
     Cascaded denoising network with data consistency after each stage.
 
-    When learning="k_space" — encoder input/output is complex k-space; KSpace_DC used.
-    When learning="image"   — encoder input/output is real magnitude image; FFT_DC used.
+    When learning="k_space"      — encoder input/output is complex k-space; KSpace_DC used.
+    When learning="image"        — encoder input/output is real magnitude image; FFT_DC used.
+    When learning="complex_image" — encoder input/output is complex image; ComplexFFT_DC used.
 
     Args:
         N (int)                 Image size
         encList (list)          Encoder classes for each cascade stage
         encArgs (list)          Dicts of kwargs for each encoder
         lamb (bool)             Whether to use a learned per-stage lambda
-        learning (str)          "k_space" or "image"
+        learning (str)          "k_space", "image", or "complex_image"
     """
     def __init__(self, N, encList, encArgs, lamb=True, learning="k_space"):
         super().__init__()
@@ -30,7 +31,10 @@ class cascadeNet(nn.Module):
         self.scheduled_lamb = None
         self.N = N
         self.learning = learning
-        self._dc_func = KSpace_DC if learning == "k_space" else FFT_DC
+        dc_funcs = {"k_space": KSpace_DC, "image": FFT_DC, "complex_image": ComplexFFT_DC}
+        if learning not in dc_funcs:
+            raise ValueError(f"Unknown learning domain '{learning}'. Choose from: {list(dc_funcs)}")
+        self._dc_func = dc_funcs[learning]
 
         self.transformers = nn.ModuleList(
             enc(N, **args) for enc, args in zip(encList, encArgs)
@@ -42,7 +46,8 @@ class cascadeNet(nn.Module):
     def forward(self, xPrev, y, sampleMask, return_intermediates=False):
         """
         xPrev      : [B,1,H,W] complex undersampled k-space  (learning="k_space")
-                     [B,1,H,W] real magnitude undersampled    (learning="image")
+                     [B,1,H,W] real magnitude image           (learning="image")
+                     [B,1,H,W] complex undersampled image     (learning="complex_image")
         y          : [B,1,H,W] complex k-space DC reference (always complex)
         sampleMask : [H, W]
         Returns same domain as xPrev. When return_intermediates=True, also returns

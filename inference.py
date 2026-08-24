@@ -10,7 +10,7 @@ import torch
 
 from config import Config
 from train_utils import build_model
-from normalizer import kspace_to_image_magnitude, restore_original_kspace
+from normalizer import reconstruction_to_image_magnitude, restore_original_kspace
 
 
 # Fields that belong in cfg['data'] vs cfg['model'] for notebook consumers.
@@ -18,6 +18,7 @@ _DATA_KEYS = {
     "dataset", "data_dir", "val_data_dir", "kspace_key", "image_size",
     "num_channels", "acceleration_factors", "center_fractions", "mask_type",
     "val_fraction", "seed", "max_val_files", "norm", "companding_p", "companding_a",
+    "companding_centering",
 }
 _MODEL_KEYS = {
     "encoders", "patch_size", "axial_row_stride", "nhead_patch", "nhead_axial",
@@ -44,6 +45,8 @@ def _flat_to_nested(flat: dict) -> dict:
 def _flat_to_cfg(flat: dict) -> Config:
     """Reconstruct a Config dataclass from the flat dict saved by train.py."""
     cfg = Config()
+    if flat.get("norm") == "kspace_companding" and "companding_centering" not in flat:
+        cfg.companding_centering = "legacy"
     for k, v in flat.items():
         if not hasattr(cfg, k):
             continue
@@ -98,6 +101,8 @@ def load_experiment_model(exp_dir: str, device=None):
 
     with open(config_path) as f:
         flat = json.load(f)
+    if flat.get("norm") == "kspace_companding" and "companding_centering" not in flat:
+        flat["companding_centering"] = "legacy"
 
     cfg = _flat_to_cfg(flat)
     model = build_model(cfg).to(device)
@@ -146,7 +151,5 @@ def _denormalize_image(recon: torch.Tensor, stats: dict) -> torch.Tensor:
 
 
 def to_image_magnitude(recon: torch.Tensor, stats: dict | None = None) -> torch.Tensor:
-    """Convert a reconstruction into image magnitude, restoring supported k-space norms first."""
-    if recon.is_complex():
-        return kspace_to_image_magnitude(recon, stats)
-    return recon
+    """Convert a reconstruction into image magnitude in its configured prediction domain."""
+    return reconstruction_to_image_magnitude(recon, stats)

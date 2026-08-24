@@ -33,7 +33,7 @@ class Config:
     # Data
     # ---------------------------------------------------------------------------
 
-    # "fastmri" — .h5 k-space files (already centered, passed directly to model)
+    # "fastmri" — .h5 k-space files (centered IFFT, image-domain crop, centered FFT)
     # "oasis"   — PNG brain slices (converted to centered k-space via FFT)
     dataset: str = "fastmri"
 
@@ -74,12 +74,13 @@ class Config:
     layer_no: int = 1
     num_encoder_layers: int = 2
     learned_lambda: bool = True
-    # Domain the model operates in: "k_space" or "image"
+    # Domain the model operates in: "k_space", "image", or "complex_image"
     learning: str = "k_space"
     # Normalisation applied during undersampling simulation: "zscore", "kspace_companding", "log_kspace", or None
     norm: str = "zscore"
     companding_p: float = 0.8
     companding_a: float = 0.5
+    companding_centering: str = "fft"
     lambda_schedule: str = "none"
     lambda_start: float = 1.0
     lambda_end: float = 0.1

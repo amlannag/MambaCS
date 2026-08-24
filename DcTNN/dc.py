@@ -25,7 +25,7 @@ def ifft_2d(input, norm='ortho', dim=(-2, -1)):
     return torch.fft.fftshift(torch.fft.ifft2(torch.fft.ifftshift(x, dim=dim), norm=norm, dim=dim), dim=dim)
 
 
-def FFT_DC(x, y, mask, lamb, norm='ortho'):
+def ComplexFFT_DC(x, y, mask, lamb, norm='ortho'):
     x_complex = _to_complex_channel(x)
     cy = _to_complex_channel(y)
     z = fft_2d(x_complex, norm=norm)
@@ -35,7 +35,11 @@ def FFT_DC(x, y, mask, lamb, norm='ortho'):
     else:
         z = (1 - mask) * z + mask * (z + lamb * cy) / (1 + lamb)
 
-    return torch.abs(ifft_2d(z, norm=norm))
+    return ifft_2d(z, norm=norm)
+
+
+def FFT_DC(x, y, mask, lamb, norm='ortho'):
+    return torch.abs(ComplexFFT_DC(x, y, mask, lamb, norm=norm))
 
 
 def KSpace_DC(x, y, mask, lamb):

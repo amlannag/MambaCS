@@ -26,7 +26,7 @@ from DcTNN.loss import (
 )
 from DcTNN.lambda_scheduler import LambdaScheduler
 from DcTNN.model import cascadeNet
-from inference import _denormalize_image, to_image_magnitude
+from inference import _denormalize_image, _flat_to_cfg, to_image_magnitude
 from normalizer import (
     apply_kspace_companding,
     apply_log_kspace,
@@ -35,8 +35,9 @@ from normalizer import (
     kspace_to_image_magnitude,
     restore_original_kspace,
 )
-from train import _build_lambda_scheduler, _compute_losses, _psnr_per_sample
-from train_utils import simulate_undersampling
+from train import _build_lambda_scheduler, _compute_losses, _psnr_per_sample, build_cfg
+from train_config import EXPERIMENTS
+from train_utils import build_model, simulate_undersampling
 
 
 class _DummyEncoder(nn.Module):
@@ -49,7 +50,7 @@ class _DummyEncoder(nn.Module):
 
 
 class IntermediateLossTest(unittest.TestCase):
-    def test_fastmri_dataset_crops_in_image_domain_to_center_square(self):
+    def test_fastmri_dataset_crops_in_image_domain_to_requested_size(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             kspace = np.zeros((1, 4, 6), dtype=np.complex64)
             kspace[0, 2, 3] = 1.0 + 0.0j
@@ -62,10 +63,9 @@ class IntermediateLossTest(unittest.TestCase):
 
             raw = torch.tensor(kspace[0], dtype=torch.complex64)
             image = centered_ifft2(raw)
-            side = min(image.shape[-2], image.shape[-1])
-            expected = centered_fft2(center_crop_complex(image, side, side)).unsqueeze(0)
+            expected = centered_fft2(center_crop_complex(image, 2, 2)).unsqueeze(0)
 
-            self.assertEqual(tuple(sample.shape), (1, 4, 4))
+            self.assertEqual(tuple(sample.shape), (1, 2, 2))
             self.assertTrue(sample.is_complex())
             self.assertTrue(torch.allclose(sample, expected, atol=1e-6, rtol=1e-6))
 
@@ -171,6 +171,30 @@ class IntermediateLossTest(unittest.TestCase):
         self.assertTrue(torch.allclose(torch.angle(companded), torch.angle(ks), atol=1e-6, rtol=1e-6))
         self.assertTrue(torch.isfinite(companded.abs()).all())
 
+    def test_kspace_companding_centers_unique_minimum_on_shifted_fft_origin(self):
+        ks = torch.ones(1, 1, 4, 6, dtype=torch.complex64)
+
+        companded = apply_kspace_companding(ks, a=0.5, p=0.8)
+        minimum = companded.abs().amin()
+        minimum_indices = torch.nonzero(companded.abs() == minimum)
+
+        self.assertEqual(minimum_indices.tolist(), [[0, 0, 2, 3]])
+        self.assertAlmostEqual(companded.abs()[0, 0, 2, 3].item(), 1e-6, places=10)
+
+    def test_legacy_companding_stats_restore_legacy_centering(self):
+        ks = torch.randn(1, 1, 4, 6, dtype=torch.complex64)
+        companded = apply_kspace_companding(ks, a=0.5, p=0.8, centering="legacy")
+        stats = {"normalization": "kspace_companding", "companding_p": 0.8, "companding_a": 0.5}
+
+        restored = restore_original_kspace(companded, stats)
+
+        self.assertTrue(torch.allclose(restored, ks, atol=1e-5, rtol=1e-5))
+        self.assertEqual(_flat_to_cfg({"norm": "kspace_companding"}).companding_centering, "legacy")
+        self.assertEqual(
+            _flat_to_cfg({"norm": "kspace_companding", "companding_centering": "fft"}).companding_centering,
+            "fft",
+        )
+
     def test_log_kspace_forward_inverse_recovers_input_and_preserves_phase(self):
         real = torch.tensor([[[[0.0, -2.0], [0.5, -0.25]]]])
         imag = torch.tensor([[[[0.0, 1.5], [-0.75, 2.0]]]])
@@ -200,6 +224,7 @@ class IntermediateLossTest(unittest.TestCase):
         self.assertTrue(model_input.is_complex())
         self.assertTrue(dc_input.is_complex())
         self.assertEqual(stats["normalization"], "kspace_companding")
+        self.assertEqual(stats["companding_centering"], "fft")
         self.assertTrue(torch.allclose(model_input, apply_kspace_companding(kspace_full, a=0.5, p=0.8), atol=1e-6, rtol=1e-6))
         expected_image_gt = kspace_to_image_magnitude(apply_kspace_companding(kspace_full, a=0.5, p=0.8), stats)
         self.assertTrue(torch.allclose(target["image"], expected_image_gt, atol=1e-6, rtol=1e-6))
@@ -244,7 +269,7 @@ class IntermediateLossTest(unittest.TestCase):
         pred_img = img * 1.1
         gt_kspace = torch.fft.fftshift(torch.fft.fft2(torch.fft.ifftshift(img), norm='ortho')).to(torch.complex64)
         pred_kspace = torch.fft.fftshift(torch.fft.fft2(torch.fft.ifftshift(pred_img), norm='ortho')).to(torch.complex64)
-        stats = {"normalization": "kspace_companding", "companding_p": 0.8, "companding_a": 0.5}
+        stats = {"normalization": "kspace_companding", "companding_p": 0.8, "companding_a": 0.5, "companding_centering": "fft"}
 
         gt_comp = apply_kspace_companding(gt_kspace, a=0.5, p=0.8)
         pred_comp = apply_kspace_companding(pred_kspace, a=0.5, p=0.8)
@@ -281,7 +306,7 @@ class IntermediateLossTest(unittest.TestCase):
 
     def test_restore_original_kspace_inverts_supported_normalizations(self):
         ks = torch.tensor([[[[1 + 2j, 0.5 + 0.25j]]]], dtype=torch.complex64)
-        comp_stats = {"normalization": "kspace_companding", "companding_p": 0.8, "companding_a": 0.5}
+        comp_stats = {"normalization": "kspace_companding", "companding_p": 0.8, "companding_a": 0.5, "companding_centering": "fft"}
         log_stats = {"normalization": "log_kspace"}
 
         self.assertTrue(torch.allclose(restore_original_kspace(apply_kspace_companding(ks, 0.5, 0.8), comp_stats), ks, atol=1e-5, rtol=1e-5))
@@ -326,9 +351,33 @@ class IntermediateLossTest(unittest.TestCase):
         self.assertTrue(torch.allclose(kspace_to_image_magnitude(model_input, stats), image, atol=1e-5, rtol=1e-5))
         self.assertTrue(torch.allclose(target["image"], image, atol=1e-5, rtol=1e-5))
 
+    def test_fastmri_complex_image_mode_preserves_phase_and_uses_complex_image_target(self):
+        image = torch.tensor([[[[1 + 2j, 2 - 1j], [3 + 0.5j, 4 - 2j]]]], dtype=torch.complex64)
+        kspace = centered_fft2(image)
+        mask = torch.ones_like(kspace.real)
+
+        model_input, dc_input, target, stats = simulate_undersampling(
+            kspace,
+            mask,
+            learning="complex_image",
+            norm="fastmri_magnitude",
+        )
+
+        scale = torch.quantile(image.abs().reshape(1, -1), q=0.95, dim=1).reshape(1, 1, 1, 1)
+        expected_image = image / scale
+        self.assertEqual(stats["prediction_domain"], "complex_image")
+        self.assertTrue(model_input.is_complex())
+        self.assertTrue(torch.allclose(model_input, expected_image, atol=1e-5, rtol=1e-5))
+        self.assertTrue(torch.allclose(dc_input, centered_fft2(expected_image), atol=1e-5, rtol=1e-5))
+        self.assertTrue(torch.allclose(target["complex_image"], expected_image, atol=1e-5, rtol=1e-5))
+        self.assertTrue(torch.allclose(target["image"], image.abs(), atol=1e-5, rtol=1e-5))
+        self.assertTrue(torch.allclose(to_image_magnitude(model_input, stats), image.abs(), atol=1e-5, rtol=1e-5))
+        for loss_name in ("complex_l1", "complex_l2", "perpendicular_loss"):
+            self.assertAlmostEqual(build_loss(loss_name)(model_input, target, stats=stats).item(), 0.0, places=6)
+
     def test_inference_denormalize_returns_original_kspace_for_supported_kspace_norms(self):
         ks = torch.tensor([[[[1 + 2j, 0.5 + 0.25j]]]], dtype=torch.complex64)
-        comp_stats = {"normalization": "kspace_companding", "companding_p": 0.8, "companding_a": 0.5}
+        comp_stats = {"normalization": "kspace_companding", "companding_p": 0.8, "companding_a": 0.5, "companding_centering": "fft"}
         log_stats = {"normalization": "log_kspace"}
         fastmri_stats = {"normalization": "fastmri_magnitude", "p95": torch.tensor(2.0)}
 
@@ -343,7 +392,7 @@ class IntermediateLossTest(unittest.TestCase):
     def test_to_image_magnitude_restores_kspace_before_ifft(self):
         img = torch.tensor([[[[1.0, 2.0], [3.0, 4.0]]]], dtype=torch.float32)
         kspace = torch.fft.fftshift(torch.fft.fft2(torch.fft.ifftshift(img), norm='ortho')).to(torch.complex64)
-        comp_stats = {"normalization": "kspace_companding", "companding_p": 0.8, "companding_a": 0.5}
+        comp_stats = {"normalization": "kspace_companding", "companding_p": 0.8, "companding_a": 0.5, "companding_centering": "fft"}
         log_stats = {"normalization": "log_kspace"}
 
         comp_mag = to_image_magnitude(apply_kspace_companding(kspace, a=0.5, p=0.8), comp_stats)
@@ -457,11 +506,11 @@ class IntermediateLossTest(unittest.TestCase):
         pred = torch.ones(1, 1, 2, 2)
         target = {"image": torch.ones(1, 1, 2, 2), "kspace": torch.ones(1, 1, 2, 2, dtype=torch.complex64)}
 
-        with self.assertRaisesRegex(ValueError, "complex k-space"):
+        with self.assertRaisesRegex(ValueError, "complex prediction"):
             build_loss("complex_l1")(pred, target)
-        with self.assertRaisesRegex(ValueError, "complex k-space"):
+        with self.assertRaisesRegex(ValueError, "complex prediction"):
             build_loss("complex_l2")(pred, target)
-        with self.assertRaisesRegex(ValueError, "complex k-space"):
+        with self.assertRaisesRegex(ValueError, "complex prediction"):
             build_loss("perpendicular_loss")(pred, target)
 
     def test_cascade_forward_default_contract_is_unchanged(self):
@@ -516,6 +565,67 @@ class IntermediateLossTest(unittest.TestCase):
         self.assertFalse(recon.is_complex())
         self.assertEqual(len(intermediates), 2)
         self.assertTrue(all(not stage.is_complex() for stage in intermediates))
+
+    def test_cascade_preserves_complex_image_outputs_through_fft_data_consistency(self):
+        model = cascadeNet(
+            N=(2, 2),
+            encList=[_DummyEncoder, _DummyEncoder],
+            encArgs=[{"delta": 0.0}, {"delta": 0.0}],
+            lamb=False,
+            learning="complex_image",
+        )
+        x = torch.randn(1, 1, 2, 2, dtype=torch.cfloat)
+        y = torch.randn(1, 1, 2, 2, dtype=torch.cfloat)
+        mask = torch.ones(1, 1, 2, 2)
+
+        recon, intermediates = model(x, y, mask, return_intermediates=True)
+
+        expected = centered_ifft2(y)
+        self.assertTrue(recon.is_complex())
+        self.assertTrue(torch.allclose(recon, expected, atol=1e-6, rtol=1e-6))
+        self.assertTrue(all(stage.is_complex() for stage in intermediates))
+
+    def test_train_config_contains_only_complex_image_perpendicular_experiment(self):
+        cfg = build_cfg(0)
+
+        self.assertEqual(len(EXPERIMENTS), 1)
+        self.assertEqual(cfg.dataset, "fastmri")
+        self.assertEqual(cfg.learning, "complex_image")
+        self.assertEqual(cfg.norm, "fastmri_magnitude")
+        self.assertEqual(cfg.final_loss_type, "perpendicular_loss")
+        self.assertEqual(cfg.intermediate_loss_type, "perpendicular_loss")
+        self.assertEqual(cfg.lambda_schedule, "hard")
+
+    def test_complex_image_experiment_runs_forward_loss_and_backward(self):
+        cfg = build_cfg(0)
+        cfg.image_size = (4, 4)
+        cfg.encoders = ["patch"]
+        cfg.patch_size = (2, 2)
+        cfg.nhead_patch = 1
+        cfg.layer_no = 1
+        cfg.num_encoder_layers = 1
+        model = build_model(cfg)
+        image = torch.randn(1, 1, 4, 4, dtype=torch.complex64)
+        kspace = centered_fft2(image)
+        mask = torch.tensor([[[[1.0, 0.0, 1.0, 0.0]]]])
+        kspace_us = kspace * mask
+        model_input, dc_input, target, stats = simulate_undersampling(
+            kspace,
+            mask,
+            learning=cfg.learning,
+            norm=cfg.norm,
+            kspace_us=kspace_us,
+        )
+
+        recon = model(model_input, dc_input, mask)
+        loss = build_loss(cfg.final_loss_type)(recon, target, stats=stats)
+        loss.backward()
+        grads = [param.grad for param in model.parameters() if param.requires_grad]
+
+        self.assertTrue(recon.is_complex())
+        self.assertTrue(torch.isfinite(loss))
+        self.assertTrue(all(grad is None or torch.isfinite(grad).all() for grad in grads))
+        self.assertTrue(any(grad is not None and torch.any(grad != 0) for grad in grads))
 
     def test_oasis_dataset_behavior_is_unchanged(self):
         with tempfile.TemporaryDirectory() as tmpdir:

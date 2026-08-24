@@ -117,6 +117,8 @@ _ENCODER_ARGS = {
 
 def _build_model_impl(cfg):
     num_ch = cfg.num_channels
+    if cfg.learning == "complex_image" and cfg.attn_type == "standard":
+        raise ValueError("learning='complex_image' requires a complex-valued attention type")
 
     enc_list = []
     enc_args = []
@@ -242,8 +244,10 @@ def simulate_undersampling(
     kspace_us=None,
     companding_p: float = 0.8,
     companding_a: float = 0.5,
+    companding_centering: str = "fft",
 ):
     """
+    learning="complex_image" : preserve complex image values through the model and FFT data consistency
     norm="zscore" : z-score normalise real/imag separately using undersampled image stats
     norm="kspace_companding" : radial magnitude companding in k-space (k_space learning only)
     norm="log_kspace" : log1p magnitude k-space normalization with preserved phase (k_space learning only)
@@ -259,4 +263,5 @@ def simulate_undersampling(
         kspace_us=kspace_us,
         companding_p=companding_p,
         companding_a=companding_a,
+        companding_centering=companding_centering,
     )

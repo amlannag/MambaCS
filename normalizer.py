@@ -4,8 +4,9 @@ Normalisation strategies for the MRI undersampling pipeline.
 Each function takes (kspace_full, mask, learning) and returns
 (model_input, DC_input, target, metric) — identical contract to simulate_undersampling.
 
-learning="k_space" : model_input is complex k-space  [B,1,H,W]
-learning="image"   : model_input is real magnitude    [B,1,H,W]
+learning="k_space"      : model_input is complex k-space [B,1,H,W]
+learning="image"        : model_input is real magnitude   [B,1,H,W]
+learning="complex_image": model_input is complex image    [B,1,H,W]
 """
 
 import torch
@@ -15,28 +16,54 @@ COMPANDING_EPS = 1e-6
 LOG_KSPACE_EPS = 0.0
 
 
-def _companding_weight_like(kspace: torch.Tensor, a: float, p: float, eps: float = COMPANDING_EPS) -> torch.Tensor:
-    """Build a centered radial companding weight map matching the notebook convention."""
+def _companding_axis(size: int, kspace: torch.Tensor, centering: str) -> torch.Tensor:
+    if centering == "fft":
+        return torch.arange(size, device=kspace.device, dtype=kspace.real.dtype) - size // 2
+    if centering == "legacy":
+        return torch.linspace(-size / 2, size / 2, size, device=kspace.device, dtype=kspace.real.dtype)
+    raise ValueError("companding_centering must be 'fft' or 'legacy'")
+
+
+def _companding_weight_like(
+    kspace: torch.Tensor,
+    a: float,
+    p: float,
+    eps: float = COMPANDING_EPS,
+    centering: str = "fft",
+) -> torch.Tensor:
+    """Build a radial companding weight map centered on the shifted FFT origin."""
     _, _, h, w = kspace.shape
-    y = torch.linspace(-h / 2, h / 2, h, device=kspace.device, dtype=kspace.real.dtype)
-    x = torch.linspace(-w / 2, w / 2, w, device=kspace.device, dtype=kspace.real.dtype)
+    y = _companding_axis(h, kspace, centering)
+    x = _companding_axis(w, kspace, centering)
     yy, xx = torch.meshgrid(y, x, indexing="ij")
     weight = torch.clamp((a * (xx.square() + yy.square())).pow(p), min=eps)
     return weight.unsqueeze(0).unsqueeze(0)
 
 
-def apply_kspace_companding(kspace: torch.Tensor, a: float, p: float, eps: float = COMPANDING_EPS) -> torch.Tensor:
+def apply_kspace_companding(
+    kspace: torch.Tensor,
+    a: float,
+    p: float,
+    eps: float = COMPANDING_EPS,
+    centering: str = "fft",
+) -> torch.Tensor:
     """Scale k-space magnitude radially while preserving complex phase."""
     if not kspace.is_complex():
         raise TypeError("k-space companding requires a complex tensor")
-    return kspace * _companding_weight_like(kspace, a=a, p=p, eps=eps)
+    return kspace * _companding_weight_like(kspace, a=a, p=p, eps=eps, centering=centering)
 
 
-def invert_kspace_companding(kspace: torch.Tensor, a: float, p: float, eps: float = COMPANDING_EPS) -> torch.Tensor:
+def invert_kspace_companding(
+    kspace: torch.Tensor,
+    a: float,
+    p: float,
+    eps: float = COMPANDING_EPS,
+    centering: str = "fft",
+) -> torch.Tensor:
     """Invert radial k-space companding while preserving complex phase."""
     if not kspace.is_complex():
         raise TypeError("k-space companding inversion requires a complex tensor")
-    return kspace / _companding_weight_like(kspace, a=a, p=p, eps=eps)
+    return kspace / _companding_weight_like(kspace, a=a, p=p, eps=eps, centering=centering)
 
 
 def apply_log_kspace(kspace: torch.Tensor, eps: float = LOG_KSPACE_EPS) -> torch.Tensor:
@@ -69,6 +96,7 @@ def restore_original_kspace(kspace: torch.Tensor, metric: dict | None = None) ->
             a=metric["companding_a"],
             p=metric["companding_p"],
             eps=metric.get("companding_eps", COMPANDING_EPS),
+            centering=metric.get("companding_centering", "legacy"),
         )
     if normalization == "log_kspace":
         return invert_log_kspace(kspace)
@@ -93,6 +121,23 @@ def kspace_to_image_magnitude(kspace: torch.Tensor, metric: dict | None = None) 
         return kspace
     kspace = restore_original_kspace(kspace, metric)
     return torch.abs(ifft_2d(kspace))
+
+
+def complex_image_to_magnitude(image: torch.Tensor, metric: dict | None = None) -> torch.Tensor:
+    if not image.is_complex():
+        return image
+    if metric and metric.get("normalization") == "fastmri_magnitude":
+        p95 = torch.as_tensor(metric["p95"], device=image.device, dtype=image.real.dtype)
+        image = image * p95.reshape(-1, *([1] * (image.ndim - 1)))
+    return torch.abs(image)
+
+
+def reconstruction_to_image_magnitude(recon: torch.Tensor, metric: dict | None = None) -> torch.Tensor:
+    if not recon.is_complex():
+        return recon
+    if metric and metric.get("prediction_domain") == "complex_image":
+        return complex_image_to_magnitude(recon, metric)
+    return kspace_to_image_magnitude(recon, metric)
 
 
 def zscore(kspace_full, mask, learning="k_space", kspace_us=None, **_unused):
@@ -139,6 +184,7 @@ def kspace_companding(
     companding_p: float = 0.8,
     companding_a: float = 0.5,
     companding_eps: float = COMPANDING_EPS,
+    companding_centering: str = "fft",
 ):
     """Radially compand k-space magnitude while keeping the model entirely in companded k-space."""
     if learning != "k_space":
@@ -146,13 +192,18 @@ def kspace_companding(
     if kspace_us is None:
         kspace_us = kspace_full * mask
 
-    kspace_us_comp = apply_kspace_companding(kspace_us, a=companding_a, p=companding_p, eps=companding_eps)
-    kspace_full_comp = apply_kspace_companding(kspace_full, a=companding_a, p=companding_p, eps=companding_eps)
+    kspace_us_comp = apply_kspace_companding(
+        kspace_us, a=companding_a, p=companding_p, eps=companding_eps, centering=companding_centering
+    )
+    kspace_full_comp = apply_kspace_companding(
+        kspace_full, a=companding_a, p=companding_p, eps=companding_eps, centering=companding_centering
+    )
     metric = {
         "normalization": "kspace_companding",
         "companding_p": companding_p,
         "companding_a": companding_a,
         "companding_eps": companding_eps,
+        "companding_centering": companding_centering,
         "image_shape": tuple(int(v) for v in kspace_full.shape[-2:]),
     }
     target = {
@@ -232,16 +283,22 @@ def fastmri_magnitude(kspace_full, mask, learning="k_space", kspace_us=None, **_
 
 
 def _build_outputs(img_us_norm, img_gt_norm, metric, learning):
-    gt_image = torch.abs(img_gt_norm)
+    metric["prediction_domain"] = learning
     gt_kspace = fft_2d(img_gt_norm)
     target = {
-        "image": gt_image,
+        "image": torch.abs(img_gt_norm),
+        "complex_image": img_gt_norm,
         "kspace": gt_kspace,
     }
     if learning == "k_space":
-        DC_input    = fft_2d(img_us_norm)
+        DC_input = fft_2d(img_us_norm)
         model_input = DC_input
-    else:  # "image"
+    elif learning == "image":
         model_input = torch.abs(img_us_norm)
-        DC_input    = fft_2d(img_us_norm)   # actual measured k-space, not FFT of magnitude
+        DC_input = fft_2d(img_us_norm)
+    elif learning == "complex_image":
+        model_input = img_us_norm
+        DC_input = fft_2d(img_us_norm)
+    else:
+        raise ValueError("learning must be 'k_space', 'image', or 'complex_image'")
     return model_input, DC_input, target, metric

@@ -3,7 +3,7 @@ import math
 import torch
 import torch.nn.functional as F
 from torch import nn
-from normalizer import kspace_to_image_magnitude
+from normalizer import reconstruction_to_image_magnitude
 
 
 _NORMALIZED_KSPACE_LOSS_NORMS = {"kspace_companding", "log_kspace"}
@@ -19,16 +19,21 @@ def _use_normalized_kspace_loss(stats) -> bool:
     return bool(stats and stats.get("normalization") in _NORMALIZED_KSPACE_LOSS_NORMS)
 
 
+def _complex_target_domain(stats) -> str:
+    return "complex_image" if stats and stats.get("prediction_domain") == "complex_image" else "kspace"
+
+
 def _to_magnitude(x, stats=None):
     """
     Bring x into the real magnitude image domain.
-    - complex (k-space): ifft2 → abs → real magnitude, values ≥ 0
-    - real (image domain): pass through as-is
+    - complex k-space: inverse FFT then magnitude
+    - complex image: magnitude directly
+    - real image: pass through as-is
     """
     if x.is_complex():
         if _use_normalized_kspace_loss(stats):
             return x.abs()
-        return kspace_to_image_magnitude(x, stats)
+        return reconstruction_to_image_magnitude(x, stats)
     return x
 
 
@@ -77,30 +82,27 @@ class MagnitudeL1Loss(nn.Module):
 
 
 class ComplexL1Loss(nn.Module):
-    """L1 loss directly in complex k-space: |Re diff| + |Im diff|."""
-    target_domain = "kspace"
+    """L1 loss in the active complex domain: |Re diff| + |Im diff|."""
 
     def forward(self, pred, gt, stats=None):
-        gt_kspace = _resolve_target(gt, self.target_domain)
-        if not pred.is_complex() or not gt_kspace.is_complex():
-            raise ValueError("complex_l1 requires complex k-space prediction and target tensors")
-        return torch.mean(torch.abs(pred.real - gt_kspace.real) + torch.abs(pred.imag - gt_kspace.imag))
+        gt_complex = _resolve_target(gt, _complex_target_domain(stats))
+        if not pred.is_complex() or not gt_complex.is_complex():
+            raise ValueError("complex_l1 requires complex prediction and target tensors")
+        return torch.mean(torch.abs(pred.real - gt_complex.real) + torch.abs(pred.imag - gt_complex.imag))
 
 
 class ComplexL2Loss(nn.Module):
-    """L2 loss directly in complex k-space: squared real diff + squared imag diff."""
-    target_domain = "kspace"
+    """L2 loss in the active complex domain: squared real diff + squared imag diff."""
 
     def forward(self, pred, gt, stats=None):
-        gt_kspace = _resolve_target(gt, self.target_domain)
-        if not pred.is_complex() or not gt_kspace.is_complex():
-            raise ValueError("complex_l2 requires complex k-space prediction and target tensors")
-        return torch.mean((pred.real - gt_kspace.real) ** 2 + (pred.imag - gt_kspace.imag) ** 2)
+        gt_complex = _resolve_target(gt, _complex_target_domain(stats))
+        if not pred.is_complex() or not gt_complex.is_complex():
+            raise ValueError("complex_l2 requires complex prediction and target tensors")
+        return torch.mean((pred.real - gt_complex.real) ** 2 + (pred.imag - gt_complex.imag) ** 2)
 
 
 class PerpendicularLoss(nn.Module):
-    """Perpendicular complex k-space loss with magnitude L1 term."""
-    target_domain = "kspace"
+    """Perpendicular loss with a magnitude L1 term in the active complex domain."""
 
     def __init__(
         self,
@@ -121,14 +123,14 @@ class PerpendicularLoss(nn.Module):
         self.current_m = float(value)
 
     def forward(self, pred, gt, stats=None):
-        gt_kspace = _resolve_target(gt, self.target_domain)
-        if not pred.is_complex() or not gt_kspace.is_complex():
-            raise ValueError("perpendicular_loss requires complex k-space prediction and target tensors")
+        gt_complex = _resolve_target(gt, _complex_target_domain(stats))
+        if not pred.is_complex() or not gt_complex.is_complex():
+            raise ValueError("perpendicular_loss requires complex prediction and target tensors")
 
-        cross = pred * gt_kspace.conj()
+        cross = pred * gt_complex.conj()
         phi_hat = torch.angle(cross)
-        perp = torch.abs(pred * gt_kspace.conj() - pred.conj() * gt_kspace) / (pred.abs() + self.eps)
-        target_abs = gt_kspace.abs()
+        perp = torch.abs(pred * gt_complex.conj() - pred.conj() * gt_complex) / (pred.abs() + self.eps)
+        target_abs = gt_complex.abs()
         branched = torch.where(phi_hat.abs() < (math.pi / 2), perp, 2 * target_abs - perp)
         magnitude_l1 = torch.abs(target_abs - pred.abs())
         if self.magnitude_weighting:

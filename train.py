@@ -21,7 +21,7 @@ from train_config import EXPERIMENTS
 from DcTNN.lambda_scheduler import LambdaScheduler
 from train_utils import FastMRIMaskGenerator, build_model, resolve_data_dirs, simulate_undersampling
 from DcTNN.loss import PerpendicularLoss, build_loss
-from normalizer import kspace_to_image_magnitude
+from normalizer import reconstruction_to_image_magnitude
 
 
 def build_cfg(exp_idx: int) -> Config:
@@ -106,7 +106,7 @@ def _seed_worker(worker_id):
     random.seed(worker_seed)
 
 def _to_image_tensor(x, stats=None):
-    return kspace_to_image_magnitude(x, stats) if x.is_complex() else x
+    return reconstruction_to_image_magnitude(x, stats)
 
 
 def _compute_losses(recon, intermediates, target, final_criterion, intermediate_criterion, loss_mode, stats=None, zf_recon=None):
@@ -197,12 +197,13 @@ def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer
                 kspace_us=kspace_us,
                 companding_p=cfg.companding_p,
                 companding_a=cfg.companding_a,
+                companding_centering=cfg.companding_centering,
             )
 
         optimizer.zero_grad()
         recon, intermediates = model(model_input, DC_input, mask, return_intermediates=True)
         total_batch_loss, final_loss, intermediate_loss_sum, stage_losses, stage_psnr_gains = _compute_losses(
-            recon, intermediates, target, final_criterion, intermediate_criterion, loss_mode, stats=stats, zf_recon=DC_input
+            recon, intermediates, target, final_criterion, intermediate_criterion, loss_mode, stats=stats, zf_recon=model_input if cfg.learning == "complex_image" else DC_input
         )
         total_batch_loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.grad_clip)
@@ -258,15 +259,17 @@ def validate(cfg, model, loader, accel_factors, image_size, final_criterion,
             kspace_us=kspace_us,
             companding_p=cfg.companding_p,
             companding_a=cfg.companding_a,
+            companding_centering=cfg.companding_centering,
         )
         recon, intermediates = model(model_input, DC_input, mask, return_intermediates=True)
         total_batch_loss, final_loss, intermediate_loss_sum, stage_losses, stage_psnr_gains = _compute_losses(
-            recon, intermediates, target, final_criterion, intermediate_criterion, loss_mode, stats=stats, zf_recon=DC_input
+            recon, intermediates, target, final_criterion, intermediate_criterion, loss_mode, stats=stats, zf_recon=model_input if cfg.learning == "complex_image" else DC_input
         )
 
         gt_image = target["image"] if isinstance(target, dict) else target
         recon_mag = _to_image_tensor(recon, stats)
-        zf_mag    = _to_image_tensor(DC_input, stats)
+        zf_source = model_input if cfg.learning == "complex_image" else DC_input
+        zf_mag    = _to_image_tensor(zf_source, stats)
         total_loss    += total_batch_loss.item()
         total_final_loss += final_loss.item()
         total_intermediate_loss_sum += intermediate_loss_sum.item()

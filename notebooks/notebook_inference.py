@@ -25,7 +25,7 @@ from fastmri.data.subsample import RandomMaskFunc
 from DcTNN.dc import fft_2d, ifft_2d
 from train_utils import simulate_undersampling, build_model, FastMRIMaskGenerator
 from config import Config
-from normalizer import kspace_to_image_magnitude
+from normalizer import reconstruction_to_image_magnitude
 
 
 # ── Metrics ───────────────────────────────────────────────────────────────────
@@ -101,18 +101,18 @@ def load_test_images(data_dir):
 
 def load_all_slices(h5_file, kspace_key='kspace', image_size=(320, 320)):
     """
-    Load every k-space slice from a .h5 file, center-cropped to image_size.
+    Load every k-space slice using the same image-domain center crop as training.
     Returns list of [1,1,H,W] complex64 tensors.
     """
-    from dataset import center_crop_kspace
+    from dataset import prepare_fastmri_kspace
     with h5py.File(h5_file, 'r') as f:
         if kspace_key not in f:
             raise KeyError(f'Key "{kspace_key}" not found — available: {list(f.keys())}')
         ks_vol = f[kspace_key][:]
     slices = []
     for sl in ks_vol:
-        ks = center_crop_kspace(sl, image_size)
-        slices.append(torch.tensor(ks, dtype=torch.complex64).unsqueeze(0).unsqueeze(0))
+        ks = prepare_fastmri_kspace(torch.as_tensor(sl, dtype=torch.complex64), image_size)
+        slices.append(ks.unsqueeze(0).unsqueeze(0))
     print(f'Loaded {len(slices)} slices from {os.path.basename(h5_file)}'
           f' — shape {slices[0].shape}  dtype {slices[0].dtype}')
     return slices
@@ -227,6 +227,8 @@ def verify_fastmri_mask(H, W, accel, seed=1234, center_fractions=None):
 def _flat_dict_to_cfg(flat):
     """Reconstruct a Config object from the flat dict saved by train.py."""
     cfg = Config()
+    if flat.get('norm') == 'kspace_companding' and 'companding_centering' not in flat:
+        cfg.companding_centering = 'legacy'
     for k, v in flat.items():
         if not hasattr(cfg, k):
             continue
@@ -276,12 +278,12 @@ def denormalize_recon(recon, stats, learning):
     """
     if not stats or 'mean_r' not in stats:
         if recon.is_complex():
-            return kspace_to_image_magnitude(recon, stats)[0, 0].cpu().numpy()
+            return reconstruction_to_image_magnitude(recon, stats)[0, 0].cpu().numpy()
         return recon[0, 0].cpu().numpy()
     mean_r, std_r = stats['mean_r'], stats['std_r']
     mean_i, std_i = stats['mean_i'], stats['std_i']
-    if learning == 'k_space':
-        img_norm = ifft_2d(recon)
+    if learning in {'k_space', 'complex_image'}:
+        img_norm = ifft_2d(recon) if learning == 'k_space' else recon
         return torch.abs(torch.complex(
             img_norm.real * std_r + mean_r,
             img_norm.imag * std_i + mean_i,
@@ -312,6 +314,7 @@ def run_inference_kspace(kspace_tensor, models, cfgs, image_size, accel, device,
             norm=norm,
             companding_p=getattr(cfgs[label], 'companding_p', 0.8),
             companding_a=getattr(cfgs[label], 'companding_a', 0.5),
+            companding_centering=getattr(cfgs[label], 'companding_centering', 'legacy'),
         )
         with torch.no_grad():
             recon = model(model_input, dc_input, mask)
@@ -354,6 +357,7 @@ def run_inference_png(img_np, experiments, device, seed=42, tv_weight=0.1):
             kspace_us=kspace_us,
             companding_p=data_cfg.get('companding_p', 0.8),
             companding_a=data_cfg.get('companding_a', 0.5),
+            companding_centering=data_cfg.get('companding_centering', 'legacy'),
         )
         with torch.no_grad():
             recon_norm = model(model_input, dc_input, mask)

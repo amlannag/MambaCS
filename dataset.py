@@ -23,21 +23,29 @@ def centered_fft2(image: torch.Tensor) -> torch.Tensor:
 
 def center_crop_complex(arr: torch.Tensor, out_h: int, out_w: int) -> torch.Tensor:
     h, w = arr.shape[-2:]
+    if not (0 < out_h <= h and 0 < out_w <= w):
+        raise ValueError(f"Cannot crop shape {(h, w)} to {(out_h, out_w)}")
     h0 = (h - out_h) // 2
     w0 = (w - out_w) // 2
     return arr[..., h0:h0 + out_h, w0:w0 + out_w]
+
+
+def prepare_fastmri_kspace(kspace: torch.Tensor, image_size: tuple[int, int]) -> torch.Tensor:
+    image = centered_ifft2(kspace)
+    image = center_crop_complex(image, *image_size)
+    return centered_fft2(image)
 
 
 class H5MRIDataset(Dataset):
     """
     Loads k-space slices from .h5 MRI files (fastMRI format).
     Each file contains kspace of shape (num_slices, H, W) complex64.
-    Returns one slice after centered IFFT -> centered square image crop -> centered FFT,
-    as [1, side, side] complex64 where side = min(H, W).
+    Returns one slice after centered IFFT -> image-domain center crop -> centered FFT,
+    as [1, crop_H, crop_W] complex64.
 
     Args:
         data_dir (str):              Directory containing .h5 files
-        image_size (tuple[int,int]): Unused for fastMRI cropping; kept for interface compatibility
+        image_size (tuple[int,int]): Output image-domain crop shape (crop_H, crop_W)
         kspace_key (str):            HDF5 dataset key for raw k-space (default: 'kspace')
     """
 
@@ -78,10 +86,7 @@ class H5MRIDataset(Dataset):
         fpath, s = self.index[idx]
         f = self._get_file_handle(fpath)
         kspace = torch.tensor(f[self.kspace_key][s], dtype=torch.complex64)
-        image = centered_ifft2(kspace)
-        h, w = self.image_size
-        image = center_crop_complex(image, h, w)
-        kspace = centered_fft2(image)
+        kspace = prepare_fastmri_kspace(kspace, self.image_size)
         return kspace.unsqueeze(0)
 
     def __del__(self):
