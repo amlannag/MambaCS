@@ -10,15 +10,15 @@ import torch
 
 from config import Config
 from train_utils import build_model
-from normalizer import reconstruction_to_image_magnitude, restore_original_kspace
+from normalizer import invert_normalization, reconstruction_to_image_magnitude
 
 
 # Fields that belong in cfg['data'] vs cfg['model'] for notebook consumers.
 _DATA_KEYS = {
     "dataset", "data_dir", "val_data_dir", "kspace_key", "image_size",
     "num_channels", "acceleration_factors", "center_fractions", "mask_type",
-    "val_fraction", "seed", "max_val_files", "norm", "companding_p", "companding_a",
-    "companding_centering",
+    "val_fraction", "seed", "max_val_files", "norm", "robust_clip", "robust_shift",
+    "companding_p", "companding_a", "companding_centering",
 }
 _MODEL_KEYS = {
     "encoders", "patch_size", "axial_row_stride", "nhead_patch", "nhead_axial",
@@ -136,8 +136,13 @@ def _denormalize_image(recon: torch.Tensor, stats: dict) -> torch.Tensor:
     For normalized k-space modes this returns original-scale complex k-space.
     For z-score stats it preserves the previous real/complex affine restoration.
     """
-    if recon.is_complex() and stats and stats.get("normalization") in {"kspace_companding", "log_kspace", "fastmri_magnitude"}:
-        return restore_original_kspace(recon, stats)
+    if recon.is_complex() and stats and stats.get("normalization") in {
+        "kspace_companding",
+        "log_kspace",
+        "fastmri_magnitude",
+        "robust_shifted",
+    }:
+        return invert_normalization(recon, stats)
     if not stats or "mean_r" not in stats:
         return recon
     mean_r, std_r = stats["mean_r"], stats["std_r"]

@@ -1,4 +1,8 @@
 __pycache__/
+.claude/
+.devin/
+.pytest_cache/
+.vscode/
 *.pyc
 logs/
 wandb/
@@ -13,3 +17,6 @@ notebooks/
 Sync Bunya Script.sh
 bart/
 data/
+tests/
+benchmarks/
+alternative papers/

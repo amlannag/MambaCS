@@ -231,6 +231,7 @@ _NORMALIZERS = {
     "kspace_companding":   _norm.kspace_companding,
     "log_kspace":          _norm.log_kspace,
     "fastmri_magnitude":   _norm.fastmri_magnitude,
+    "robust_shifted":      _norm.robust_shifted,
     None:                  _norm.none,
     "none":                _norm.none,
 }
@@ -242,6 +243,8 @@ def simulate_undersampling(
     learning="k_space",
     norm="none",
     kspace_us=None,
+    robust_clip: float = 3.0,
+    robust_shift: float = 3.0,
     companding_p: float = 0.8,
     companding_a: float = 0.5,
     companding_centering: str = "fft",
@@ -249,6 +252,7 @@ def simulate_undersampling(
     """
     learning="complex_image" : preserve complex image values through the model and FFT data consistency
     norm="zscore" : z-score normalise real/imag separately using undersampled image stats
+    norm="robust_shifted" : median/IQR scale, smooth clip, and shift in the learning domain
     norm="kspace_companding" : radial magnitude companding in k-space (k_space learning only)
     norm="log_kspace" : log1p magnitude k-space normalization with preserved phase (k_space learning only)
     norm=None     : no normalisation — tensors left in raw k-space units
@@ -261,6 +265,8 @@ def simulate_undersampling(
         mask,
         learning,
         kspace_us=kspace_us,
+        robust_clip=robust_clip,
+        robust_shift=robust_shift,
         companding_p=companding_p,
         companding_a=companding_a,
         companding_centering=companding_centering,

@@ -195,15 +195,19 @@ def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer
                 cfg.learning,
                 cfg.norm,
                 kspace_us=kspace_us,
+                robust_clip=cfg.robust_clip,
+                robust_shift=cfg.robust_shift,
                 companding_p=cfg.companding_p,
                 companding_a=cfg.companding_a,
                 companding_centering=cfg.companding_centering,
             )
 
         optimizer.zero_grad()
-        recon, intermediates = model(model_input, DC_input, mask, return_intermediates=True)
+        recon, intermediates = model(
+            model_input, DC_input, mask, return_intermediates=True, stats=stats
+        )
         total_batch_loss, final_loss, intermediate_loss_sum, stage_losses, stage_psnr_gains = _compute_losses(
-            recon, intermediates, target, final_criterion, intermediate_criterion, loss_mode, stats=stats, zf_recon=model_input if cfg.learning == "complex_image" else DC_input
+            recon, intermediates, target, final_criterion, intermediate_criterion, loss_mode, stats=stats, zf_recon=model_input
         )
         total_batch_loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.grad_clip)
@@ -261,14 +265,16 @@ def validate(cfg, model, loader, accel_factors, image_size, final_criterion,
             companding_a=cfg.companding_a,
             companding_centering=cfg.companding_centering,
         )
-        recon, intermediates = model(model_input, DC_input, mask, return_intermediates=True)
+        recon, intermediates = model(
+            model_input, DC_input, mask, return_intermediates=True, stats=stats
+        )
         total_batch_loss, final_loss, intermediate_loss_sum, stage_losses, stage_psnr_gains = _compute_losses(
-            recon, intermediates, target, final_criterion, intermediate_criterion, loss_mode, stats=stats, zf_recon=model_input if cfg.learning == "complex_image" else DC_input
+            recon, intermediates, target, final_criterion, intermediate_criterion, loss_mode, stats=stats, zf_recon=model_input
         )
 
         gt_image = target["image"] if isinstance(target, dict) else target
         recon_mag = _to_image_tensor(recon, stats)
-        zf_source = model_input if cfg.learning == "complex_image" else DC_input
+        zf_source = model_input
         zf_mag    = _to_image_tensor(zf_source, stats)
         total_loss    += total_batch_loss.item()
         total_final_loss += final_loss.item()

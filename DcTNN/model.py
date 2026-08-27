@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from .dc import ComplexFFT_DC, FFT_DC, KSpace_DC
+from .dc import KSpace_DC
 from .vit import TokenVIT, axVIT, CrossAttentionVIT
 from .encoders import TokenEncoder, axialEncoder, crossAxialEncoder
 
@@ -11,9 +11,9 @@ class cascadeNet(nn.Module):
     """
     Cascaded denoising network with data consistency after each stage.
 
-    When learning="k_space"      — encoder input/output is complex k-space; KSpace_DC used.
-    When learning="image"        — encoder input/output is real magnitude image; FFT_DC used.
-    When learning="complex_image" — encoder input/output is complex image; ComplexFFT_DC used.
+    Encoders operate in the configured normalized learning domain. Each candidate is
+    restored to raw k-space for data consistency, then normalized back into that
+    learning domain before the next cascade stage.
 
     Args:
         N (int)                 Image size
@@ -31,10 +31,11 @@ class cascadeNet(nn.Module):
         self.scheduled_lamb = None
         self.N = N
         self.learning = learning
-        dc_funcs = {"k_space": KSpace_DC, "image": FFT_DC, "complex_image": ComplexFFT_DC}
-        if learning not in dc_funcs:
-            raise ValueError(f"Unknown learning domain '{learning}'. Choose from: {list(dc_funcs)}")
-        self._dc_func = dc_funcs[learning]
+        valid_domains = {"k_space", "image", "complex_image"}
+        if learning not in valid_domains:
+            raise ValueError(
+                f"Unknown learning domain '{learning}'. Choose from: {sorted(valid_domains)}"
+            )
 
         self.transformers = nn.ModuleList(
             enc(N, **args) for enc, args in zip(encList, encArgs)
@@ -43,29 +44,35 @@ class cascadeNet(nn.Module):
     def set_scheduled_lamb(self, value):
         self.scheduled_lamb = value
 
-    def forward(self, xPrev, y, sampleMask, return_intermediates=False):
+    def forward(self, xPrev, y, sampleMask, return_intermediates=False, stats=None):
         """
-        xPrev      : [B,1,H,W] complex undersampled k-space  (learning="k_space")
-                     [B,1,H,W] real magnitude image           (learning="image")
-                     [B,1,H,W] complex undersampled image     (learning="complex_image")
-        y          : [B,1,H,W] complex k-space DC reference (always complex)
+        xPrev      : [B,1,H,W] normalized model-domain input
+        y          : [B,1,H,W] raw measured complex k-space
         sampleMask : [H, W]
         Returns same domain as xPrev. When return_intermediates=True, also returns
         the ordered list of post-DC stage states.
         """
+        from normalizer import model_output_to_raw_kspace, raw_kspace_to_model_output
+
         x = xPrev
         intermediates = []
         for i, transformer in enumerate(self.transformers):
-            
             if self.lamb is not False:
                 lamb_i = self.lamb[i]
             elif self.scheduled_lamb is not None:
                 lamb_i = self.scheduled_lamb
             else:
                 lamb_i = None
-            x = self._dc_func(x + transformer(x, col_mask=sampleMask), y, sampleMask, lamb_i)
-            if self.learning == "image":
-                x = x.real    # FFT_DC IFFTs to complex; extract real for next encoder
+            candidate = x + transformer(x, col_mask=sampleMask)
+            raw_candidate_kspace = model_output_to_raw_kspace(
+                candidate, stats, self.learning
+            )
+            raw_corrected_kspace = KSpace_DC(
+                raw_candidate_kspace, y, sampleMask, lamb_i
+            )
+            x = raw_kspace_to_model_output(
+                raw_corrected_kspace, stats, self.learning
+            )
             if return_intermediates:
                 intermediates.append(x)
         if return_intermediates:

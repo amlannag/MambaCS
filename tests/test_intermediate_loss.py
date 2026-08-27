@@ -32,8 +32,11 @@ from normalizer import (
     apply_log_kspace,
     invert_kspace_companding,
     invert_log_kspace,
+    invert_normalization,
     kspace_to_image_magnitude,
+    model_output_to_raw_kspace,
     restore_original_kspace,
+    robust_shifted,
 )
 from train import _build_lambda_scheduler, _compute_losses, _psnr_per_sample, build_cfg
 from train_config import EXPERIMENTS
@@ -226,6 +229,7 @@ class IntermediateLossTest(unittest.TestCase):
         self.assertEqual(stats["normalization"], "kspace_companding")
         self.assertEqual(stats["companding_centering"], "fft")
         self.assertTrue(torch.allclose(model_input, apply_kspace_companding(kspace_full, a=0.5, p=0.8), atol=1e-6, rtol=1e-6))
+        self.assertTrue(torch.allclose(dc_input, kspace_full, atol=1e-6, rtol=1e-6))
         expected_image_gt = kspace_to_image_magnitude(apply_kspace_companding(kspace_full, a=0.5, p=0.8), stats)
         self.assertTrue(torch.allclose(target["image"], expected_image_gt, atol=1e-6, rtol=1e-6))
         self.assertTrue(torch.allclose(target["kspace"], apply_kspace_companding(kspace_full, a=0.5, p=0.8), atol=1e-6, rtol=1e-6))
@@ -253,6 +257,7 @@ class IntermediateLossTest(unittest.TestCase):
         self.assertTrue(dc_input.is_complex())
         self.assertEqual(stats["normalization"], "log_kspace")
         self.assertTrue(torch.allclose(model_input, apply_log_kspace(kspace_full), atol=1e-6, rtol=1e-6))
+        self.assertTrue(torch.allclose(dc_input, kspace_full, atol=1e-6, rtol=1e-6))
         expected_image_gt = kspace_to_image_magnitude(apply_log_kspace(kspace_full), stats)
         self.assertTrue(torch.allclose(target["image"], expected_image_gt, atol=1e-6, rtol=1e-6))
         self.assertTrue(torch.allclose(target["kspace"], apply_log_kspace(kspace_full), atol=1e-6, rtol=1e-6))
@@ -375,7 +380,7 @@ class IntermediateLossTest(unittest.TestCase):
         self.assertEqual(stats["normalization_domain"], "k_space")
         self.assertTrue(torch.allclose(stats["p95"], scale))
         self.assertTrue(torch.allclose(model_input, expected_input))
-        self.assertTrue(torch.allclose(dc_input, expected_input))
+        self.assertTrue(torch.allclose(dc_input, kspace_us))
         self.assertTrue(torch.allclose(target["kspace"], expected_target))
         self.assertTrue(torch.allclose(model_input * mask, target["kspace"] * mask))
         self.assertEqual(torch.count_nonzero(model_input * (1 - mask)).item(), 0)
@@ -413,12 +418,165 @@ class IntermediateLossTest(unittest.TestCase):
         self.assertEqual(stats["normalization_domain"], "complex_image")
         self.assertTrue(model_input.is_complex())
         self.assertTrue(torch.allclose(model_input, expected_image, atol=1e-5, rtol=1e-5))
-        self.assertTrue(torch.allclose(dc_input, centered_fft2(expected_image), atol=1e-5, rtol=1e-5))
+        self.assertTrue(torch.allclose(dc_input, kspace, atol=1e-5, rtol=1e-5))
         self.assertTrue(torch.allclose(target["complex_image"], expected_image, atol=1e-5, rtol=1e-5))
         self.assertTrue(torch.allclose(target["image"], image.abs(), atol=1e-5, rtol=1e-5))
         self.assertTrue(torch.allclose(to_image_magnitude(model_input, stats), image.abs(), atol=1e-5, rtol=1e-5))
         for loss_name in ("complex_l1", "complex_l2", "perpendicular_loss"):
             self.assertAlmostEqual(build_loss(loss_name)(model_input, target, stats=stats).item(), 0.0, places=6)
+
+    def test_robust_shifted_normalization_round_trips_in_each_complex_domain(self):
+        torch.manual_seed(11)
+        image = torch.randn(2, 1, 8, 8, dtype=torch.complex64)
+        kspace = centered_fft2(image)
+        mask = torch.zeros_like(kspace.real)
+        mask[..., ::4] = 1
+        kspace_us = kspace * mask
+
+        for learning in ("k_space", "complex_image"):
+            with self.subTest(learning=learning):
+                model_input, dc_input, target, stats = simulate_undersampling(
+                    kspace,
+                    mask,
+                    learning=learning,
+                    norm="robust_shifted",
+                    kspace_us=kspace_us,
+                    robust_clip=3.0,
+                    robust_shift=3.0,
+                )
+                target_tensor = (
+                    target["kspace"]
+                    if learning == "k_space"
+                    else target["complex_image"]
+                )
+                raw_target_kspace = model_output_to_raw_kspace(
+                    target_tensor, stats, learning
+                )
+
+                self.assertEqual(stats["normalization_domain"], learning)
+                self.assertTrue(torch.allclose(dc_input, kspace_us))
+                self.assertTrue(torch.allclose(
+                    raw_target_kspace, kspace, atol=2e-3, rtol=2e-3
+                ))
+                self.assertTrue(torch.allclose(
+                    target["image"], image.abs(), atol=1e-5, rtol=1e-5
+                ))
+                self.assertTrue(torch.allclose(
+                    to_image_magnitude(target_tensor, stats),
+                    image.abs(),
+                    atol=2e-3,
+                    rtol=2e-3,
+                ))
+                expected_denormalized = kspace if learning == "k_space" else image
+                self.assertTrue(torch.allclose(
+                    _denormalize_image(target_tensor, stats),
+                    expected_denormalized,
+                    atol=2e-3,
+                    rtol=2e-3,
+                ))
+                if learning == "k_space":
+                    self.assertTrue(torch.allclose(
+                        model_input * mask, target_tensor * mask,
+                        atol=1e-6, rtol=1e-6,
+                    ))
+                    self.assertEqual(
+                        torch.count_nonzero(model_input * (1 - mask)).item(), 0
+                    )
+                    measured_magnitudes = model_input[mask.bool()]
+                    self.assertGreaterEqual(measured_magnitudes.abs().min().item(), 0.0)
+                    self.assertLessEqual(measured_magnitudes.abs().max().item(), 6.0)
+                else:
+                    self.assertGreaterEqual(model_input.abs().min().item(), 0.0)
+                    self.assertLessEqual(model_input.abs().max().item(), 6.0)
+
+    def test_normalized_models_apply_data_consistency_in_raw_kspace(self):
+        torch.manual_seed(13)
+        image = torch.randn(1, 1, 8, 8, dtype=torch.complex64)
+        kspace = centered_fft2(image)
+        mask = torch.zeros_like(kspace.real)
+        mask[..., ::4] = 1
+        kspace_us = kspace * mask
+
+        for learning in ("k_space", "complex_image"):
+            with self.subTest(learning=learning):
+                model_input, dc_input, _, stats = simulate_undersampling(
+                    kspace,
+                    mask,
+                    learning=learning,
+                    norm="robust_shifted",
+                    kspace_us=kspace_us,
+                )
+                model = cascadeNet(
+                    N=(8, 8),
+                    encList=[_DummyEncoder],
+                    encArgs=[{"delta": 0.25}],
+                    lamb=False,
+                    learning=learning,
+                )
+                reconstruction = model(
+                    model_input, dc_input, mask, stats=stats
+                )
+                raw_reconstruction = model_output_to_raw_kspace(
+                    reconstruction, stats, learning
+                )
+
+                self.assertTrue(torch.allclose(
+                    raw_reconstruction * mask,
+                    kspace_us * mask,
+                    atol=2e-4,
+                    rtol=2e-4,
+                ))
+
+    def test_all_supported_normalizers_apply_dc_in_raw_kspace(self):
+        torch.manual_seed(17)
+        image = torch.randn(1, 1, 8, 8, dtype=torch.complex64)
+        kspace = centered_fft2(image)
+        mask = torch.zeros_like(kspace.real)
+        mask[..., ::4] = 1
+        kspace_us = kspace * mask
+        cases = [
+            ("none", "k_space"),
+            ("none", "complex_image"),
+            ("zscore", "k_space"),
+            ("zscore", "complex_image"),
+            ("fastmri_magnitude", "k_space"),
+            ("fastmri_magnitude", "complex_image"),
+            ("robust_shifted", "k_space"),
+            ("robust_shifted", "complex_image"),
+            ("kspace_companding", "k_space"),
+            ("log_kspace", "k_space"),
+        ]
+
+        for normalization, learning in cases:
+            with self.subTest(normalization=normalization, learning=learning):
+                model_input, dc_input, _, stats = simulate_undersampling(
+                    kspace,
+                    mask,
+                    learning=learning,
+                    norm=normalization,
+                    kspace_us=kspace_us,
+                )
+                model = cascadeNet(
+                    N=(8, 8),
+                    encList=[_DummyEncoder],
+                    encArgs=[{"delta": 0.1}],
+                    lamb=False,
+                    learning=learning,
+                )
+                reconstruction = model(
+                    model_input, dc_input, mask, stats=stats
+                )
+                raw_reconstruction = model_output_to_raw_kspace(
+                    reconstruction, stats, learning
+                )
+
+                self.assertTrue(torch.allclose(dc_input, kspace_us))
+                self.assertTrue(torch.allclose(
+                    raw_reconstruction * mask,
+                    kspace_us,
+                    atol=2e-3,
+                    rtol=2e-3,
+                ))
 
     def test_inference_denormalize_returns_original_kspace_for_supported_kspace_norms(self):
         ks = torch.tensor([[[[1 + 2j, 0.5 + 0.25j]]]], dtype=torch.complex64)
@@ -694,7 +852,7 @@ class IntermediateLossTest(unittest.TestCase):
                     kspace_us=kspace_us,
                 )
 
-                recon = model(model_input, dc_input, mask)
+                recon = model(model_input, dc_input, mask, stats=stats)
                 loss = build_loss(cfg.final_loss_type)(recon, target, stats=stats)
                 loss.backward()
                 grads = [param.grad for param in model.parameters() if param.requires_grad]
@@ -702,7 +860,8 @@ class IntermediateLossTest(unittest.TestCase):
                 self.assertEqual(stats["normalization_domain"], "k_space")
                 self.assertTrue(torch.allclose(model_input * mask, target["kspace"] * mask))
                 self.assertEqual(torch.count_nonzero(model_input * (1 - mask)).item(), 0)
-                self.assertTrue(torch.allclose(recon * mask, dc_input * mask, atol=1e-6, rtol=1e-6))
+                raw_recon = model_output_to_raw_kspace(recon, stats, cfg.learning)
+                self.assertTrue(torch.allclose(raw_recon * mask, dc_input * mask, atol=1e-6, rtol=1e-6))
                 self.assertTrue(recon.is_complex())
                 self.assertTrue(torch.isfinite(loss))
                 self.assertTrue(all(grad is None or torch.isfinite(grad).all() for grad in grads))

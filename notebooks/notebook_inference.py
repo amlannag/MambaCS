@@ -312,12 +312,14 @@ def run_inference_kspace(kspace_tensor, models, cfgs, image_size, accel, device,
             mask,
             learning=learning,
             norm=norm,
+            robust_clip=getattr(cfgs[label], 'robust_clip', 3.0),
+            robust_shift=getattr(cfgs[label], 'robust_shift', 3.0),
             companding_p=getattr(cfgs[label], 'companding_p', 0.8),
             companding_a=getattr(cfgs[label], 'companding_a', 0.5),
             companding_centering=getattr(cfgs[label], 'companding_centering', 'legacy'),
         )
         with torch.no_grad():
-            recon = model(model_input, dc_input, mask)
+            recon = model(model_input, dc_input, mask, stats=stats)
         recon_mag = denormalize_recon(recon, stats, learning)
         results[label] = {
             'recon': recon_mag,
@@ -355,12 +357,14 @@ def run_inference_png(img_np, experiments, device, seed=42, tv_weight=0.1):
             learning=learning,
             norm=norm,
             kspace_us=kspace_us,
+            robust_clip=data_cfg.get('robust_clip', 3.0),
+            robust_shift=data_cfg.get('robust_shift', 3.0),
             companding_p=data_cfg.get('companding_p', 0.8),
             companding_a=data_cfg.get('companding_a', 0.5),
             companding_centering=data_cfg.get('companding_centering', 'legacy'),
         )
         with torch.no_grad():
-            recon_norm = model(model_input, dc_input, mask)
+            recon_norm = model(model_input, dc_input, mask, stats=stats)
 
         if learning == 'k_space':
             recon_img = _denormalize_image(recon_norm, stats)
