@@ -351,6 +351,50 @@ class IntermediateLossTest(unittest.TestCase):
         self.assertTrue(torch.allclose(kspace_to_image_magnitude(model_input, stats), image, atol=1e-5, rtol=1e-5))
         self.assertTrue(torch.allclose(target["image"], image, atol=1e-5, rtol=1e-5))
 
+    def test_fastmri_kspace_mode_normalizes_directly_by_kspace_p95(self):
+        torch.manual_seed(7)
+        image = torch.randn(2, 1, 8, 8, dtype=torch.complex64)
+        kspace = centered_fft2(image)
+        mask = torch.zeros_like(kspace.real)
+        mask[..., ::4] = 1
+        kspace_us = kspace * mask
+
+        model_input, dc_input, target, stats = simulate_undersampling(
+            kspace,
+            mask,
+            learning="k_space",
+            norm="fastmri_magnitude",
+            kspace_us=kspace_us,
+        )
+
+        scale = torch.quantile(
+            kspace_us.abs().reshape(kspace_us.shape[0], -1), q=0.95, dim=1
+        ).clamp_min(1e-8).reshape(-1, 1, 1, 1)
+        expected_input = kspace_us / scale
+        expected_target = kspace / scale
+        self.assertEqual(stats["normalization_domain"], "k_space")
+        self.assertTrue(torch.allclose(stats["p95"], scale))
+        self.assertTrue(torch.allclose(model_input, expected_input))
+        self.assertTrue(torch.allclose(dc_input, expected_input))
+        self.assertTrue(torch.allclose(target["kspace"], expected_target))
+        self.assertTrue(torch.allclose(model_input * mask, target["kspace"] * mask))
+        self.assertEqual(torch.count_nonzero(model_input * (1 - mask)).item(), 0)
+        self.assertTrue(torch.allclose(
+            torch.quantile(model_input.abs().reshape(2, -1), q=0.95, dim=1),
+            torch.ones(2),
+            atol=1e-5,
+            rtol=1e-5,
+        ))
+        self.assertTrue(torch.allclose(
+            restore_original_kspace(model_input, stats),
+            kspace_us,
+            atol=1e-5,
+            rtol=1e-5,
+        ))
+        self.assertTrue(torch.allclose(
+            target["image"], image.abs(), atol=1e-5, rtol=1e-5
+        ))
+
     def test_fastmri_complex_image_mode_preserves_phase_and_uses_complex_image_target(self):
         image = torch.tensor([[[[1 + 2j, 2 - 1j], [3 + 0.5j, 4 - 2j]]]], dtype=torch.complex64)
         kspace = centered_fft2(image)
@@ -366,6 +410,7 @@ class IntermediateLossTest(unittest.TestCase):
         scale = torch.quantile(image.abs().reshape(1, -1), q=0.95, dim=1).reshape(1, 1, 1, 1)
         expected_image = image / scale
         self.assertEqual(stats["prediction_domain"], "complex_image")
+        self.assertEqual(stats["normalization_domain"], "complex_image")
         self.assertTrue(model_input.is_complex())
         self.assertTrue(torch.allclose(model_input, expected_image, atol=1e-5, rtol=1e-5))
         self.assertTrue(torch.allclose(dc_input, centered_fft2(expected_image), atol=1e-5, rtol=1e-5))
@@ -422,6 +467,34 @@ class IntermediateLossTest(unittest.TestCase):
         loss = build_loss("perpendicular_loss")(pred, target)
         self.assertTrue(torch.isfinite(loss))
 
+    def test_perpendicular_loss_penalizes_quadrature_phase(self):
+        target = torch.ones(1, dtype=torch.complex64)
+        prediction = torch.tensor([1j], dtype=torch.complex64)
+
+        loss = PerpendicularLoss()(prediction, target)
+
+        self.assertAlmostEqual(loss.item(), 1.0, places=6)
+
+    def test_perpendicular_loss_is_continuous_and_monotonic_across_quadrature(self):
+        target = torch.ones(5, dtype=torch.complex64)
+        angles = torch.tensor([0.0, torch.pi / 4, torch.pi / 2, 3 * torch.pi / 4, torch.pi])
+        predictions = torch.polar(torch.ones_like(angles), angles)
+        criterion = PerpendicularLoss()
+        losses = torch.stack([
+            criterion(prediction, target_value)
+            for prediction, target_value in zip(predictions, target)
+        ])
+        offset = 1e-4
+        near_angles = torch.tensor([torch.pi / 2 - offset, torch.pi / 2 + offset])
+        near_predictions = torch.polar(torch.ones_like(near_angles), near_angles)
+        near_losses = torch.stack([
+            criterion(prediction, torch.ones_like(prediction))
+            for prediction in near_predictions
+        ])
+
+        self.assertTrue(torch.all(losses[1:] > losses[:-1]))
+        self.assertLess(torch.abs(near_losses[0] - near_losses[1]).item(), 1e-5)
+
     def test_perpendicular_loss_weighting_disabled_matches_current_behavior(self):
         pred = torch.tensor([[[[1 + 1j, 0.5 + 2j], [0.25 + 0.5j, 1.5 + 0.25j]]]], dtype=torch.complex64)
         gt = torch.tensor([[[[1 + 0j, 2 + 0.5j], [0.5 + 0.5j, 0.75 + 1.0j]]]], dtype=torch.complex64)
@@ -462,7 +535,7 @@ class IntermediateLossTest(unittest.TestCase):
 
         cross = pred * gt.conj()
         phi_hat = torch.angle(cross)
-        perp = torch.abs(pred * gt.conj() - pred.conj() * gt) / (pred.abs() + criterion.eps)
+        perp = 0.5 * torch.abs(pred * gt.conj() - pred.conj() * gt) / (pred.abs() + criterion.eps)
         target_abs = gt.abs()
         branched = torch.where(phi_hat.abs() < (torch.pi / 2), perp, 2 * target_abs - perp)
         magnitude_l1 = torch.abs(target_abs - pred.abs())
@@ -585,47 +658,55 @@ class IntermediateLossTest(unittest.TestCase):
         self.assertTrue(torch.allclose(recon, expected, atol=1e-6, rtol=1e-6))
         self.assertTrue(all(stage.is_complex() for stage in intermediates))
 
-    def test_train_config_contains_only_complex_image_perpendicular_experiment(self):
-        cfg = build_cfg(0)
+    def test_train_config_contains_two_kspace_p95_experiments(self):
+        self.assertEqual(len(EXPERIMENTS), 2)
+        expected_losses = ["perpendicular_loss", "complex_l2"]
+        for experiment_index, expected_loss in enumerate(expected_losses):
+            with self.subTest(experiment_index=experiment_index):
+                cfg = build_cfg(experiment_index)
+                self.assertEqual(cfg.dataset, "fastmri")
+                self.assertEqual(cfg.learning, "k_space")
+                self.assertEqual(cfg.norm, "fastmri_magnitude")
+                self.assertEqual(cfg.final_loss_type, expected_loss)
+                self.assertEqual(cfg.intermediate_loss_type, expected_loss)
+                self.assertEqual(cfg.lambda_schedule, "hard")
 
-        self.assertEqual(len(EXPERIMENTS), 1)
-        self.assertEqual(cfg.dataset, "fastmri")
-        self.assertEqual(cfg.learning, "complex_image")
-        self.assertEqual(cfg.norm, "fastmri_magnitude")
-        self.assertEqual(cfg.final_loss_type, "perpendicular_loss")
-        self.assertEqual(cfg.intermediate_loss_type, "perpendicular_loss")
-        self.assertEqual(cfg.lambda_schedule, "hard")
+    def test_kspace_p95_experiments_run_forward_loss_and_backward(self):
+        for experiment_index in range(2):
+            with self.subTest(experiment_index=experiment_index):
+                cfg = build_cfg(experiment_index)
+                cfg.image_size = (4, 4)
+                cfg.encoders = ["patch"]
+                cfg.patch_size = (2, 2)
+                cfg.nhead_patch = 1
+                cfg.layer_no = 1
+                cfg.num_encoder_layers = 1
+                model = build_model(cfg)
+                image = torch.randn(1, 1, 4, 4, dtype=torch.complex64)
+                kspace = centered_fft2(image)
+                mask = torch.tensor([[[[1.0, 0.0, 1.0, 0.0]]]])
+                kspace_us = kspace * mask
+                model_input, dc_input, target, stats = simulate_undersampling(
+                    kspace,
+                    mask,
+                    learning=cfg.learning,
+                    norm=cfg.norm,
+                    kspace_us=kspace_us,
+                )
 
-    def test_complex_image_experiment_runs_forward_loss_and_backward(self):
-        cfg = build_cfg(0)
-        cfg.image_size = (4, 4)
-        cfg.encoders = ["patch"]
-        cfg.patch_size = (2, 2)
-        cfg.nhead_patch = 1
-        cfg.layer_no = 1
-        cfg.num_encoder_layers = 1
-        model = build_model(cfg)
-        image = torch.randn(1, 1, 4, 4, dtype=torch.complex64)
-        kspace = centered_fft2(image)
-        mask = torch.tensor([[[[1.0, 0.0, 1.0, 0.0]]]])
-        kspace_us = kspace * mask
-        model_input, dc_input, target, stats = simulate_undersampling(
-            kspace,
-            mask,
-            learning=cfg.learning,
-            norm=cfg.norm,
-            kspace_us=kspace_us,
-        )
+                recon = model(model_input, dc_input, mask)
+                loss = build_loss(cfg.final_loss_type)(recon, target, stats=stats)
+                loss.backward()
+                grads = [param.grad for param in model.parameters() if param.requires_grad]
 
-        recon = model(model_input, dc_input, mask)
-        loss = build_loss(cfg.final_loss_type)(recon, target, stats=stats)
-        loss.backward()
-        grads = [param.grad for param in model.parameters() if param.requires_grad]
-
-        self.assertTrue(recon.is_complex())
-        self.assertTrue(torch.isfinite(loss))
-        self.assertTrue(all(grad is None or torch.isfinite(grad).all() for grad in grads))
-        self.assertTrue(any(grad is not None and torch.any(grad != 0) for grad in grads))
+                self.assertEqual(stats["normalization_domain"], "k_space")
+                self.assertTrue(torch.allclose(model_input * mask, target["kspace"] * mask))
+                self.assertEqual(torch.count_nonzero(model_input * (1 - mask)).item(), 0)
+                self.assertTrue(torch.allclose(recon * mask, dc_input * mask, atol=1e-6, rtol=1e-6))
+                self.assertTrue(recon.is_complex())
+                self.assertTrue(torch.isfinite(loss))
+                self.assertTrue(all(grad is None or torch.isfinite(grad).all() for grad in grads))
+                self.assertTrue(any(grad is not None and torch.any(grad != 0) for grad in grads))
 
     def test_oasis_dataset_behavior_is_unchanged(self):
         with tempfile.TemporaryDirectory() as tmpdir:

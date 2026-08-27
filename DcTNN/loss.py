@@ -129,7 +129,7 @@ class PerpendicularLoss(nn.Module):
 
         cross = pred * gt_complex.conj()
         phi_hat = torch.angle(cross)
-        perp = torch.abs(pred * gt_complex.conj() - pred.conj() * gt_complex) / (pred.abs() + self.eps)
+        perp = 0.5*torch.abs(pred * gt_complex.conj() - pred.conj() * gt_complex) / (pred.abs() + self.eps)
         target_abs = gt_complex.abs()
         branched = torch.where(phi_hat.abs() < (math.pi / 2), perp, 2 * target_abs - perp)
         magnitude_l1 = torch.abs(target_abs - pred.abs())

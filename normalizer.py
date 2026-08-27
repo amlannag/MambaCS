@@ -242,43 +242,45 @@ def log_kspace(
 
 
 def fastmri_magnitude(kspace_full, mask, learning="k_space", kspace_us=None, **_unused):
-    """
-    FastMRI magnitude normalization: scale by 95th percentile of undersampled image magnitude.
-    Computes the 95th percentile from the undersampled (masked) k-space in image domain,
-    then applies it to both model input and GT for consistent loss calculation.
-    Per-scan normalization ensures each image is independently scaled.
-    """
+    """Scale each sample by the undersampled magnitude p95 in its learning domain."""
     if kspace_us is None:
         kspace_us = kspace_full * mask
 
-    # Convert to image domain
+    if learning == "k_space":
+        magnitudes = kspace_us.abs().reshape(kspace_us.shape[0], -1)
+        scale_factor = torch.quantile(magnitudes, q=0.95, dim=1).clamp_min(1e-8)
+        scale_factor = scale_factor.reshape(-1, 1, 1, 1)
+        kspace_us_norm = kspace_us / scale_factor
+        kspace_full_norm = kspace_full / scale_factor
+        metric = {
+            "normalization": "fastmri_magnitude",
+            "normalization_domain": "k_space",
+            "prediction_domain": "k_space",
+            "p95": scale_factor,
+        }
+        target = {
+            "image": ifft_2d(kspace_full).abs(),
+            "complex_image": ifft_2d(kspace_full_norm),
+            "kspace": kspace_full_norm,
+        }
+        return kspace_us_norm, kspace_us_norm, target, metric
+
     img_us = ifft_2d(kspace_us)
     img_gt = ifft_2d(kspace_full)
-
-    # Get magnitude of undersampled image in image domain
-    mag_us = torch.abs(img_us)
-
-    # Calculate 95th percentile per scan (batch-wise)
-    # Flatten spatial dimensions while keeping batch dimension: [B, H*W]
-    mag_flat = mag_us.reshape(mag_us.shape[0], -1)
-    p95 = torch.quantile(mag_flat, q=0.95, dim=1)  # [B]
-
-    # Reshape for broadcasting: [B, 1, 1, 1]
-    p95 = p95.reshape(-1, 1, 1, 1)
-
-    # Avoid division by zero
-    scale_factor = p95.clamp(min=1e-8)
-
-    # Scale both undersampled and GT by the same 95th percentile
+    magnitudes = img_us.abs().reshape(img_us.shape[0], -1)
+    scale_factor = torch.quantile(magnitudes, q=0.95, dim=1).clamp_min(1e-8)
+    scale_factor = scale_factor.reshape(-1, 1, 1, 1)
     img_us_norm = img_us / scale_factor
     img_gt_norm = img_gt / scale_factor
-
     metric = {
         "normalization": "fastmri_magnitude",
+        "normalization_domain": "complex_image",
         "p95": scale_factor,
     }
-    model_input, dc_input, target, metric = _build_outputs(img_us_norm, img_gt_norm, metric, learning)
-    target["image"] = torch.abs(img_gt)
+    model_input, dc_input, target, metric = _build_outputs(
+        img_us_norm, img_gt_norm, metric, learning
+    )
+    target["image"] = img_gt.abs()
     return model_input, dc_input, target, metric
 
 
