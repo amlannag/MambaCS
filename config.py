@@ -117,6 +117,9 @@ class Config:
     perpendicular_mag_weight_m_end: float = 1.0
     epochs: int = 400
     batch_size: int = 32
+    auto_batch_size: bool = True
+    batch_size_search_start: int = 128
+    batch_size_probe_steps: int = 3
     lr: float = 1e-4
     weight_decay: float = 1e-5
     num_workers: int = 4

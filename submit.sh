@@ -1,25 +1,26 @@
 #!/bin/bash --login
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
-#SBATCH --job-name=dctnn_baseline
-#SBATCH --time=40:00:00
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=120G
+#SBATCH --job-name=top_gpu_exp
+#SBATCH --time=06:00:00
+#SBATCH --partition=gpu_rocm
 #SBATCH --qos=gpu
-#SBATCH --partition=gpu_cuda
-#SBATCH --gres=gpu:l40:1
+#SBATCH --gres=gpu:1
+#SBATCH --constraint="epyc4|epyc5"
 #SBATCH --account='a_ai_collab'
-#SBATCH -o logs/slurm-%j.output
-#SBATCH -e logs/slurm-%j.error
+#SBATCH -o exp_%j.out
+#SBATCH -e exp_%j.err
 
 # ---- WandB ----
 export WANDB_API_KEY='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'
 
 # ---- Environment ----
-module load cuda/11.8.0
+module load rocm
 module load miniforge/24.11.3-0
 source $ROOTMINIFORGE/etc/profile.d/conda.sh
-conda activate mambacs
+conda activate mambacs-AMD
 
 # ---- Run ----
 cd "$SLURM_SUBMIT_DIR"

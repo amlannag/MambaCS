@@ -4,6 +4,7 @@ Training pipeline for Mamba Compressed Sensing MRI reconstruction.
 
 import argparse
 import dataclasses
+import gc
 import json
 import os
 import random
@@ -168,6 +169,168 @@ def _build_epoch_metrics(total_loss, final_loss, intermediate_loss_sum, total_ps
     }
 
 
+def _build_criteria(cfg):
+    loss_kwargs = {}
+    if cfg.perpendicular_mag_weighting:
+        loss_kwargs = {
+            "magnitude_weighting": True,
+            "magnitude_weight_m": cfg.perpendicular_mag_weight_m,
+            "magnitude_weight_k": cfg.perpendicular_mag_weight_k,
+            "magnitude_weight_p": cfg.perpendicular_mag_weight_p,
+        }
+    return (
+        build_loss(cfg.final_loss_type, **loss_kwargs),
+        build_loss(cfg.intermediate_loss_type, **loss_kwargs),
+    )
+
+
+def _is_oom_error(error):
+    oom_types = tuple(
+        error_type
+        for error_type in (
+            getattr(torch, "OutOfMemoryError", None),
+            getattr(torch.cuda, "OutOfMemoryError", None),
+        )
+        if isinstance(error_type, type)
+    )
+    message = str(error).lower()
+    return isinstance(error, oom_types) or "out of memory" in message or "cudnn_status_alloc_failed" in message
+
+
+def _clear_cuda_memory():
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _find_executable_batch_size(starting_batch_size, probe):
+    if starting_batch_size < 1:
+        raise ValueError("starting_batch_size must be at least 1")
+
+    batch_size = starting_batch_size
+    while True:
+        print(f"Testing batch size {batch_size}...")
+        try:
+            probe(batch_size)
+        except RuntimeError as error:
+            if not _is_oom_error(error):
+                raise
+            message = str(error)
+            error.__traceback__ = None
+            _clear_cuda_memory()
+            if batch_size == 1:
+                raise RuntimeError("Model cannot fit a batch size of 1") from error
+            next_batch_size = max(1, batch_size // 2)
+            print(f"OOM at batch size {batch_size}: {message.splitlines()[0]}")
+            print(f"Retrying with batch size {next_batch_size}.")
+            batch_size = next_batch_size
+        else:
+            _clear_cuda_memory()
+            print(f"Selected batch size: {batch_size}")
+            return batch_size
+
+
+def _probe_batch_candidate(cfg, dataset, batch_size, device, checkpoint=None):
+    model = None
+    optimizer = None
+    try:
+        _seed_everything(cfg.seed)
+        model = build_model(cfg).to(device)
+        optimizer = torch.optim.Adam(
+            model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
+        )
+        final_criterion, intermediate_criterion = _build_criteria(cfg)
+        if checkpoint is not None:
+            model.load_state_dict(checkpoint["model"])
+            optimizer.load_state_dict(checkpoint["optimizer"])
+
+        probe_loader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=0,
+            drop_last=True,
+        )
+        probe_iterator = iter(probe_loader)
+        mask_generator = FastMRIMaskGenerator(
+            cfg.acceleration_factors,
+            center_fractions=cfg.center_fractions,
+            mask_type=cfg.mask_type,
+        )
+        model.train()
+
+        for step in range(cfg.batch_size_probe_steps):
+            try:
+                kspace_full = next(probe_iterator)
+            except StopIteration:
+                probe_iterator = iter(probe_loader)
+                kspace_full = next(probe_iterator)
+            kspace_full = kspace_full.to(device)
+            acceleration = cfg.acceleration_factors[step % len(cfg.acceleration_factors)]
+            kspace_us, mask, _ = mask_generator.apply(
+                kspace_full,
+                acceleration,
+                seed=(cfg.seed, step, int(acceleration)),
+            )
+            with torch.no_grad():
+                model_input, dc_input, target, stats = simulate_undersampling(
+                    kspace_full,
+                    mask,
+                    cfg.learning,
+                    cfg.norm,
+                    kspace_us=kspace_us,
+                    robust_clip=cfg.robust_clip,
+                    robust_shift=cfg.robust_shift,
+                    companding_p=cfg.companding_p,
+                    companding_a=cfg.companding_a,
+                    companding_centering=cfg.companding_centering,
+                )
+
+            optimizer.zero_grad(set_to_none=True)
+            recon, intermediates = model(
+                model_input, dc_input, mask, return_intermediates=True, stats=stats
+            )
+            total_loss, _, _, _, _ = _compute_losses(
+                recon,
+                intermediates,
+                target,
+                final_criterion,
+                intermediate_criterion,
+                cfg.loss_mode,
+                stats=stats,
+                zf_recon=model_input,
+            )
+            total_loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.grad_clip)
+            optimizer.step()
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+    finally:
+        if optimizer is not None:
+            optimizer.zero_grad(set_to_none=True)
+        del optimizer, model
+
+
+def _resolve_batch_size(cfg, dataset, device, checkpoint=None):
+    if not cfg.auto_batch_size:
+        return cfg.batch_size
+    if device.type != "cuda":
+        print(f"Automatic batch-size search skipped on {device.type}; using {cfg.batch_size}.")
+        return cfg.batch_size
+    if len(dataset) < 1:
+        raise ValueError("Cannot search for a batch size with an empty training dataset")
+    if cfg.batch_size_probe_steps < 1:
+        raise ValueError("batch_size_probe_steps must be at least 1")
+
+    starting_batch_size = min(cfg.batch_size_search_start, len(dataset))
+    return _find_executable_batch_size(
+        starting_batch_size,
+        lambda batch_size: _probe_batch_candidate(
+            cfg, dataset, batch_size, device, checkpoint=checkpoint
+        ),
+    )
+
+
 def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer,
                     final_criterion, intermediate_criterion, loss_mode, device, epoch):
     model.train()
@@ -203,7 +366,7 @@ def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer
                 companding_centering=cfg.companding_centering,
             )
 
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         recon, intermediates = model(
             model_input, DC_input, mask, return_intermediates=True, stats=stats
         )
@@ -335,6 +498,13 @@ def main():
         cfg.image_size = sample_shape
     val_ds   = _make_dataset(val_data_dir, max_files=cfg.max_val_files)
 
+    checkpoint = None
+    if cfg.resume and os.path.exists(cfg.resume):
+        checkpoint = torch.load(cfg.resume, map_location="cpu")
+
+    cfg.batch_size = _resolve_batch_size(cfg, train_ds, device, checkpoint=checkpoint)
+    _seed_everything(cfg.seed)
+
     with open(config_path, 'w') as f:
         json.dump(config_to_dict(cfg), f, indent=2)
 
@@ -350,6 +520,7 @@ def main():
     print(f"Output dir : {out_dir}")
     print(f"Device     : {device}")
     print(f"Image size : {cfg.image_size}")
+    print(f"Batch size : {cfg.batch_size}")
     print(f"Accel      : R = {cfg.acceleration_factors}  |  mask={cfg.mask_type}  |  center_fractions={cfg.center_fractions}")
 
     train_generator = torch.Generator().manual_seed(cfg.seed)
@@ -395,29 +566,20 @@ def main():
         T_max=cfg.epochs,
         eta_min=cfg.lr * 1e-2,
     )
-    loss_kwargs = {}
-    if cfg.perpendicular_mag_weighting:
-        loss_kwargs = {
-            "magnitude_weighting": True,
-            "magnitude_weight_m": cfg.perpendicular_mag_weight_m,
-            "magnitude_weight_k": cfg.perpendicular_mag_weight_k,
-            "magnitude_weight_p": cfg.perpendicular_mag_weight_p,
-        }
-    final_criterion = build_loss(cfg.final_loss_type, **loss_kwargs)
-    intermediate_criterion = build_loss(cfg.intermediate_loss_type, **loss_kwargs)
+    final_criterion, intermediate_criterion = _build_criteria(cfg)
 
     # ---- Resume ----
     start_epoch    = 0
     best_val_psnr  = float('-inf')
 
-    if cfg.resume and os.path.exists(cfg.resume):
-        ckpt = torch.load(cfg.resume, map_location=device)
-        model.load_state_dict(ckpt['model'])
-        optimizer.load_state_dict(ckpt['optimizer'])
-        scheduler.load_state_dict(ckpt['scheduler'])
-        start_epoch   = ckpt['epoch'] + 1
-        best_val_psnr = ckpt.get('best_val_psnr', ckpt.get('val_psnr', float('-inf')))
+    if checkpoint is not None:
+        model.load_state_dict(checkpoint['model'])
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        scheduler.load_state_dict(checkpoint['scheduler'])
+        start_epoch   = checkpoint['epoch'] + 1
+        best_val_psnr = checkpoint.get('best_val_psnr', checkpoint.get('val_psnr', float('-inf')))
         print(f"Resumed from epoch {start_epoch}  ({cfg.resume})")
+        checkpoint = None
 
     # ---- Lambda scheduler (if active) ----
     lamb_sched = _build_lambda_scheduler(cfg)

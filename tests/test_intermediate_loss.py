@@ -39,7 +39,17 @@ from normalizer import (
     restore_original_kspace,
     robust_shifted,
 )
-from train import _build_lambda_scheduler, _compute_losses, _psnr_per_sample, build_cfg, train_one_epoch, validate
+from train import (
+    _build_lambda_scheduler,
+    _compute_losses,
+    _find_executable_batch_size,
+    _probe_batch_candidate,
+    _psnr_per_sample,
+    _resolve_batch_size,
+    build_cfg,
+    train_one_epoch,
+    validate,
+)
 from train_config import EXPERIMENTS
 from train_utils import build_model, simulate_undersampling
 
@@ -97,6 +107,19 @@ def _metric_cfg():
         companding_a=0.5,
         companding_centering="fft",
     )
+
+
+def _batch_probe_cfg():
+    cfg = _metric_cfg()
+    cfg.acceleration_factors = [4]
+    cfg.lr = 1e-3
+    cfg.weight_decay = 0.0
+    cfg.final_loss_type = "l1"
+    cfg.intermediate_loss_type = "l1"
+    cfg.perpendicular_mag_weighting = False
+    cfg.loss_mode = "final_only"
+    cfg.batch_size_probe_steps = 3
+    return cfg
 
 
 class IntermediateLossTest(unittest.TestCase):
@@ -253,6 +276,52 @@ class IntermediateLossTest(unittest.TestCase):
         self.assertAlmostEqual(metrics["intermediate_loss_sum"], 8.0 / 3.0, places=6)
         self.assertAlmostEqual(metrics["stage_losses"][0], 8.0 / 3.0, places=6)
         self.assertAlmostEqual(metrics["psnr"], 20.0 * torch.log10(torch.tensor(2.0)).item() / 3.0, places=6)
+
+    def test_batch_finder_halves_until_probe_passes(self):
+        attempted = []
+
+        def probe(batch_size):
+            attempted.append(batch_size)
+            if batch_size > 32:
+                raise torch.OutOfMemoryError("CUDA out of memory")
+
+        selected = _find_executable_batch_size(128, probe)
+
+        self.assertEqual(selected, 32)
+        self.assertEqual(attempted, [128, 64, 32])
+
+    def test_batch_finder_reraises_non_oom_runtime_errors(self):
+        def probe(_batch_size):
+            raise RuntimeError("shape mismatch")
+
+        with self.assertRaisesRegex(RuntimeError, "shape mismatch"):
+            _find_executable_batch_size(128, probe)
+
+    def test_batch_finder_fails_when_batch_size_one_ooms(self):
+        def probe(_batch_size):
+            raise torch.OutOfMemoryError("CUDA out of memory")
+
+        with self.assertRaisesRegex(RuntimeError, "cannot fit a batch size of 1"):
+            _find_executable_batch_size(1, probe)
+
+    def test_batch_probe_runs_three_real_optimizer_steps(self):
+        cfg = _batch_probe_cfg()
+        model = _MetricModel()
+        dataset = [torch.zeros(1, 1, 1, dtype=torch.cfloat) for _ in range(4)]
+
+        with patch("train.build_model", return_value=model), patch(
+            "train.FastMRIMaskGenerator", _MetricMaskGenerator
+        ), patch("train.simulate_undersampling", side_effect=_metric_simulation) as simulation:
+            _probe_batch_candidate(cfg, dataset, 2, torch.device("cpu"))
+
+        self.assertEqual(simulation.call_count, 3)
+
+    def test_automatic_batch_search_is_skipped_without_cuda(self):
+        cfg = types.SimpleNamespace(auto_batch_size=True, batch_size=32)
+
+        selected = _resolve_batch_size(cfg, [torch.zeros(1)], torch.device("cpu"))
+
+        self.assertEqual(selected, 32)
 
     def test_kspace_companding_forward_inverse_recovers_input_and_preserves_phase(self):
         real = torch.tensor([[[[1.0, -2.0], [0.5, -0.25]]]])
