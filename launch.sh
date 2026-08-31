@@ -1,7 +1,6 @@
 #!/bin/bash
 set -euo pipefail
 
-: "${WANDB_API_KEY:?Set WANDB_API_KEY before running launch.sh}"
 mkdir -p logs
 
 N=$(python -c "from train_config import EXPERIMENTS; print(len(EXPERIMENTS))")
