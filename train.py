@@ -131,10 +131,10 @@ def _compute_losses(recon, intermediates, target, final_criterion, intermediate_
         with torch.no_grad():
             gt_image = target["image"] if isinstance(target, dict) else target
             prev_img = _to_image_tensor(zf_recon, stats)
-            prev_psnr = psnr(prev_img, gt_image)
+            prev_psnr = _psnr_per_sample(prev_img, gt_image)
             for stage_out in intermediates:
                 stage_img = _to_image_tensor(stage_out, stats)
-                curr_psnr = psnr(stage_img, gt_image)
+                curr_psnr = _psnr_per_sample(stage_img, gt_image)
                 stage_psnr_gains.append(curr_psnr - prev_psnr)
                 prev_psnr = curr_psnr
 
@@ -157,14 +157,14 @@ def _init_stage_totals(num_stages):
     return [0.0 for _ in range(num_stages)]
 
 
-def _build_epoch_metrics(total_loss, final_loss, intermediate_loss_sum, total_psnr, stage_totals, n, psnr_gain_totals=None):
+def _build_epoch_metrics(total_loss, final_loss, intermediate_loss_sum, total_psnr, stage_totals, sample_count, psnr_gain_totals=None):
     return {
-        "total_loss": total_loss / n,
-        "final_loss": final_loss / n,
-        "intermediate_loss_sum": intermediate_loss_sum / n,
-        "psnr": total_psnr / n,
-        "stage_losses": [loss / n for loss in stage_totals],
-        "stage_psnr_gains": [g / n for g in psnr_gain_totals] if psnr_gain_totals else [],
+        "total_loss": total_loss / sample_count,
+        "final_loss": final_loss / sample_count,
+        "intermediate_loss_sum": intermediate_loss_sum / sample_count,
+        "psnr": total_psnr / sample_count,
+        "stage_losses": [loss / sample_count for loss in stage_totals],
+        "stage_psnr_gains": [g / sample_count for g in psnr_gain_totals] if psnr_gain_totals else [],
     }
 
 
@@ -175,6 +175,7 @@ def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer
     total_final_loss = 0.0
     total_intermediate_loss_sum = 0.0
     total_psnr = 0.0
+    total_samples = 0
     stage_totals = _init_stage_totals(len(model.transformers))
     psnr_gain_totals = _init_stage_totals(len(model.transformers))
     accel_rng = np.random.default_rng(cfg.seed + epoch)
@@ -216,18 +217,20 @@ def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer
         with torch.no_grad():
             gt_image = target["image"] if isinstance(target, dict) else target
             recon_mag = _to_image_tensor(recon, stats)
-            total_loss += total_batch_loss.item()
-            total_final_loss += final_loss.item()
-            total_intermediate_loss_sum += intermediate_loss_sum.item()
-            total_psnr += psnr(recon_mag, gt_image).item()
+            batch_size = gt_image.shape[0]
+            total_loss += total_batch_loss.item() * batch_size
+            total_final_loss += final_loss.item() * batch_size
+            total_intermediate_loss_sum += intermediate_loss_sum.item() * batch_size
+            total_psnr += _psnr_per_sample(recon_mag, gt_image).sum().item()
+            total_samples += batch_size
             for i, stage_loss in enumerate(stage_losses):
-                stage_totals[i] += stage_loss.item()
+                stage_totals[i] += stage_loss.item() * batch_size
             for i, gain in enumerate(stage_psnr_gains):
-                psnr_gain_totals[i] += gain.item()
+                psnr_gain_totals[i] += gain.sum().item()
 
-    n = len(loader)
     return _build_epoch_metrics(
-        total_loss, total_final_loss, total_intermediate_loss_sum, total_psnr, stage_totals, n, psnr_gain_totals
+        total_loss, total_final_loss, total_intermediate_loss_sum, total_psnr,
+        stage_totals, total_samples, psnr_gain_totals
     )
 
 
@@ -276,22 +279,22 @@ def validate(cfg, model, loader, accel_factors, image_size, final_criterion,
         recon_mag = _to_image_tensor(recon, stats)
         zf_source = model_input
         zf_mag    = _to_image_tensor(zf_source, stats)
-        total_loss    += total_batch_loss.item()
-        total_final_loss += final_loss.item()
-        total_intermediate_loss_sum += intermediate_loss_sum.item()
+        batch_size = gt_image.shape[0]
+        total_loss += total_batch_loss.item() * batch_size
+        total_final_loss += final_loss.item() * batch_size
+        total_intermediate_loss_sum += intermediate_loss_sum.item() * batch_size
         total_psnr += _psnr_per_sample(recon_mag, gt_image).sum().item()
         total_zf_psnr += _psnr_per_sample(zf_mag, gt_image).sum().item()
-        total_samples += gt_image.shape[0]
+        total_samples += batch_size
         for i, stage_loss in enumerate(stage_losses):
-            stage_totals[i] += stage_loss.item()
+            stage_totals[i] += stage_loss.item() * batch_size
         for i, gain in enumerate(stage_psnr_gains):
-            psnr_gain_totals[i] += gain.item()
+            psnr_gain_totals[i] += gain.sum().item()
 
-    n = len(loader)
     metrics = _build_epoch_metrics(
-        total_loss, total_final_loss, total_intermediate_loss_sum, total_psnr, stage_totals, n, psnr_gain_totals
+        total_loss, total_final_loss, total_intermediate_loss_sum, total_psnr,
+        stage_totals, total_samples, psnr_gain_totals
     )
-    metrics["psnr"] = total_psnr / total_samples
     metrics["zf_psnr"] = total_zf_psnr / total_samples
     return metrics
 

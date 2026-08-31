@@ -3,6 +3,7 @@ import types
 import unittest
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import h5py
 import numpy as np
@@ -38,7 +39,7 @@ from normalizer import (
     restore_original_kspace,
     robust_shifted,
 )
-from train import _build_lambda_scheduler, _compute_losses, _psnr_per_sample, build_cfg
+from train import _build_lambda_scheduler, _compute_losses, _psnr_per_sample, build_cfg, train_one_epoch, validate
 from train_config import EXPERIMENTS
 from train_utils import build_model, simulate_undersampling
 
@@ -50,6 +51,52 @@ class _DummyEncoder(nn.Module):
 
     def forward(self, x, col_mask=None):
         return torch.full_like(x, self.delta)
+
+
+class _MetricModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.bias = nn.Parameter(torch.tensor(0.0))
+        self.transformers = nn.ModuleList([nn.Identity()])
+
+    def forward(self, x, y, mask, return_intermediates=False, stats=None):
+        recon = x + self.bias
+        return (recon, [recon]) if return_intermediates else recon
+
+
+class _MetricMaskGenerator:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def apply(self, kspace_full, acceleration, seed=None):
+        mask = torch.ones(1, 1, 1, kspace_full.shape[-1], device=kspace_full.device)
+        return kspace_full, mask, kspace_full.shape[-1]
+
+
+def _metric_simulation(kspace_full, *args, **kwargs):
+    if kspace_full.shape[0] == 2:
+        model_input = torch.tensor([0.0, 5.0], device=kspace_full.device).reshape(2, 1, 1, 1)
+        target = torch.tensor([1.0, 10.0], device=kspace_full.device).reshape(2, 1, 1, 1)
+    else:
+        model_input = torch.zeros(1, 1, 1, 1, device=kspace_full.device)
+        target = torch.full((1, 1, 1, 1), 2.0, device=kspace_full.device)
+    return model_input, kspace_full, {"image": target}, None
+
+
+def _metric_cfg():
+    return types.SimpleNamespace(
+        seed=42,
+        grad_clip=1.0,
+        center_fractions=None,
+        mask_type="random",
+        learning="k_space",
+        norm="none",
+        robust_clip=3.0,
+        robust_shift=3.0,
+        companding_p=0.8,
+        companding_a=0.5,
+        companding_centering="fft",
+    )
 
 
 class IntermediateLossTest(unittest.TestCase):
@@ -161,6 +208,51 @@ class IntermediateLossTest(unittest.TestCase):
 
         self.assertTrue(torch.allclose(actual, expected, atol=1e-6, rtol=1e-6))
         self.assertAlmostEqual(actual.mean().item(), 3.0103, places=4)
+
+    def test_train_metrics_are_averaged_per_sample(self):
+        cfg = _metric_cfg()
+        model = _MetricModel()
+        loader = [
+            torch.zeros(2, 1, 1, 1, dtype=torch.cfloat),
+            torch.zeros(1, 1, 1, 1, dtype=torch.cfloat),
+        ]
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.0)
+        criterion = build_loss("l1")
+
+        with patch("train.simulate_undersampling", side_effect=_metric_simulation):
+            metrics = train_one_epoch(
+                cfg, model, loader, [4], _MetricMaskGenerator(), optimizer,
+                criterion, criterion, "final_only", torch.device("cpu"), 0,
+            )
+
+        self.assertAlmostEqual(metrics["total_loss"], 8.0 / 3.0, places=6)
+        self.assertAlmostEqual(metrics["final_loss"], 8.0 / 3.0, places=6)
+        self.assertAlmostEqual(metrics["intermediate_loss_sum"], 8.0 / 3.0, places=6)
+        self.assertAlmostEqual(metrics["stage_losses"][0], 8.0 / 3.0, places=6)
+        self.assertAlmostEqual(metrics["psnr"], 20.0 * torch.log10(torch.tensor(2.0)).item() / 3.0, places=6)
+
+    def test_validation_losses_are_averaged_per_sample(self):
+        cfg = _metric_cfg()
+        model = _MetricModel()
+        loader = [
+            torch.zeros(2, 1, 1, 1, dtype=torch.cfloat),
+            torch.zeros(1, 1, 1, 1, dtype=torch.cfloat),
+        ]
+        criterion = build_loss("l1")
+
+        with patch("train.FastMRIMaskGenerator", _MetricMaskGenerator), patch(
+            "train.simulate_undersampling", side_effect=_metric_simulation
+        ):
+            metrics = validate(
+                cfg, model, loader, [4], (1, 1), criterion, criterion,
+                "final_only", torch.device("cpu"),
+            )
+
+        self.assertAlmostEqual(metrics["total_loss"], 8.0 / 3.0, places=6)
+        self.assertAlmostEqual(metrics["final_loss"], 8.0 / 3.0, places=6)
+        self.assertAlmostEqual(metrics["intermediate_loss_sum"], 8.0 / 3.0, places=6)
+        self.assertAlmostEqual(metrics["stage_losses"][0], 8.0 / 3.0, places=6)
+        self.assertAlmostEqual(metrics["psnr"], 20.0 * torch.log10(torch.tensor(2.0)).item() / 3.0, places=6)
 
     def test_kspace_companding_forward_inverse_recovers_input_and_preserves_phase(self):
         real = torch.tensor([[[[1.0, -2.0], [0.5, -0.25]]]])
@@ -816,20 +908,20 @@ class IntermediateLossTest(unittest.TestCase):
         self.assertTrue(torch.allclose(recon, expected, atol=1e-6, rtol=1e-6))
         self.assertTrue(all(stage.is_complex() for stage in intermediates))
 
-    def test_train_config_contains_two_kspace_p95_experiments(self):
+    def test_train_config_contains_kspace_and_complex_image_p95_experiments(self):
         self.assertEqual(len(EXPERIMENTS), 2)
-        expected_losses = ["perpendicular_loss", "complex_l2"]
-        for experiment_index, expected_loss in enumerate(expected_losses):
+        expected_domains = ["k_space", "complex_image"]
+        for experiment_index, expected_domain in enumerate(expected_domains):
             with self.subTest(experiment_index=experiment_index):
                 cfg = build_cfg(experiment_index)
                 self.assertEqual(cfg.dataset, "fastmri")
-                self.assertEqual(cfg.learning, "k_space")
+                self.assertEqual(cfg.learning, expected_domain)
                 self.assertEqual(cfg.norm, "fastmri_magnitude")
-                self.assertEqual(cfg.final_loss_type, expected_loss)
-                self.assertEqual(cfg.intermediate_loss_type, expected_loss)
+                self.assertEqual(cfg.final_loss_type, "complex_l2")
+                self.assertEqual(cfg.intermediate_loss_type, "complex_l2")
                 self.assertEqual(cfg.lambda_schedule, "hard")
 
-    def test_kspace_p95_experiments_run_forward_loss_and_backward(self):
+    def test_p95_experiments_run_forward_loss_and_backward(self):
         for experiment_index in range(2):
             with self.subTest(experiment_index=experiment_index):
                 cfg = build_cfg(experiment_index)
@@ -857,9 +949,13 @@ class IntermediateLossTest(unittest.TestCase):
                 loss.backward()
                 grads = [param.grad for param in model.parameters() if param.requires_grad]
 
-                self.assertEqual(stats["normalization_domain"], "k_space")
-                self.assertTrue(torch.allclose(model_input * mask, target["kspace"] * mask))
-                self.assertEqual(torch.count_nonzero(model_input * (1 - mask)).item(), 0)
+                self.assertEqual(stats["normalization_domain"], cfg.learning)
+                if cfg.learning == "k_space":
+                    self.assertTrue(torch.allclose(model_input * mask, target["kspace"] * mask))
+                    self.assertEqual(torch.count_nonzero(model_input * (1 - mask)).item(), 0)
+                else:
+                    expected_target = centered_ifft2(kspace) / stats["p95"]
+                    self.assertTrue(torch.allclose(target["complex_image"], expected_target))
                 raw_recon = model_output_to_raw_kspace(recon, stats, cfg.learning)
                 self.assertTrue(torch.allclose(raw_recon * mask, dc_input * mask, atol=1e-6, rtol=1e-6))
                 self.assertTrue(recon.is_complex())
