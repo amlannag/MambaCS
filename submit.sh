@@ -13,14 +13,21 @@
 #SBATCH -o exp_%j.out
 #SBATCH -e exp_%j.err
 
+set -euo pipefail
+
 # ---- WandB ----
 export WANDB_API_KEY='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'
 
 # ---- Environment ----
-module load rocm
+module purge
+module load rocm/7.14
 module load miniforge/24.11.3-0
-source $ROOTMINIFORGE/etc/profile.d/conda.sh
-conda activate mambacs-AMD
+source "$ROOTMINIFORGE/etc/profile.d/conda.sh"
+conda activate base
+conda activate mambacs-rocm714
+hash -r
+
+python -u -c 'import torch; assert torch.version.hip, "PyTorch is not a ROCm build"; assert torch.cuda.is_available(), "PyTorch cannot access the allocated GPU"; print(f"PyTorch {torch.__version__} | HIP {torch.version.hip} | GPU {torch.cuda.get_device_name(0)}")'
 
 # ---- Run ----
 cd "$SLURM_SUBMIT_DIR"
@@ -35,7 +42,7 @@ echo ""
 EXP_IDX="${EXP_IDX:-0}"
 
 unset SLURM_MEM_PER_GPU SLURM_MEM_PER_CPU SLURM_MEM_PER_NODE
-srun --cpu-bind=none python train.py --exp_idx "$EXP_IDX"
+srun --cpu-bind=none python -u train.py --exp_idx "$EXP_IDX"
 
 echo ""
 echo "End time: $(date)"
