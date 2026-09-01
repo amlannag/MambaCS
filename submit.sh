@@ -4,7 +4,7 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=120G
 #SBATCH --job-name=top_gpu_exp
-#SBATCH --time=06:00:00
+#SBATCH --time=30:00:00
 #SBATCH --partition=gpu_rocm
 #SBATCH --qos=gpu
 #SBATCH --gres=gpu:1
