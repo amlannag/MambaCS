@@ -3,9 +3,10 @@ Experiment definitions for DcTNN training.
 """
 
 EXPERIMENTS = [
+    
     {
         "prefix": "fastMRI",
-        "name": "fastmri_kspace_magnitude_norm_complex_l2_complex_hard_dc_400epochs",
+        "name": "fastmri_kspace_magnitude_norm_complex_l2_complex_hard_dc_400epochs_lr1e-3",
         "dataset": "fastmri",
         "image_size": (320, 320),
         "encoders": ["axial", "axial", "axial"],
@@ -19,6 +20,7 @@ EXPERIMENTS = [
         "final_loss_type": "complex_l2",
         "intermediate_loss_type": "complex_l2",
         "epochs": 400,
+        "lr": 1e-3,
         "seed": 42,
     },
     # {
