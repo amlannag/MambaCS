@@ -7,8 +7,8 @@
 #SBATCH --time=30:00:00
 #SBATCH --partition=gpu_rocm
 #SBATCH --qos=gpu
-#SBATCH --gres=gpu:1
-#SBATCH --constraint="epyc4|epyc5"
+#SBATCH --gres=gpu:mi300x:1
+#SBATCH --constraint="epyc4"
 #SBATCH --account='a_ai_collab'
 #SBATCH -o exp_%j.out
 #SBATCH -e exp_%j.err
@@ -27,7 +27,7 @@ conda activate base
 conda activate mambacs-rocm714
 hash -r
 
-python -u -c 'import torch; assert torch.version.hip, "PyTorch is not a ROCm build"; assert torch.cuda.is_available(), "PyTorch cannot access the allocated GPU"; print(f"PyTorch {torch.__version__} | HIP {torch.version.hip} | GPU {torch.cuda.get_device_name(0)}")'
+python -u -c 'import torch; assert torch.version.hip, "PyTorch is not a ROCm build"; assert torch.cuda.is_available(), "PyTorch cannot access the allocated GPU"; props=torch.cuda.get_device_properties(0); arch=getattr(props, "gcnArchName", "unknown"); print("PyTorch", torch.__version__, "| HIP", torch.version.hip, "| GPU", props.name, "| arch", arch, "| compiled", torch.cuda.get_arch_list()); x=torch.randn(1,1,32,32,device="cuda",dtype=torch.complex64); torch.fft.ifft2(x); torch.cuda.synchronize(); print("ROCm complex FFT smoke test: OK")'
 
 # ---- Run ----
 cd "$SLURM_SUBMIT_DIR"
