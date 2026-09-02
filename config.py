@@ -24,6 +24,7 @@ class Config:
     prefix: str = "MambaCS"
     name: str = "8x_acceleration"
     output_dir: str = "../Experiments"
+    hpc_backend: str = "nvidia"
 
     # Set to a checkpoint path (e.g. "../Experiments/dctnn_baseline/latest.pth")
     # to resume a stopped run; leave as None to start fresh

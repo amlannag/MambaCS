@@ -23,12 +23,21 @@ from inference import load_experiment_model
 from normalizer import model_output_to_raw_kspace
 from ReconFormer import ReconFormerBaseline, centered_fft2 as reconformer_fft2
 from train import _build_optimizer, _mean_volume_psnr, _update_volume_errors, build_cfg, train_one_epoch
+from train_config import EXPERIMENTS
 from train_utils import FastMRIMaskGenerator, build_model, simulate_undersampling
+
+
+def _reconformer_cfg():
+    index = next(
+        index for index, experiment in enumerate(EXPERIMENTS)
+        if experiment.get("model_type") == "reconformer"
+    )
+    return build_cfg(index)
 
 
 class ReconFormerBaselineTest(unittest.TestCase):
     def test_experiment_builds_released_reconformer_configuration(self):
-        cfg = build_cfg(1)
+        cfg = _reconformer_cfg()
         model = build_model(cfg)
 
         self.assertIsInstance(model, ReconFormerBaseline)
@@ -108,7 +117,7 @@ class ReconFormerBaselineTest(unittest.TestCase):
         self.assertTrue(torch.allclose(output_kspace * mask, measured, atol=2e-5, rtol=2e-5))
 
     def test_training_epoch_runs_with_current_mask_generator(self):
-        cfg = build_cfg(1)
+        cfg = _reconformer_cfg()
         cfg.image_size = (32, 32)
         cfg.reconformer_num_ch = (12, 12, 12)
         cfg.reconformer_num_iter = 2
@@ -186,7 +195,7 @@ class ReconFormerBaselineTest(unittest.TestCase):
             self.assertEqual(sample["kspace"].shape, (1, 4, 4))
 
     def test_saved_reconformer_config_and_checkpoint_reload(self):
-        cfg = build_cfg(1)
+        cfg = _reconformer_cfg()
         model = build_model(cfg)
         with tempfile.TemporaryDirectory() as tmpdir:
             experiment = Path(tmpdir)

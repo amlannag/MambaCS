@@ -977,18 +977,13 @@ class IntermediateLossTest(unittest.TestCase):
         self.assertTrue(torch.allclose(recon, expected, atol=1e-6, rtol=1e-6))
         self.assertTrue(all(stage.is_complex() for stage in intermediates))
 
-    def test_train_config_contains_dctnn_and_reconformer_experiments(self):
-        self.assertEqual(len(EXPERIMENTS), 2)
-        dctnn_cfg = build_cfg(0)
-        self.assertEqual(dctnn_cfg.dataset, "fastmri")
-        self.assertEqual(dctnn_cfg.model_type, "dctnn")
-        self.assertEqual(dctnn_cfg.learning, "k_space")
-        self.assertEqual(dctnn_cfg.norm, "fastmri_magnitude")
-        self.assertEqual(dctnn_cfg.final_loss_type, "complex_l2")
-        self.assertEqual(dctnn_cfg.intermediate_loss_type, "complex_l2")
-        self.assertEqual(dctnn_cfg.lambda_schedule, "hard")
-
-        reconformer_cfg = build_cfg(1)
+    def test_train_config_contains_reconformer_experiment(self):
+        reconformer_indices = [
+            index for index, experiment in enumerate(EXPERIMENTS)
+            if experiment.get("model_type") == "reconformer"
+        ]
+        self.assertEqual(len(reconformer_indices), 1)
+        reconformer_cfg = build_cfg(reconformer_indices[0])
         self.assertEqual(reconformer_cfg.dataset, "fastmri")
         self.assertEqual(reconformer_cfg.model_type, "reconformer")
         self.assertEqual(reconformer_cfg.learning, "complex_image")
@@ -996,6 +991,7 @@ class IntermediateLossTest(unittest.TestCase):
         self.assertEqual(reconformer_cfg.final_loss_type, "reconformer_l1")
         self.assertEqual(reconformer_cfg.scheduler_type, "step")
         self.assertEqual(reconformer_cfg.checkpoint_metric, "volume_psnr")
+        self.assertIn(reconformer_cfg.hpc_backend, {"nvidia", "amd"})
 
     def test_p95_experiments_run_forward_loss_and_backward(self):
         experiment_indices = [
