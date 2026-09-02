@@ -101,6 +101,14 @@ class ComplexL2Loss(nn.Module):
         return torch.mean((pred.real - gt_complex.real) ** 2 + (pred.imag - gt_complex.imag) ** 2)
 
 
+class ReconFormerMagnitudeL1Loss(nn.Module):
+    def forward(self, pred, gt, stats=None):
+        gt_complex = _resolve_target(gt, "complex_image")
+        if not pred.is_complex() or not gt_complex.is_complex():
+            raise ValueError("reconformer_l1 requires complex prediction and target tensors")
+        return F.l1_loss(pred.abs(), gt_complex.abs())
+
+
 class PerpendicularLoss(nn.Module):
     """Perpendicular loss with a magnitude L1 term in the active complex domain."""
 
@@ -151,12 +159,14 @@ def build_loss(loss_type: str, **kwargs) -> nn.Module:
         return ComplexL1Loss()
     if loss_type == "complex_l2":
         return ComplexL2Loss()
+    if loss_type == "reconformer_l1":
+        return ReconFormerMagnitudeL1Loss()
     if loss_type == "perpendicular_loss":
         return PerpendicularLoss(**kwargs)
     raise ValueError(
         "Unknown loss_type "
         f"'{loss_type}'. Choose from: ['l1', 'l2', 'image_domain_l1', 'image_domain_l2', "
-        "'complex_l1', 'complex_l2', 'perpendicular_loss']"
+        "'complex_l1', 'complex_l2', 'reconformer_l1', 'perpendicular_loss']"
     )
 
 

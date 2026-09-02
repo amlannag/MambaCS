@@ -113,6 +113,8 @@ def apply_normalization(tensor: torch.Tensor, metric: dict | None) -> torch.Tens
         return tensor
     if normalization == "fastmri_magnitude":
         return tensor / _batch_stat_like(metric["p95"], tensor)
+    if normalization == "reconformer":
+        return tensor / _batch_stat_like(metric["scale"], tensor)
     if normalization == "kspace_companding":
         return apply_kspace_companding(
             tensor,
@@ -148,6 +150,8 @@ def invert_normalization(tensor: torch.Tensor, metric: dict | None) -> torch.Ten
         return tensor
     if normalization == "fastmri_magnitude":
         return tensor * _batch_stat_like(metric["p95"], tensor)
+    if normalization == "reconformer":
+        return tensor * _batch_stat_like(metric["scale"], tensor)
     if normalization == "kspace_companding":
         return invert_kspace_companding(
             tensor,
@@ -506,6 +510,27 @@ def fastmri_magnitude(kspace_full, mask, learning="k_space", kspace_us=None, **_
     }
     model_input, dc_input, target, metric = _build_outputs(
         img_us_norm, img_gt_norm, metric, learning, kspace_us
+    )
+    target["image"] = img_gt.abs()
+    return model_input, dc_input, target, metric
+
+
+def reconformer(kspace_full, mask, learning="complex_image", kspace_us=None, **_unused):
+    if learning != "complex_image":
+        raise ValueError("norm='reconformer' requires learning='complex_image'")
+    if kspace_us is None:
+        kspace_us = kspace_full * mask
+    img_us = ifft_2d(kspace_us)
+    img_gt = ifft_2d(kspace_full)
+    scale = img_us.abs().mean(dim=(-2, -1), keepdim=True).clamp_min(1e-8)
+    metric = {
+        "normalization": "reconformer",
+        "normalization_domain": "complex_image",
+        "prediction_domain": "complex_image",
+        "scale": scale,
+    }
+    model_input, dc_input, target, metric = _build_outputs(
+        img_us / scale, img_gt / scale, metric, learning, kspace_us
     )
     target["image"] = img_gt.abs()
     return model_input, dc_input, target, metric

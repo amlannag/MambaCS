@@ -49,9 +49,11 @@ class H5MRIDataset(Dataset):
         kspace_key (str):            HDF5 dataset key for raw k-space (default: 'kspace')
     """
 
-    def __init__(self, data_dir, image_size=(320, 320), kspace_key='kspace', max_files=None):
+    def __init__(self, data_dir, image_size=(320, 320), kspace_key='kspace', max_files=None,
+                 return_metadata=False):
         self.image_size = image_size
         self.kspace_key = kspace_key
+        self.return_metadata = return_metadata
         self._file_handles = {}
 
         h5_files = sorted(
@@ -86,8 +88,15 @@ class H5MRIDataset(Dataset):
         fpath, s = self.index[idx]
         f = self._get_file_handle(fpath)
         kspace = torch.tensor(f[self.kspace_key][s], dtype=torch.complex64)
-        kspace = prepare_fastmri_kspace(kspace, self.image_size)
-        return kspace.unsqueeze(0)
+        kspace = prepare_fastmri_kspace(kspace, self.image_size).unsqueeze(0)
+        if not self.return_metadata:
+            return kspace
+        return {
+            "kspace": kspace,
+            "fname": os.path.basename(fpath),
+            "slice_num": s,
+            "max_value": float(f.attrs.get("max", float("nan"))),
+        }
 
     def __del__(self):
         for handle in self._file_handles.values():

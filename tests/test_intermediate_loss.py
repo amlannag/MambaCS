@@ -977,21 +977,33 @@ class IntermediateLossTest(unittest.TestCase):
         self.assertTrue(torch.allclose(recon, expected, atol=1e-6, rtol=1e-6))
         self.assertTrue(all(stage.is_complex() for stage in intermediates))
 
-    def test_train_config_contains_kspace_and_complex_image_p95_experiments(self):
+    def test_train_config_contains_dctnn_and_reconformer_experiments(self):
         self.assertEqual(len(EXPERIMENTS), 2)
-        expected_domains = ["k_space", "complex_image"]
-        for experiment_index, expected_domain in enumerate(expected_domains):
-            with self.subTest(experiment_index=experiment_index):
-                cfg = build_cfg(experiment_index)
-                self.assertEqual(cfg.dataset, "fastmri")
-                self.assertEqual(cfg.learning, expected_domain)
-                self.assertEqual(cfg.norm, "fastmri_magnitude")
-                self.assertEqual(cfg.final_loss_type, "complex_l2")
-                self.assertEqual(cfg.intermediate_loss_type, "complex_l2")
-                self.assertEqual(cfg.lambda_schedule, "hard")
+        dctnn_cfg = build_cfg(0)
+        self.assertEqual(dctnn_cfg.dataset, "fastmri")
+        self.assertEqual(dctnn_cfg.model_type, "dctnn")
+        self.assertEqual(dctnn_cfg.learning, "k_space")
+        self.assertEqual(dctnn_cfg.norm, "fastmri_magnitude")
+        self.assertEqual(dctnn_cfg.final_loss_type, "complex_l2")
+        self.assertEqual(dctnn_cfg.intermediate_loss_type, "complex_l2")
+        self.assertEqual(dctnn_cfg.lambda_schedule, "hard")
+
+        reconformer_cfg = build_cfg(1)
+        self.assertEqual(reconformer_cfg.dataset, "fastmri")
+        self.assertEqual(reconformer_cfg.model_type, "reconformer")
+        self.assertEqual(reconformer_cfg.learning, "complex_image")
+        self.assertEqual(reconformer_cfg.norm, "reconformer")
+        self.assertEqual(reconformer_cfg.final_loss_type, "reconformer_l1")
+        self.assertEqual(reconformer_cfg.scheduler_type, "step")
+        self.assertEqual(reconformer_cfg.checkpoint_metric, "volume_psnr")
 
     def test_p95_experiments_run_forward_loss_and_backward(self):
-        for experiment_index in range(2):
+        experiment_indices = [
+            index for index, experiment in enumerate(EXPERIMENTS)
+            if experiment.get("model_type", "dctnn") == "dctnn"
+            and experiment.get("norm", "zscore") == "fastmri_magnitude"
+        ]
+        for experiment_index in experiment_indices:
             with self.subTest(experiment_index=experiment_index):
                 cfg = build_cfg(experiment_index)
                 cfg.image_size = (4, 4)

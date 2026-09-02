@@ -7,6 +7,7 @@ from fastmri.data.subsample import EquiSpacedMaskFunc, RandomMaskFunc
 from fastmri.data.transforms import apply_mask
 
 from DcTNN.model import TokenVIT, axVIT, CrossAttentionVIT, cascadeNet
+from ReconFormer import ReconFormerBaseline
 import normalizer as _norm
 
 
@@ -116,6 +117,27 @@ _ENCODER_ARGS = {
 
 
 def _build_model_impl(cfg):
+    if cfg.model_type == "reconformer":
+        if cfg.learning != "complex_image":
+            raise ValueError("ReconFormer requires learning='complex_image'")
+        image_size = tuple(int(value) for value in cfg.image_size)
+        if len(image_size) != 2 or image_size[0] != image_size[1]:
+            raise ValueError(f"ReconFormer requires a square image_size, got {image_size}")
+        return ReconFormerBaseline(
+            num_ch=cfg.reconformer_num_ch,
+            down_scales=cfg.reconformer_down_scales,
+            num_iter=cfg.reconformer_num_iter,
+            img_size=image_size[0],
+            num_heads=cfg.reconformer_num_heads,
+            depths=cfg.reconformer_depths,
+            window_sizes=cfg.reconformer_window_sizes,
+            resi_connection=cfg.reconformer_resi_connection,
+            mlp_ratio=cfg.reconformer_mlp_ratio,
+            use_checkpoint=cfg.reconformer_use_checkpoint,
+        )
+    if cfg.model_type != "dctnn":
+        raise ValueError(f"Unknown model_type {cfg.model_type!r}")
+
     num_ch = cfg.num_channels
     if cfg.learning == "complex_image" and cfg.attn_type == "standard":
         raise ValueError("learning='complex_image' requires a complex-valued attention type")
@@ -154,7 +176,19 @@ def build_model_from_config_dict(cfg_dict):
 
     cfg.image_size = data_cfg["image_size"]
     cfg.num_channels = data_cfg.get("num_channels", 1)
+    cfg.model_type = model_cfg.get("model_type", "dctnn")
     cfg.encoders = model_cfg.get("encoders", ["patch", "patch", "patch"])
+    cfg.reconformer_num_ch = tuple(model_cfg.get("reconformer_num_ch", (96, 48, 24)))
+    cfg.reconformer_num_iter = model_cfg.get("reconformer_num_iter", 5)
+    cfg.reconformer_down_scales = tuple(model_cfg.get("reconformer_down_scales", (2.0, 1.0, 1.5)))
+    cfg.reconformer_num_heads = tuple(model_cfg.get("reconformer_num_heads", (6, 6, 6)))
+    cfg.reconformer_depths = tuple(model_cfg.get("reconformer_depths", (2, 1, 1)))
+    cfg.reconformer_window_sizes = tuple(model_cfg.get("reconformer_window_sizes", (8, 8, 8)))
+    cfg.reconformer_mlp_ratio = model_cfg.get("reconformer_mlp_ratio", 2.0)
+    cfg.reconformer_resi_connection = model_cfg.get("reconformer_resi_connection", "1conv")
+    cfg.reconformer_use_checkpoint = tuple(model_cfg.get(
+        "reconformer_use_checkpoint", (False, False, True, True, False, False)
+    ))
     cfg.patch_size = model_cfg["patch_size"]
     cfg.nhead_patch = model_cfg["nhead_patch"]
     cfg.nhead_axial = model_cfg["nhead_axial"]
@@ -231,6 +265,7 @@ _NORMALIZERS = {
     "kspace_companding":   _norm.kspace_companding,
     "log_kspace":          _norm.log_kspace,
     "fastmri_magnitude":   _norm.fastmri_magnitude,
+    "reconformer":         _norm.reconformer,
     "robust_shifted":      _norm.robust_shifted,
     None:                  _norm.none,
     "none":                _norm.none,

@@ -17,6 +17,7 @@ notebooks/
 Sync Bunya Script.sh
 bart/
 data/
-tests/
+tests/*
+!tests/test_reconformer_baseline.py
 benchmarks/
 alternative papers/

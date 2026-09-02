@@ -52,6 +52,7 @@ class Config:
 
     val_fraction: float = 0.1
     seed: int = 42
+    max_train_files: Optional[int] = None
     max_val_files: Optional[int] = 15
 
     # ---------------------------------------------------------------------------
@@ -65,7 +66,19 @@ class Config:
     #   ["axial", "patch"]                        — 2-stage, no kaleidoscope
     #   ["patch", "patch", "patch"]               — patch-only ablation
     #   ["axial", "kaleidoscope", "patch", "patch"] — 4-stage deeper model
+    model_type: str = "dctnn"
     encoders: List[str] = field(default_factory=lambda: ["patch", "patch", "patch"])
+    reconformer_num_ch: Tuple[int, int, int] = (96, 48, 24)
+    reconformer_num_iter: int = 5
+    reconformer_down_scales: Tuple[float, float, float] = (2.0, 1.0, 1.5)
+    reconformer_num_heads: Tuple[int, int, int] = (6, 6, 6)
+    reconformer_depths: Tuple[int, int, int] = (2, 1, 1)
+    reconformer_window_sizes: Tuple[int, int, int] = (8, 8, 8)
+    reconformer_mlp_ratio: float = 2.0
+    reconformer_resi_connection: str = "1conv"
+    reconformer_use_checkpoint: Tuple[bool, bool, bool, bool, bool, bool] = (
+        False, False, True, True, False, False
+    )
 
     patch_size: tuple = (16, 16)
     axial_row_stride: int = 1
@@ -120,7 +133,12 @@ class Config:
     auto_batch_size: bool = True
     batch_size_search_start: int = 128
     batch_size_probe_steps: int = 3
+    optimizer_type: str = "adam"
+    scheduler_type: str = "cosine"
     lr: float = 1e-4
+    lr_step_size: int = 40
+    lr_gamma: float = 0.1
     weight_decay: float = 1e-5
     num_workers: int = 4
-    grad_clip: float = 1.0
+    grad_clip: Optional[float] = 1.0
+    checkpoint_metric: str = "psnr"

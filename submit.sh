@@ -31,6 +31,7 @@ python -u -c 'import torch; assert torch.version.hip, "PyTorch is not a ROCm bui
 
 # ---- Run ----
 cd "$SLURM_SUBMIT_DIR"
+python -u -c 'import einops, fastmri, h5py, numpy, wandb; from ReconFormer import ReconFormerBaseline; print("Training dependencies and ReconFormer import: OK")'
 mkdir -p logs
 
 echo "Job ID     : $SLURM_JOB_ID"
