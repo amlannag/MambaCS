@@ -7,7 +7,7 @@
 #SBATCH --time=40:00:00
 #SBATCH --qos=gpu
 #SBATCH --partition=gpu_cuda
-#SBATCH --gres=gpu:l40s:1
+#SBATCH --gres=gpu:1
 #SBATCH --account='a_ai_collab'
 #SBATCH -o logs/slurm-%j.output
 #SBATCH -e logs/slurm-%j.error
