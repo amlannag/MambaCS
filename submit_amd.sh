@@ -10,8 +10,8 @@
 #SBATCH --gres=gpu:mi210:1
 #SBATCH --constraint="epyc4"
 #SBATCH --account='a_ai_collab'
-#SBATCH -o logs/slurm-%j.output
-#SBATCH -e logs/slurm-%j.error
+#SBATCH --output=logs/%x_%j.out
+#SBATCH --error=logs/%x_%j.err
 
 set -euo pipefail
 

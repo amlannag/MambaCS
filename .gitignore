@@ -13,7 +13,9 @@ file1000001.h5
 src/
 *.ipynb
 Experiments/
-notebooks/
+!notebooks/
+notebooks/*
+!notebooks/iterative_denoising.ipynb
 Sync Bunya Script.sh
 bart/
 data/
