@@ -21,3 +21,5 @@ data/
 tests/
 benchmarks/
 alternative papers/
+
+download_bunya_fastmri.sh
