@@ -6,7 +6,6 @@
 #SBATCH --job-name=dctnn_baseline
 #SBATCH --time=20:00:00
 #SBATCH --partition=gpu_rocm
-#SBATCH --qos=gpu
 #SBATCH --gres=gpu:mi210:1
 #SBATCH --constraint="epyc4"
 #SBATCH --account='a_ai_collab'
@@ -15,14 +14,20 @@
 
 set -eo pipefail
 
+# ---- WandB ----
 export WANDB_API_KEY='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'
 
-source /sw/local/rocky8/noarch/rcc/software/miniforge/24.11.3-0/etc/profile.d/conda.sh
+# ---- Environment ----
+module purge
+module load rocm/7.14
+module load miniforge/24.11.3-0
+source "$ROOTMINIFORGE/etc/profile.d/conda.sh"
 conda activate mambacs-rocm714
 
 set -u
 hash -r
 
+# ---- Run ----
 cd "$SLURM_SUBMIT_DIR"
 mkdir -p logs
 
