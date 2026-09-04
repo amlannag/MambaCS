@@ -18,7 +18,7 @@ set -eo pipefail
 export WANDB_API_KEY='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'
 
 # ---- Environment ----
-source "$HOME/.conda/etc/profile.d/conda.sh"
+source /sw/local/rocky8/noarch/rcc/software/miniforge/24.11.3-0/etc/profile.d/conda.sh
 conda activate mambacs
 
 set -u
