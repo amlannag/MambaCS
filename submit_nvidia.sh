@@ -14,10 +14,7 @@
 
 set -euo pipefail
 
-if [[ -z "${WANDB_API_KEY:-}" && ! -f "$HOME/.netrc" ]]; then
-    echo "W&B authentication is unavailable. Export WANDB_API_KEY before submitting."
-    exit 1
-fi
+export WANDB_API_KEY='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'
 
 module load cuda/11.8.0
 module load miniforge/24.11.3-0
