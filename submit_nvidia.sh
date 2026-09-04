@@ -12,13 +12,15 @@
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 
-set -euo pipefail
+set -eo pipefail
 
 export WANDB_API_KEY='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'
 
 module load miniforge/24.11.3-0
 source "$ROOTMINIFORGE/etc/profile.d/conda.sh"
 conda activate mambacs
+
+set -u
 hash -r
 
 python -u -c 'import torch; assert int(torch.__version__.split(".")[0]) >= 2, "ReconFormer requires PyTorch >= 2"; assert torch.version.cuda, "PyTorch is not a CUDA build"; assert not torch.version.hip, "Expected CUDA but loaded a ROCm build"; assert torch.cuda.is_available(), "PyTorch cannot access the allocated GPU"; props=torch.cuda.get_device_properties(0); print("PyTorch", torch.__version__, "| CUDA", torch.version.cuda, "| GPU", props.name, "| capability", torch.cuda.get_device_capability(0)); x=torch.randn(1,1,32,32,device="cuda",dtype=torch.complex64); torch.fft.ifft2(x); torch.cuda.synchronize(); print("CUDA complex FFT smoke test: OK")'
