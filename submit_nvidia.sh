@@ -16,7 +16,6 @@ set -euo pipefail
 
 export WANDB_API_KEY='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'
 
-module load cuda/11.8.0
 module load miniforge/24.11.3-0
 source "$ROOTMINIFORGE/etc/profile.d/conda.sh"
 conda activate mambacs

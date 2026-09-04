@@ -13,13 +13,11 @@ file1000001.h5
 src/
 *.ipynb
 Experiments/
-!notebooks/
-notebooks/*
-!notebooks/iterative_denoising.ipynb
+
+notebooks/
 Sync Bunya Script.sh
 bart/
 data/
-tests/*
-!tests/test_reconformer_baseline.py
+tests/
 benchmarks/
 alternative papers/
