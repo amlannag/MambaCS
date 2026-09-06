@@ -6,6 +6,7 @@
 #SBATCH --job-name=dctnn_baseline
 #SBATCH --time=20:00:00
 #SBATCH --partition=gpu_rocm
+#SBATCH --qos=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --constraint="epyc4"
 #SBATCH --account='a_ai_collab'
