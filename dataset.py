@@ -1,10 +1,14 @@
 import os
+import time
+
 import h5py
 import numpy as np
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
 from torch.utils.data import get_worker_info
+
+from progress import phase, progress_iter
 
 
 def centered_ifft2(kspace: torch.Tensor) -> torch.Tensor:
@@ -67,11 +71,17 @@ class H5MRIDataset(Dataset):
             h5_files = h5_files[:max_files]
 
         self.h5_files = h5_files
+        phase(f"Indexing {len(h5_files)} .h5 files in {data_dir}")
+        t_index = time.time()
         self.index = []
-        for fpath in h5_files:
+        for fpath in progress_iter(h5_files, desc="  indexing", unit="file"):
             with h5py.File(fpath, 'r') as f:
                 num_slices = f[kspace_key].shape[0]
             self.index.extend((fpath, s) for s in range(num_slices))
+        phase(
+            f"Indexed {len(self.index)} slices from {len(h5_files)} files "
+            f"in {time.time() - t_index:.1f}s"
+        )
 
     def _get_file_handle(self, fpath):
         worker = get_worker_info()
@@ -133,6 +143,7 @@ class OASISDataset(Dataset):
             raise ValueError(f"No PNG/JPEG files found in {data_dir}")
         if max_files is not None:
             self.image_files = self.image_files[:max_files]
+        phase(f"Using {len(self.image_files)} images from {data_dir}")
 
     def __len__(self):
         return len(self.image_files)

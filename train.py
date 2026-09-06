@@ -19,6 +19,7 @@ from torch.utils.data import DataLoader
 
 from dataset import H5MRIDataset, OASISDataset
 from config import Config
+from progress import phase, progress_iter
 from train_config import EXPERIMENTS
 from DcTNN.lambda_scheduler import LambdaScheduler
 from train_utils import FastMRIMaskGenerator, build_model, resolve_data_dirs, simulate_undersampling
@@ -267,7 +268,7 @@ def _find_executable_batch_size(starting_batch_size, probe):
 
     batch_size = starting_batch_size
     while True:
-        print(f"Testing batch size {batch_size}...")
+        phase(f"Testing batch size {batch_size}...")
         try:
             probe(batch_size)
         except RuntimeError as error:
@@ -279,12 +280,12 @@ def _find_executable_batch_size(starting_batch_size, probe):
             if batch_size == 1:
                 raise RuntimeError("Model cannot fit a batch size of 1") from error
             next_batch_size = max(1, batch_size // 2)
-            print(f"OOM at batch size {batch_size}: {message.splitlines()[0]}")
-            print(f"Retrying with batch size {next_batch_size}.")
+            phase(f"OOM at batch size {batch_size}: {message.splitlines()[0]}")
+            phase(f"Retrying with batch size {next_batch_size}.")
             batch_size = next_batch_size
         else:
             _clear_cuda_memory()
-            print(f"Selected batch size: {batch_size}")
+            phase(f"Selected batch size: {batch_size}")
             return batch_size
 
 
@@ -293,7 +294,10 @@ def _probe_batch_candidate(cfg, dataset, batch_size, device, checkpoint=None):
     optimizer = None
     try:
         _seed_everything(cfg.seed)
+        phase(f"  Probe batch {batch_size}: building model...")
+        t_build = time.time()
         model = build_model(cfg).to(device)
+        phase(f"  Probe batch {batch_size}: model built in {time.time() - t_build:.1f}s")
         optimizer = _build_optimizer(cfg, model.parameters())
         final_criterion, intermediate_criterion = _build_criteria(cfg)
         if checkpoint is not None:
@@ -315,7 +319,16 @@ def _probe_batch_candidate(cfg, dataset, batch_size, device, checkpoint=None):
         )
         model.train()
 
-        for step in range(cfg.batch_size_probe_steps):
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
+        t_probe = time.time()
+        probe_bar = progress_iter(
+            range(cfg.batch_size_probe_steps),
+            desc=f"  Probe batch {batch_size} steps",
+            unit="step",
+        )
+        for step in probe_bar:
+            t_step = time.time()
             try:
                 kspace_full = next(probe_iterator)
             except StopIteration:
@@ -361,6 +374,16 @@ def _probe_batch_candidate(cfg, dataset, batch_size, device, checkpoint=None):
             optimizer.step()
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
+            probe_bar.set_postfix(step_time=f"{time.time() - t_step:.1f}s")
+
+        peak_gb = torch.cuda.max_memory_allocated(device) / 1e9 if device.type == "cuda" else None
+        summary = (
+            f"  Probe batch {batch_size}: {cfg.batch_size_probe_steps} steps OK "
+            f"in {time.time() - t_probe:.1f}s"
+        )
+        if peak_gb is not None:
+            summary += f" (peak GPU memory {peak_gb:.2f} GB)"
+        phase(summary)
     finally:
         if optimizer is not None:
             optimizer.zero_grad(set_to_none=True)
@@ -399,7 +422,16 @@ def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer
     psnr_gain_totals = _init_stage_totals(_num_intermediate_stages(model))
     accel_rng = np.random.default_rng(cfg.seed + epoch)
 
-    for batch_idx, kspace_full in enumerate(loader):
+    t_epoch = time.time()
+    data_accum = 0.0
+    compute_accum = 0.0
+    t_wait = time.perf_counter()
+    num_batches = len(loader)
+    next_report = 0.1
+    epoch_bar = progress_iter(loader, desc=f"Epoch {epoch + 1} train", unit="batch")
+    for batch_idx, kspace_full in enumerate(epoch_bar):
+        data_time = time.perf_counter() - t_wait
+        t_compute = time.perf_counter()
         kspace_full = kspace_full.to(device)
         R    = accel_factors[int(accel_rng.integers(len(accel_factors)))]
         kspace_us, mask, _ = mask_generator.apply(
@@ -447,6 +479,36 @@ def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer
             for i, gain in enumerate(stage_psnr_gains):
                 psnr_gain_totals[i] += gain.sum().item()
 
+        compute_time = time.perf_counter() - t_compute
+        data_accum += data_time
+        compute_accum += compute_time
+        t_wait = time.perf_counter()
+        epoch_bar.set_postfix(
+            loss=f"{total_batch_loss.item():.4f}",
+            psnr=f"{total_psnr / max(total_samples, 1):.2f}",
+            data=f"{data_time:.2f}s",
+            comp=f"{compute_time:.2f}s",
+        )
+
+        done = batch_idx + 1
+        if num_batches and done / num_batches >= next_report and next_report < 1.0:
+            next_report += 0.1
+            elapsed = time.time() - t_epoch
+            eta = elapsed / done * (num_batches - done)
+            phase(
+                f"Epoch {epoch + 1} train: {100.0 * done / num_batches:.0f}% "
+                f"({done}/{num_batches} batches), {elapsed / done:.2f}s/batch, "
+                f"ETA {eta:.0f}s"
+            )
+
+    epoch_bar.close()
+    epoch_time = time.time() - t_epoch
+    phase(
+        f"Epoch {epoch + 1} train done: {num_batches} batches in {epoch_time:.1f}s "
+        f"({epoch_time / num_batches:.2f}s/batch; data avg {data_accum / num_batches:.2f}s, "
+        f"compute avg {compute_accum / num_batches:.2f}s)"
+    )
+
     return _build_epoch_metrics(
         total_loss, total_final_loss, total_intermediate_loss_sum, total_psnr,
         stage_totals, total_samples, psnr_gain_totals
@@ -474,7 +536,9 @@ def validate(cfg, model, loader, accel_factors, image_size, final_criterion,
         mask_type=cfg.mask_type,
     )
 
-    for batch_idx, batch in enumerate(loader):
+    t_val = time.time()
+    val_bar = progress_iter(loader, desc="Validation", unit="batch")
+    for batch_idx, batch in enumerate(val_bar):
         kspace_full, fnames = _unpack_kspace_batch(batch)
         kspace_full = kspace_full.to(device)
         R    = accel_factors[batch_idx % len(accel_factors)]
@@ -515,6 +579,10 @@ def validate(cfg, model, loader, accel_factors, image_size, final_criterion,
             stage_totals[i] += stage_loss.item() * batch_size
         for i, gain in enumerate(stage_psnr_gains):
             psnr_gain_totals[i] += gain.sum().item()
+        val_bar.set_postfix(psnr=f"{total_psnr / max(total_samples, 1):.2f}")
+
+    val_bar.close()
+    phase(f"Validation done: {len(loader)} batches in {time.time() - t_val:.1f}s")
 
     metrics = _build_epoch_metrics(
         total_loss, total_final_loss, total_intermediate_loss_sum, total_psnr,
@@ -535,7 +603,8 @@ def validate(cfg, model, loader, accel_factors, image_size, final_criterion,
 def main():
     args = _parser.parse_args()
     cfg = build_cfg(args.exp_idx)
-    print(f"Experiment {args.exp_idx}: {cfg.prefix}_{cfg.name}")
+    print(f"Experiment {args.exp_idx}: {cfg.prefix}_{cfg.name}", flush=True)
+    phase("Pipeline: dataset scan -> batch-size search -> wandb init -> model build -> epochs")
     _seed_everything(cfg.seed)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -563,10 +632,14 @@ def main():
             return_metadata=return_metadata,
         )
 
+    phase(f"Loading train dataset from {train_data_dir}")
     train_ds = _make_dataset(train_data_dir, max_files=cfg.max_train_files)
     if cfg.dataset == "fastmri":
+        phase("Probing one sample to determine image size...")
         sample_shape = tuple(int(x) for x in train_ds[0].shape[-2:])
         cfg.image_size = sample_shape
+        phase(f"Image size: {cfg.image_size}")
+    phase(f"Loading val dataset from {val_data_dir}")
     val_ds = _make_dataset(
         val_data_dir,
         max_files=cfg.max_val_files,
@@ -575,8 +648,16 @@ def main():
 
     checkpoint = None
     if cfg.resume and os.path.exists(cfg.resume):
+        phase(f"Loading checkpoint {cfg.resume}")
         checkpoint = torch.load(cfg.resume, map_location="cpu")
 
+    phase("Resolving batch size...")
+    if cfg.auto_batch_size and device.type == "cuda":
+        phase(
+            f"auto_batch_size=True: searching from {cfg.batch_size_search_start}, "
+            f"{cfg.batch_size_probe_steps} full train step(s) per candidate; "
+            f"each candidate also rebuilds the model, so this can take a while"
+        )
     cfg.batch_size = _resolve_batch_size(cfg, train_ds, device, checkpoint=checkpoint)
     _seed_everything(cfg.seed)
 
@@ -584,11 +665,14 @@ def main():
         json.dump(config_to_dict(cfg), f, indent=2)
 
     _WANDB_PROJECT = {"fastmri": "fastMRI", "oasis": "OASIS"}
+    phase("Initializing Weights & Biases...")
+    t_wandb = time.time()
     wandb.init(
         project=_WANDB_PROJECT.get(cfg.dataset, "MambaCS"),
         name=f"{cfg.prefix}_{cfg.name}",
         config=config_to_dict(cfg),
     )
+    phase(f"W&B ready in {time.time() - t_wandb:.1f}s")
 
     print(f"Experiment : {cfg.prefix}_{cfg.name}")
     print(f"Encoders   : {cfg.encoders}")
@@ -601,6 +685,7 @@ def main():
     train_generator = torch.Generator().manual_seed(cfg.seed)
     val_generator = torch.Generator().manual_seed(cfg.seed)
 
+    phase(f"Creating DataLoaders (num_workers={cfg.num_workers}, pin_memory=True)...")
     train_loader = DataLoader(train_ds, batch_size=cfg.batch_size,
                               shuffle=True,  num_workers=cfg.num_workers,
                               pin_memory=True,
@@ -623,8 +708,11 @@ def main():
     print(f"Train / Val : {len(train_ds)} / {len(val_ds)} samples")
 
     # ---- Model ----
+    phase("Building model...")
+    t_model = time.time()
     model    = build_model(cfg).to(device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    phase(f"Model ready in {time.time() - t_model:.1f}s")
     print(f"Parameters : {n_params:,}")
     mask_generator = FastMRIMaskGenerator(
         cfg.acceleration_factors,
@@ -669,6 +757,7 @@ def main():
         )
 
     # ---- Training loop ----
+    phase(f"Starting training: epochs {start_epoch + 1} to {cfg.epochs}")
     print()
     for epoch in range(start_epoch, cfg.epochs):
         t0 = time.time()

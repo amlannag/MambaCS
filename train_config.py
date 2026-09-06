@@ -19,9 +19,8 @@ EXPERIMENTS = [
         "final_loss_type": "complex_l1",
         "intermediate_loss_type": "complex_l1",
         "epochs": 50,
-        "batch_size": 16,
-        "auto_batch_size": True,
-        "batch_size_search_start": 32,
+        "batch_size": 4,
+        "auto_batch_size": False,
         "lr": 2e-4,
     },
 ]
