@@ -1,29 +1,27 @@
 """
-Experiment definitions for DcTNN training.
+Experiment definitions for ReconFormer training.
 """
 
 EXPERIMENTS = [
     {
         "prefix": "fastMRI",
-        "name": "dctnn_complex_phase_aware_r4_100epochs",
+        "name": "reconformer_random_mask_r4_50epochs",
         "hpc_backend": "amd",
-        "model_type": "dctnn",
+        "model_type": "reconformer",
         "dataset": "fastmri",
         "image_size": (320, 320),
         "learning": "complex_image",
-        "norm": "fastmri_magnitude",
+        "norm": "reconformer",
         "acceleration_factors": [4],
         "center_fractions": [0.08],
         "mask_type": "random",
-        "encoders": ["patch", "patch", "patch"],
-        "attn_type": "phase_aware",
         "loss_mode": "final_only",
         "final_loss_type": "complex_l1",
         "intermediate_loss_type": "complex_l1",
-        "epochs": 100,
-        "batch_size": 32,
+        "epochs": 50,
+        "batch_size": 16,
         "auto_batch_size": True,
-        "batch_size_search_start": 128,
+        "batch_size_search_start": 32,
         "lr": 2e-4,
     },
 ]
