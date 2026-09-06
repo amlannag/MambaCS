@@ -11,20 +11,23 @@ import os
 import random
 import time
 
+import h5py
 import numpy as np
 import torch
 import torch.nn as nn
 import wandb
+from PIL import Image
 from torch.utils.data import DataLoader
 
-from dataset import H5MRIDataset, OASISDataset
+from dataset import H5MRIDataset, OASISDataset, prepare_fastmri_kspace
 from config import Config
 from progress import phase, progress_iter
 from train_config import EXPERIMENTS
 from DcTNN.lambda_scheduler import LambdaScheduler
 from train_utils import FastMRIMaskGenerator, build_model, resolve_data_dirs, simulate_undersampling
 from DcTNN.loss import PerpendicularLoss, build_loss
-from normalizer import reconstruction_to_image_magnitude
+from DcTNN.dc import ifft_2d
+from normalizer import model_output_to_raw_kspace, reconstruction_to_image_magnitude
 
 
 def build_cfg(exp_idx: int) -> Config:
@@ -127,14 +130,20 @@ def _update_volume_errors(store, fnames, prediction, target):
         values["peak"] = max(values["peak"], target[index].max().item())
 
 
-def _mean_volume_psnr(store):
-    volume_psnr = []
-    for values in store.values():
+def _per_volume_psnr(store):
+    """Per-volume PSNR dict (fname -> dB), volume-wise peak per volume."""
+    per_volume = {}
+    for fname, values in store.items():
         mse = values["sse"] / values["count"]
         if mse == 0:
-            volume_psnr.append(float("inf"))
+            per_volume[fname] = float("inf")
         elif values["peak"] > 0:
-            volume_psnr.append(20.0 * math.log10(values["peak"]) - 10.0 * math.log10(mse))
+            per_volume[fname] = 20.0 * math.log10(values["peak"]) - 10.0 * math.log10(mse)
+    return per_volume
+
+
+def _mean_volume_psnr(store):
+    volume_psnr = list(_per_volume_psnr(store).values())
     return float(np.mean(volume_psnr)) if volume_psnr else None
 
 
@@ -527,8 +536,10 @@ def validate(cfg, model, loader, accel_factors, image_size, final_criterion,
     total_samples = 0
     volume_errors = {}
     zf_volume_errors = {}
+    saw_fnames = False
     stage_totals = _init_stage_totals(_num_intermediate_stages(model))
     psnr_gain_totals = _init_stage_totals(_num_intermediate_stages(model))
+    stage_volume_errors = [{} for _ in range(_num_intermediate_stages(model))]
 
     mask_generator = FastMRIMaskGenerator(
         accel_factors,
@@ -569,17 +580,27 @@ def validate(cfg, model, loader, accel_factors, image_size, final_criterion,
         total_loss += total_batch_loss.item() * batch_size
         total_final_loss += final_loss.item() * batch_size
         total_intermediate_loss_sum += intermediate_loss_sum.item() * batch_size
-        total_psnr += _psnr_per_sample(recon_mag, gt_image).sum().item()
-        total_zf_psnr += _psnr_per_sample(zf_mag, gt_image).sum().item()
         if fnames is not None:
+            # fastMRI: volume-wise PSNR (per-volume peak); no slice-wise PSNR.
+            saw_fnames = True
             _update_volume_errors(volume_errors, fnames, recon_mag, gt_image)
             _update_volume_errors(zf_volume_errors, fnames, zf_mag, gt_image)
+            for i, stage_out in enumerate(intermediates):
+                stage_img = _to_image_tensor(stage_out, stats)
+                _update_volume_errors(stage_volume_errors[i], fnames, stage_img, gt_image)
+        else:
+            # No volume metadata (e.g. OASIS): fall back to per-slice PSNR.
+            total_psnr += _psnr_per_sample(recon_mag, gt_image).sum().item()
+            total_zf_psnr += _psnr_per_sample(zf_mag, gt_image).sum().item()
+            for i, gain in enumerate(stage_psnr_gains):
+                psnr_gain_totals[i] += gain.sum().item()
         total_samples += batch_size
         for i, stage_loss in enumerate(stage_losses):
             stage_totals[i] += stage_loss.item() * batch_size
-        for i, gain in enumerate(stage_psnr_gains):
-            psnr_gain_totals[i] += gain.sum().item()
-        val_bar.set_postfix(psnr=f"{total_psnr / max(total_samples, 1):.2f}")
+        running_psnr = _mean_volume_psnr(volume_errors)
+        if running_psnr is None:
+            running_psnr = total_psnr / max(total_samples, 1)
+        val_bar.set_postfix(psnr=f"{running_psnr:.2f}")
 
     val_bar.close()
     phase(f"Validation done: {len(loader)} batches in {time.time() - t_val:.1f}s")
@@ -588,12 +609,236 @@ def validate(cfg, model, loader, accel_factors, image_size, final_criterion,
         total_loss, total_final_loss, total_intermediate_loss_sum, total_psnr,
         stage_totals, total_samples, psnr_gain_totals
     )
-    metrics["zf_psnr"] = total_zf_psnr / total_samples
     volume_psnr = _mean_volume_psnr(volume_errors)
     zf_volume_psnr = _mean_volume_psnr(zf_volume_errors)
-    metrics["volume_psnr"] = metrics["psnr"] if volume_psnr is None else volume_psnr
-    metrics["zf_volume_psnr"] = metrics["zf_psnr"] if zf_volume_psnr is None else zf_volume_psnr
+    if volume_psnr is not None:
+        metrics["psnr"] = volume_psnr
+        metrics["zf_psnr"] = zf_volume_psnr
+    else:
+        metrics["zf_psnr"] = total_zf_psnr / total_samples
+    metrics["volume_psnr"] = metrics["psnr"]
+    metrics["zf_volume_psnr"] = metrics["zf_psnr"]
+    if saw_fnames:
+        # Volume-wise stage PSNR gains over the previous stage (zero-fill first).
+        prev_per_vol = _per_volume_psnr(zf_volume_errors)
+        volume_gains = []
+        for store in stage_volume_errors:
+            curr_per_vol = _per_volume_psnr(store)
+            gains = [curr_per_vol[f] - prev_per_vol[f] for f in prev_per_vol if f in curr_per_vol]
+            volume_gains.append(float(np.mean(gains)) if gains else 0.0)
+            prev_per_vol = curr_per_vol
+        metrics["stage_psnr_gains"] = volume_gains
     return metrics
+
+
+# ---------------------------------------------------------------------------
+# Final validation-set evaluation (full directory, notebook-style metrics)
+# ---------------------------------------------------------------------------
+
+_FINAL_VAL_METRICS = (
+    "Image Mag PSNR",
+    "Image Phase Loss",
+    "K-space L1",
+    "K-space Phase Loss",
+)
+
+
+def _wrapped_phase_difference(reference, prediction):
+    """Signed wrapped phase difference in (-pi, pi], matching the notebook math."""
+    return torch.angle(torch.exp(1j * (torch.angle(prediction) - torch.angle(reference))))
+
+
+def _new_volume_accumulator():
+    return {
+        "image_magnitude_sse": 0.0,
+        "image_count": 0,
+        "image_phase_sse": 0.0,
+        "kspace_l1_sum": 0.0,
+        "kspace_phase_sse": 0.0,
+        "kspace_count": 0,
+    }
+
+
+def _update_volume_accumulator(acc, gt_image, pred_image, gt_kspace, pred_kspace):
+    gt_image = gt_image.to(torch.complex128)
+    pred_image = pred_image.to(torch.complex128)
+    gt_kspace = gt_kspace.to(torch.complex128)
+    pred_kspace = pred_kspace.to(torch.complex128)
+
+    magnitude_difference = pred_image.abs() - gt_image.abs()
+    image_phase_difference = _wrapped_phase_difference(gt_image, pred_image)
+    kspace_phase_difference = _wrapped_phase_difference(gt_kspace, pred_kspace)
+
+    acc["image_magnitude_sse"] += float(magnitude_difference.square().sum().item())
+    acc["image_count"] += magnitude_difference.numel()
+    acc["image_phase_sse"] += float(image_phase_difference.square().sum().item())
+    acc["kspace_l1_sum"] += float((pred_kspace - gt_kspace).abs().sum().item())
+    acc["kspace_phase_sse"] += float(kspace_phase_difference.square().sum().item())
+    acc["kspace_count"] += gt_kspace.numel()
+
+
+def _finalize_volume_metrics(acc, peak):
+    peak = float(peak)
+    if not math.isfinite(peak) or peak <= 0:
+        raise ValueError(f"Volume peak must be positive and finite, got {peak}.")
+    if acc["image_count"] == 0 or acc["kspace_count"] == 0:
+        raise ValueError("Cannot finalize an empty volume.")
+    magnitude_mse = acc["image_magnitude_sse"] / acc["image_count"]
+    image_psnr = (
+        float("inf")
+        if magnitude_mse == 0
+        else float(20.0 * math.log10(peak) - 10.0 * math.log10(magnitude_mse))
+    )
+    return {
+        "Image Mag PSNR": image_psnr,
+        "Image Phase Loss": acc["image_phase_sse"] / acc["image_count"],
+        "K-space L1": acc["kspace_l1_sum"] / acc["kspace_count"],
+        "K-space Phase Loss": acc["kspace_phase_sse"] / acc["kspace_count"],
+    }
+
+
+def _oasis_slice_number(path):
+    """Extract the slice index from a 'case_<id>_slice_<n>...' filename."""
+    try:
+        return int(os.path.basename(path).split("_slice_")[1].split(".")[0].split("_")[0])
+    except (IndexError, ValueError):
+        return 0
+
+
+@torch.no_grad()
+def _run_validation_slice(cfg, model, kspace_full, kspace_us, mask):
+    model_input, dc_input, _, stats = simulate_undersampling(
+        kspace_full,
+        mask,
+        cfg.learning,
+        cfg.norm,
+        kspace_us=kspace_us,
+        robust_clip=cfg.robust_clip,
+        robust_shift=cfg.robust_shift,
+        companding_p=cfg.companding_p,
+        companding_a=cfg.companding_a,
+        companding_centering=cfg.companding_centering,
+    )
+    recon = model(model_input, dc_input, mask, stats=stats)
+    raw_kspace = model_output_to_raw_kspace(recon, stats, cfg.learning)
+    raw_image = ifft_2d(raw_kspace)
+    return raw_kspace, raw_image
+
+
+@torch.no_grad()
+def evaluate_validation_set(cfg, model, device):
+    """
+    Run inference over EVERY file in the validation directory — bypassing the
+    max_val_files cap used by the per-epoch val loader — and compute the
+    notebook-style volume metrics on unnormalized GT and unnormalized preds:
+      Image Mag PSNR / Image Phase Loss / K-space L1 / K-space Phase Loss
+    (PSNR is volume-wise, peaked at the HDF5 'max' attribute for fastMRI).
+
+    Volumes: for fastMRI each .h5 file is a volume; for OASIS the PNGs are
+    slices and a volume is every slice sharing a case_<id> filename prefix
+    (e.g. case_441_slice_0.nii.png ... case_441_slice_26.nii.png).
+
+    Returns {"per_volume": [per-volume metric dicts], "means": {metric: mean}}.
+    """
+    model.eval()
+    _, val_data_dir = resolve_data_dirs(cfg)
+    mask_generator = FastMRIMaskGenerator(
+        cfg.acceleration_factors,
+        center_fractions=cfg.center_fractions,
+        mask_type=cfg.mask_type,
+    )
+    acceleration = int(cfg.acceleration_factors[0])
+    mask_seed = cfg.seed
+    image_size = tuple(int(v) for v in cfg.image_size)
+
+    phase(f"Final validation-set inference on {val_data_dir}")
+    volumes = []
+
+    if cfg.dataset == "fastmri":
+        h5_files = sorted(
+            os.path.join(val_data_dir, f)
+            for f in os.listdir(val_data_dir)
+            if f.endswith(".h5")
+        )
+        if not h5_files:
+            raise ValueError(f"No .h5 files found in validation directory {val_data_dir}")
+        for file_index, path in enumerate(h5_files):
+            accumulator = _new_volume_accumulator()
+            with h5py.File(path, "r") as handle:
+                if "max" not in handle.attrs:
+                    raise KeyError(f"Missing 'max' attribute in {path}.")
+                peak = float(handle.attrs["max"])
+                dataset = handle[cfg.kspace_key]
+                slice_count = int(dataset.shape[0])
+                for slice_index in range(slice_count):
+                    kspace_full = torch.as_tensor(dataset[slice_index], dtype=torch.complex64)
+                    kspace_full = prepare_fastmri_kspace(kspace_full, image_size)
+                    kspace_full = kspace_full.unsqueeze(0).unsqueeze(0).to(device)
+                    kspace_us, mask, _ = mask_generator.apply(
+                        kspace_full, acceleration, seed=(mask_seed, file_index, slice_index, acceleration)
+                    )
+                    pred_kspace, pred_image = _run_validation_slice(
+                        cfg, model, kspace_full, kspace_us, mask
+                    )
+                    _update_volume_accumulator(
+                        accumulator, ifft_2d(kspace_full), pred_image, kspace_full, pred_kspace
+                    )
+            volumes.append({
+                "HDF5 volume": os.path.basename(path),
+                **_finalize_volume_metrics(accumulator, peak),
+            })
+            phase(f"  {os.path.basename(path)} ({slice_count} slices)")
+    else:
+        png_files = sorted(
+            os.path.join(val_data_dir, f)
+            for f in os.listdir(val_data_dir)
+            if f.lower().endswith((".png", ".jpg", ".jpeg"))
+        )
+        if not png_files:
+            raise ValueError(f"No PNG/JPEG files found in validation directory {val_data_dir}")
+        # OASIS: each PNG is a slice; group slices into volumes by the case_<id> prefix.
+        volume_files = {}
+        for path in png_files:
+            volume_id = os.path.basename(path).split("_slice_")[0]
+            volume_files.setdefault(volume_id, []).append(path)
+        for file_index, volume_id in enumerate(sorted(volume_files)):
+            accumulator = _new_volume_accumulator()
+            peak = 0.0
+            slice_count = 0
+            for path in sorted(volume_files[volume_id]):
+                img = Image.open(path).convert("L")
+                img = img.resize((image_size[1], image_size[0]), Image.LANCZOS)
+                img_t = torch.tensor(np.array(img, dtype="float32") / 255.0)
+                kspace = torch.fft.fftshift(torch.fft.fft2(torch.fft.ifftshift(img_t), norm="ortho"))
+                kspace_full = kspace.unsqueeze(0).unsqueeze(0).to(torch.complex64).to(device)
+                slice_index = _oasis_slice_number(path)
+                kspace_us, mask, _ = mask_generator.apply(
+                    kspace_full, acceleration, seed=(mask_seed, file_index, slice_index, acceleration)
+                )
+                pred_kspace, pred_image = _run_validation_slice(cfg, model, kspace_full, kspace_us, mask)
+                gt_image = ifft_2d(kspace_full)
+                _update_volume_accumulator(accumulator, gt_image, pred_image, kspace_full, pred_kspace)
+                peak = max(peak, float(gt_image.abs().max().item()))
+                slice_count += 1
+            volumes.append({
+                "HDF5 volume": volume_id,
+                **_finalize_volume_metrics(accumulator, peak),
+            })
+            phase(f"  {volume_id} ({slice_count} slices)")
+
+    means = {
+        name: float(np.mean([record[name] for record in volumes]))
+        for name in _FINAL_VAL_METRICS
+    }
+    return {"per_volume": volumes, "means": means}
+
+
+def _print_final_val_summary(means):
+    print("Final validation-set metrics (equal-weight mean across volumes):")
+    print(f"  Image Mag PSNR    : {means['Image Mag PSNR']:.4f}")
+    print(f"  Image Phase Loss  : {means['Image Phase Loss']:.6f}")
+    print(f"  K-space L1        : {means['K-space L1']:.6e}")
+    print(f"  K-space Phase Loss: {means['K-space Phase Loss']:.6f}")
 
 
 # ---------------------------------------------------------------------------
@@ -795,7 +1040,6 @@ def main():
               f"Train final: {train_metrics['final_loss']:.6f}  Train total: {train_metrics['total_loss']:.6f}  "
               f"Train PSNR: {train_metrics['psnr']:.2f} dB  |  "
               f"Val final: {val_metrics['final_loss']:.6f}  Val total: {val_metrics['total_loss']:.6f}  "
-              f"Val PSNR: {val_metrics['psnr']:.2f} dB  (ZF: {val_metrics['zf_psnr']:.2f} dB)  |  "
               f"Val volume PSNR: {val_metrics['volume_psnr']:.2f} dB  (ZF: {val_metrics['zf_volume_psnr']:.2f} dB)  |  "
               f"Train stages [{train_stage_str}]  |  Val stages [{val_stage_str}]  |  "
               f"LR: {lr:.2e}  |  {elapsed:.1f}s")
@@ -809,8 +1053,6 @@ def main():
             'val_final_loss': round(val_metrics['final_loss'], 6),
             'val_total_loss': round(val_metrics['total_loss'], 6),
             'val_intermediate_loss_sum': round(val_metrics['intermediate_loss_sum'], 6),
-            'val_psnr':     round(val_metrics['psnr'], 4),
-            'val_zf_psnr':  round(val_metrics['zf_psnr'], 4),
             'val_volume_psnr': round(val_metrics['volume_psnr'], 4),
             'val_zf_volume_psnr': round(val_metrics['zf_volume_psnr'], 4),
             'lr':           lr,
@@ -861,6 +1103,32 @@ def main():
             'best_val_psnr': val_metrics['psnr'],
             'val_volume_psnr': val_metrics['volume_psnr'],
         }, latest_path)
+
+        if epoch == cfg.epochs - 1:
+            phase("Last epoch: running full validation-set inference over every file...")
+            final_metrics = evaluate_validation_set(cfg, model, device)
+            _print_final_val_summary(final_metrics["means"])
+
+            final_metrics_path = os.path.join(out_dir, 'final_validation_metrics.json')
+            with open(final_metrics_path, 'w') as f:
+                json.dump({
+                    'epoch': epoch + 1,
+                    'means': final_metrics["means"],
+                    'per_volume': final_metrics["per_volume"],
+                }, f, indent=2)
+
+            final_log = {
+                f"final_val/{name}": value for name, value in final_metrics["means"].items()
+            }
+            final_log["final_val/per_volume"] = wandb.Table(
+                columns=["HDF5 volume", *_FINAL_VAL_METRICS],
+                data=[
+                    [record["HDF5 volume"], *[record[name] for name in _FINAL_VAL_METRICS]]
+                    for record in final_metrics["per_volume"]
+                ],
+            )
+            wandb.log(final_log, step=epoch + 1)
+            phase(f"Final validation-set metrics saved to {final_metrics_path}")
 
     wandb.finish()
     print(f"\nTraining complete.  Outputs saved to: {out_dir}")
