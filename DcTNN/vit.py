@@ -49,7 +49,7 @@ class TokenVIT(BaseVIT):
                     nhead=8, num_encoder_layers=2, dim_feedforward=None, dropout=0.1, activation='relu',
                     layer_norm_eps=1e-05, batch_first=True, device=None, dtype=None,
                     pos_emb_type="APE", rope_theta=100.0, rope_mixed_rotate=True, attn_type="standard",
-                    ffn_sharing="none", shared_ffn=None):
+                    ffn_sharing="none", shared_ffn=None, flattening_order="row_major"):
         if d_model is None:
             ph, pw = pair(patch_size)
             d_model = ph * pw * numCh
@@ -59,7 +59,8 @@ class TokenVIT(BaseVIT):
             TokenEncoder(N, patch_size, numCh, tokenizer_type, d_model, nhead, num_encoder_layers,
                          dim_feedforward, dropout, activation, layer_norm_eps, batch_first, device, dtype,
                          pos_emb_type=pos_emb_type, rope_theta=rope_theta, rope_mixed_rotate=rope_mixed_rotate,
-                         attn_type=attn_type, ffn_sharing=ffn_sharing, shared_ffn=shared_ffn)
+                         attn_type=attn_type, ffn_sharing=ffn_sharing, shared_ffn=shared_ffn,
+                         flattening_order=flattening_order)
             for _ in range(layerNo)
         ])
         super().__init__(N, layerNo, numCh, transformers)
@@ -90,7 +91,7 @@ class axVIT(BaseVIT):
                     dim_feedforward=None, dropout=0.1, activation='relu',
                     layer_norm_eps=1e-05, batch_first=True, device=None, dtype=None,
                     pos_emb_type="APE", rope_theta=100.0, rope_mixed_rotate=True, attn_type="standard",
-                    row_stride=1, mask_vertical_attn="none", ffn_sharing="none", shared_ffn=None):
+                    row_stride=1, mask_vertical_attn="none", ffn_sharing="none", shared_ffn=None, flattening_order="row_major"):
         if d_model is None:
             _, image_width = N if isinstance(N, (tuple, list)) else (N, N)
             d_model = image_width * numCh
@@ -101,7 +102,8 @@ class axVIT(BaseVIT):
                          dropout, activation, layer_norm_eps, batch_first, device, dtype,
                          pos_emb_type=pos_emb_type, rope_theta=rope_theta, attn_type=attn_type,
                          row_stride=row_stride, mask_vertical_attn=mask_vertical_attn,
-                         ffn_sharing=ffn_sharing, shared_ffn=shared_ffn)
+                         ffn_sharing=ffn_sharing, shared_ffn=shared_ffn,
+                         flattening_order=flattening_order)
             for _ in range(layerNo)
         ])
         super().__init__(N, layerNo, numCh, transformers)
@@ -121,7 +123,7 @@ class CrossAttentionVIT(BaseVIT):
                     dim_feedforward=None, dropout=0.1, activation='relu',
                     layer_norm_eps=1e-05, batch_first=True, device=None, dtype=None,
                     pos_emb_type="APE", rope_theta=100.0, rope_mixed_rotate=True, attn_type="complex",
-                    row_stride=1, ffn_sharing="none", shared_ffn=None):
+                    row_stride=1, ffn_sharing="none", shared_ffn=None, flattening_order="row_major"):
         if attn_type != "complex":
             raise ValueError(
                 "CrossAttentionVIT only supports attn_type='complex'. "
@@ -137,7 +139,8 @@ class CrossAttentionVIT(BaseVIT):
                 N, numCh, d_model, nhead, num_encoder_layers, dim_feedforward,
                 dropout, activation, layer_norm_eps, batch_first, device, dtype,
                 pos_emb_type=pos_emb_type, rope_theta=rope_theta, attn_type=attn_type,
-                row_stride=row_stride, ffn_sharing=ffn_sharing, shared_ffn=shared_ffn
+                row_stride=row_stride, ffn_sharing=ffn_sharing, shared_ffn=shared_ffn,
+                flattening_order=flattening_order
             )
             for _ in range(layerNo)
         ])

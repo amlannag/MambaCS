@@ -122,6 +122,7 @@ class Config:
     #   "global"    — one shared FFN across the whole model (all stages; requires
     #                 every stage to use the same d_model / FFN width / dtype)
     ffn_sharing: str = "none"
+    flattening_order: str = "row_major"
     # ---------------------------------------------------------------------------
     # Training hyperparameters
     # ---------------------------------------------------------------------------

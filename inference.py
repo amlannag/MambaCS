@@ -28,12 +28,20 @@ _MODEL_KEYS = {
     "reconformer_mlp_ratio", "reconformer_resi_connection", "reconformer_use_checkpoint",
     "lambda_schedule", "lambda_start", "lambda_end",
     "pos_emb_type", "attn_type", "rope_theta", "rope_mixed_rotate",
-    "mask_vertical_attn",
+    "mask_vertical_attn", "ffn_sharing", "flattening_order",
 }
+
+
+def _config_to_flat(config: dict) -> dict:
+    if isinstance(config.get("model"), dict):
+        return {**config.get("train", {}), **config.get("data", {}), **config["model"]}
+    return dict(config)
 
 
 def _flat_to_nested(flat: dict) -> dict:
     """Split a flat config dict into {'data': {...}, 'model': {...}, 'train': {...}}."""
+    flat = _config_to_flat(flat)
+    flat.setdefault("flattening_order", "row_major")
     data, model, train = {}, {}, {}
     for k, v in flat.items():
         if k in _DATA_KEYS:
@@ -47,6 +55,7 @@ def _flat_to_nested(flat: dict) -> dict:
 
 def _flat_to_cfg(flat: dict) -> Config:
     """Reconstruct a Config dataclass from the flat dict saved by train.py."""
+    flat = _config_to_flat(flat)
     cfg = Config()
     if flat.get("norm") == "kspace_companding" and "companding_centering" not in flat:
         cfg.companding_centering = "legacy"
@@ -107,7 +116,7 @@ def load_experiment_model(exp_dir: str, device=None):
         raise FileNotFoundError(f"config.json not found in {exp_dir}")
 
     with open(config_path) as f:
-        flat = json.load(f)
+        flat = _config_to_flat(json.load(f))
     if flat.get("norm") == "kspace_companding" and "companding_centering" not in flat:
         flat["companding_centering"] = "legacy"
 

@@ -132,12 +132,92 @@ class FeedForward(nn.Module):
         return self.net(x)
 
 
+def validate_flattening_order(order, tokenizer_type=None):
+    if order not in ('row_major', 'dc_radial'):
+        raise ValueError(f"Unknown flattening_order {order!r}. Choose from: row_major, dc_radial")
+    if order == 'dc_radial' and tokenizer_type == 'kaleidoscope':
+        raise ValueError("flattening_order='dc_radial' is not supported for kaleidoscope tokens")
+
+
+class PatchUnroller(nn.Module):
+    def __init__(self, image_size, patch_size, order='row_major', flatten=True):
+        super().__init__()
+        validate_flattening_order(order)
+        self.height, self.width = image_size
+        self.ph, self.pw = (patch_size, patch_size) if isinstance(patch_size, int) else patch_size
+        dimensions = (self.height, self.width, self.ph, self.pw)
+        if any(not isinstance(value, int) or isinstance(value, bool) or value <= 0 for value in dimensions):
+            raise ValueError('Image and patch dimensions must be positive integers')
+        if self.height % self.ph or self.width % self.pw:
+            raise ValueError('Image dimensions must be divisible by patch dimensions')
+        self.order = order
+        self.flatten = flatten
+        self.gh, self.gw = self.height // self.ph, self.width // self.pw
+        self.num_patches = self.gh * self.gw
+        self.pixels = self.ph * self.pw
+        if order == 'dc_radial':
+            rows, cols = torch.meshgrid(
+                torch.arange(self.height, dtype=torch.float64),
+                torch.arange(self.width, dtype=torch.float64), indexing='ij')
+            distances = ((rows - self.height // 2).square() +
+                         (cols - self.width // 2).square()).sqrt()
+            patch_distances = self._extract(distances[None, None])[0, :, 0]
+            permutation = torch.argsort(patch_distances, dim=-1, stable=True)
+        else:
+            permutation = torch.arange(self.pixels).expand(self.num_patches, -1).clone()
+        self.register_buffer('permutation', permutation, persistent=False)
+        self.register_buffer('inverse_permutation', torch.argsort(permutation, dim=-1), persistent=False)
+
+    def _extract(self, x):
+        b, c = x.shape[:2]
+        return (x.reshape(b, c, self.gh, self.ph, self.gw, self.pw)
+                .permute(0, 2, 4, 1, 3, 5)
+                .reshape(b, self.num_patches, c, self.pixels))
+
+    def forward(self, x):
+        if x.ndim != 4 or tuple(x.shape[-2:]) != (self.height, self.width) or x.shape[1] == 0:
+            raise ValueError('Expected [B, C, H, W] with the configured spatial dimensions and C > 0')
+        patches = self._extract(x)
+        if self.order == 'dc_radial':
+            indices = self.permutation[None, :, None, :].expand_as(patches)
+            patches = torch.gather(patches, -1, indices)
+        return patches.transpose(-1, -2).flatten(2) if self.flatten else patches
+
+    def inverse(self, tokens):
+        if self.flatten:
+            if (tokens.ndim != 3 or tokens.shape[1] != self.num_patches or
+                    tokens.shape[2] == 0 or tokens.shape[2] % self.pixels):
+                raise ValueError('Expected [B, num_patches, pixels * C] with C > 0')
+            channels = tokens.shape[2] // self.pixels
+            patches = tokens.reshape(tokens.shape[0], self.num_patches, self.pixels, channels).transpose(-1, -2)
+        else:
+            if (tokens.ndim != 4 or tokens.shape[1] != self.num_patches or
+                    tokens.shape[2] == 0 or tokens.shape[-1] != self.pixels):
+                raise ValueError('Expected [B, num_patches, C, pixels] with C > 0')
+            patches = tokens
+        if self.order == 'dc_radial':
+            indices = self.inverse_permutation[None, :, None, :].expand_as(patches)
+            patches = torch.gather(patches, -1, indices)
+        b, _, c, _ = patches.shape
+        return (patches.reshape(b, self.gh, self.gw, c, self.ph, self.pw)
+                .permute(0, 3, 1, 4, 2, 5).reshape(b, c, self.height, self.width))
+
+
+class PatchRoller(PatchUnroller):
+    def forward(self, tokens):
+        return self.inverse(tokens)
+
+
 def get_to_embedding(tokenizer_type, patch_height=None, patch_width=None, patch_dim=None, d_model=None,
-                     image_height=None, image_width=None, numCh=None, row_stride=1, is_complex=False):
+                     image_height=None, image_width=None, numCh=None, row_stride=1, is_complex=False,
+                     flattening_order='row_major'):
+    validate_flattening_order(flattening_order, tokenizer_type)
     dtype = torch.cfloat if is_complex else None
     if tokenizer_type == "patch":
         seq = nn.Sequential(
-            Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1=patch_height, p2=patch_width),
+            (PatchUnroller((image_height, image_width), (patch_height, patch_width), flattening_order)
+             if flattening_order == 'dc_radial' else
+             Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1=patch_height, p2=patch_width)),
             nn.Linear(patch_dim, d_model, dtype=dtype),
         )
         if is_complex:
@@ -154,11 +234,14 @@ def get_to_embedding(tokenizer_type, patch_height=None, patch_width=None, patch_
         return seq
     elif tokenizer_type == "axial":
         h_seq = nn.Sequential(
-            Rearrange('b c (h p) w -> b h (p w c)', p=row_stride),
+            (PatchUnroller((image_height, image_width), (row_stride, image_width), flattening_order)
+             if flattening_order == 'dc_radial' else
+             Rearrange('b c (h p) w -> b h (p w c)', p=row_stride)),
             nn.Linear(row_stride * image_width * numCh, d_model, dtype=dtype),
         )
         v_seq = nn.Sequential(
-            Rearrange('b c h w -> b w (h c)'),
+            (PatchUnroller((image_height, image_width), (image_height, 1), flattening_order)
+             if flattening_order == 'dc_radial' else Rearrange('b c h w -> b w (h c)')),
             nn.Linear(image_height * numCh, d_model, dtype=dtype),
         )
         if is_complex:
@@ -170,7 +253,16 @@ def get_to_embedding(tokenizer_type, patch_height=None, patch_width=None, patch_
 
 
 def get_from_embedding(tokenizer_type, patch_height=None, patch_width=None, grid_h=None, numCh=None,
-                       image_height=None, image_width=None, row_stride=1):
+                       image_height=None, image_width=None, row_stride=1, flattening_order='row_major'):
+    validate_flattening_order(flattening_order, tokenizer_type)
+    if flattening_order == 'dc_radial':
+        if tokenizer_type == 'patch':
+            return PatchRoller((image_height, image_width), (patch_height, patch_width), flattening_order)
+        if tokenizer_type == 'axial':
+            return (
+                PatchRoller((image_height, image_width), (row_stride, image_width), flattening_order),
+                PatchRoller((image_height, image_width), (image_height, 1), flattening_order),
+            )
     if tokenizer_type == "patch":
         return Rearrange('b (h w) (p1 p2 c) -> b c (h p1) (w p2)',
                          c=numCh, h=grid_h, p1=patch_height, p2=patch_width)
@@ -187,11 +279,14 @@ def get_from_embedding(tokenizer_type, patch_height=None, patch_width=None, grid
 
 
 def get_mlp_head(tokenizer_type, d_model, patch_dim=None, patch_height=None, patch_width=None,
-                 grid_h=None, numCh=None, image_height=None, image_width=None, row_stride=1, is_complex=False):
+                 grid_h=None, numCh=None, image_height=None, image_width=None, row_stride=1, is_complex=False,
+                 flattening_order='row_major'):
+    validate_flattening_order(flattening_order, tokenizer_type)
     norm = ComplexLayerNorm if is_complex else nn.LayerNorm
     dtype = torch.cfloat if is_complex else None
     if tokenizer_type in ("patch", "kaleidoscope"):
-        from_emb = get_from_embedding(tokenizer_type, patch_height, patch_width, grid_h, numCh)
+        from_emb = get_from_embedding(tokenizer_type, patch_height, patch_width, grid_h, numCh,
+                                      image_height, image_width, flattening_order=flattening_order)
         seq = nn.Sequential(
             norm(d_model),
             nn.Linear(d_model, patch_dim, dtype=dtype),
@@ -202,7 +297,9 @@ def get_mlp_head(tokenizer_type, d_model, patch_dim=None, patch_height=None, pat
             apply_trabelsi_(seq[1], criterion="glorot")
         return seq
     elif tokenizer_type == "axial":
-        h_from, v_from = get_from_embedding("axial", numCh=numCh, image_width=image_width, row_stride=row_stride)
+        h_from, v_from = get_from_embedding("axial", numCh=numCh, image_height=image_height,
+                                            image_width=image_width, row_stride=row_stride,
+                                            flattening_order=flattening_order)
         h_seq = nn.Sequential(norm(d_model), nn.Linear(d_model, row_stride * image_width * numCh, dtype=dtype), h_from)
         v_seq = nn.Sequential(norm(d_model), nn.Linear(d_model, image_height * numCh, dtype=dtype), v_from)
         if is_complex:

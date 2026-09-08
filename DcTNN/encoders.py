@@ -16,6 +16,7 @@ from .util import (
     ComplexLayerNorm,
     ComplexDropout,
     FeedForward,
+    PatchUnroller,
     _COMPLEX_ATTN_TYPES,
 )
 from .complex_init import apply_trabelsi_
@@ -211,7 +212,7 @@ class TokenEncoder(BaseTokenEncoder):
                 num_layers=6, dim_feedforward=2048, dropout=0.1, activation='relu', layer_norm_eps=1e-05,
                 batch_first=True, device=None, dtype=None, norm=None,
                 pos_emb_type="APE", rope_theta=100.0, rope_mixed_rotate=True,
-                attn_type="standard", ffn_sharing="none", shared_ffn=None):
+                attn_type="standard", ffn_sharing="none", shared_ffn=None, flattening_order="row_major"):
         super().__init__()
 
         self.pos_emb_type = pos_emb_type
@@ -231,9 +232,11 @@ class TokenEncoder(BaseTokenEncoder):
         patch_dim = patch_height * patch_width * numCh
 
         self.to_embedding = get_to_embedding(tokenizer_type, patch_height, patch_width, patch_dim, d_model,
-                                             is_complex=self.is_complex)
+                                             image_height=image_height, image_width=image_width,
+                                             is_complex=self.is_complex, flattening_order=flattening_order)
         self.mlp_head = get_mlp_head(tokenizer_type, d_model, patch_dim, patch_height, patch_width,
-                                     grid_h, numCh, is_complex=self.is_complex)
+                                     grid_h, numCh, image_height=image_height, image_width=image_width,
+                                     is_complex=self.is_complex, flattening_order=flattening_order)
         
         self.dropout = ComplexDropout(dropout) if self.is_complex else nn.Dropout(dropout)
 
@@ -251,7 +254,8 @@ class axialEncoder(nn.Module):
                     dropout=0.1, activation='relu', layer_norm_eps=1e-05, batch_first=True,
                     device=None, dtype=None, norm=None,
                     pos_emb_type="APE", rope_theta=100.0, attn_type="standard", row_stride=1,
-                    mask_vertical_attn="none", ffn_sharing="none", shared_ffn=None):
+                    mask_vertical_attn="none", ffn_sharing="none", shared_ffn=None,
+                    flattening_order="row_major"):
         super().__init__()
 
         self.pos_emb_type = pos_emb_type
@@ -269,11 +273,11 @@ class axialEncoder(nn.Module):
 
         self.to_horizontal_embedding, self.to_vertical_embedding = get_to_embedding(
             "axial", image_height=image_height, image_width=image_width, numCh=numCh, d_model=d_model,
-            row_stride=row_stride, is_complex=self.is_complex)
+            row_stride=row_stride, is_complex=self.is_complex, flattening_order=flattening_order)
 
         self.horizontal_mlp_head, self.vertical_mlp_head = get_mlp_head(
             "axial", d_model, numCh=numCh, image_height=image_height, image_width=image_width,
-            row_stride=row_stride, is_complex=self.is_complex)
+            row_stride=row_stride, is_complex=self.is_complex, flattening_order=flattening_order)
 
         self.dropout = ComplexDropout(dropout) if self.is_complex else nn.Dropout(dropout)
 
@@ -340,7 +344,7 @@ class crossAxialEncoder(nn.Module):
                     dropout=0.1, activation='relu', layer_norm_eps=1e-05, batch_first=True,
                     device=None, dtype=None, norm=None,
                     pos_emb_type="APE", rope_theta=100.0, attn_type="complex", row_stride=1,
-                    ffn_sharing="none", shared_ffn=None):
+                    ffn_sharing="none", shared_ffn=None, flattening_order="row_major"):
         super().__init__()
         if row_stride != 1:
             raise ValueError("crossAxialEncoder supports vertical tokens only and requires row_stride=1")
@@ -359,10 +363,12 @@ class crossAxialEncoder(nn.Module):
         cis_fn = compute_axial_cis_complex if self.is_complex else compute_axial_cis
         dtype = torch.cfloat if self.is_complex else None
         norm = ComplexLayerNorm if self.is_complex else nn.LayerNorm
-        v_from = get_from_embedding("axial", numCh=numCh, image_height=image_height, image_width=image_width)[1]
+        v_from = get_from_embedding("axial", numCh=numCh, image_height=image_height,
+                                    image_width=image_width, flattening_order=flattening_order)[1]
 
         self.to_vertical_embedding = nn.Sequential(
-            Rearrange('b c h w -> b w (h c)'),
+            (PatchUnroller((image_height, image_width), (image_height, 1), flattening_order)
+             if flattening_order == 'dc_radial' else Rearrange('b c h w -> b w (h c)')),
             nn.Linear(image_height * numCh, d_model, dtype=dtype),
         )
         self.vertical_mlp_head = nn.Sequential(

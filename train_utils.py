@@ -116,7 +116,30 @@ _ENCODER_ARGS = {
 }
 
 
+def validate_resume_flattening_order(cfg, saved_config):
+    saved_model = saved_config.get("model", saved_config)
+    saved_order = saved_model.get("flattening_order", "row_major")
+    requested_order = getattr(cfg, "flattening_order", "row_major")
+    if saved_order != requested_order:
+        raise ValueError(
+            f"Checkpoint flattening_order={saved_order!r} does not match "
+            f"requested flattening_order={requested_order!r}; resume with the saved order."
+        )
+
+
 def _build_model_impl(cfg):
+    flattening_order = getattr(cfg, "flattening_order", "row_major")
+    if flattening_order not in ("row_major", "dc_radial"):
+        raise ValueError(
+            f"Unknown flattening_order {flattening_order!r}. Choose from: row_major, dc_radial"
+        )
+    if flattening_order == "dc_radial":
+        if cfg.model_type != "dctnn":
+            raise ValueError("flattening_order='dc_radial' requires model_type='dctnn'")
+        if cfg.learning != "k_space":
+            raise ValueError("flattening_order='dc_radial' requires learning='k_space'")
+        if "kaleidoscope" in cfg.encoders:
+            raise ValueError("flattening_order='dc_radial' is not supported for kaleidoscope")
     if cfg.model_type == "reconformer":
         if cfg.learning != "complex_image":
             raise ValueError("ReconFormer requires learning='complex_image'")
@@ -149,6 +172,7 @@ def _build_model_impl(cfg):
             raise ValueError(f"Unknown encoder '{name}'. Choose from: {list(_ENCODER_ARGS)}")
         cls, args = _ENCODER_ARGS[name](cfg)
         args["numCh"] = num_ch
+        args["flattening_order"] = flattening_order
         enc_list.append(cls)
         enc_args.append(args)
 
@@ -219,6 +243,7 @@ def build_model_from_config_dict(cfg_dict):
     cfg.axial_row_stride = model_cfg.get("axial_row_stride", 1)
     cfg.mask_vertical_attn = model_cfg.get("mask_vertical_attn", "none")
     cfg.ffn_sharing = model_cfg.get("ffn_sharing", "none")
+    cfg.flattening_order = model_cfg.get("flattening_order", "row_major")
     return _build_model_impl(cfg)
 
 

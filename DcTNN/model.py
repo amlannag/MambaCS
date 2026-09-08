@@ -3,7 +3,7 @@ from torch import nn
 from .dc import KSpace_DC
 from .vit import TokenVIT, axVIT, CrossAttentionVIT
 from .encoders import TokenEncoder, axialEncoder, crossAxialEncoder, pair
-from .util import FeedForward, _COMPLEX_ATTN_TYPES
+from .util import FeedForward, _COMPLEX_ATTN_TYPES, validate_flattening_order
 
 __all__ = ['cascadeNet', 'TokenVIT', 'axVIT', 'CrossAttentionVIT', 'TokenEncoder', 'axialEncoder', 'crossAxialEncoder']
 
@@ -80,6 +80,11 @@ class cascadeNet(nn.Module):
                 f"Unknown ffn_sharing '{ffn_sharing}'. Choose from: none, per_stage, global"
             )
         self.ffn_sharing = ffn_sharing
+        for args in encArgs:
+            order = args.get('flattening_order', 'row_major')
+            validate_flattening_order(order, args.get('tokenizer_type'))
+            if order == 'dc_radial' and learning != 'k_space':
+                raise ValueError("flattening_order='dc_radial' requires centered k-space (learning='k_space')")
         encArgs = _apply_ffn_sharing(N, encList, encArgs, ffn_sharing)
 
         self.transformers = nn.ModuleList(

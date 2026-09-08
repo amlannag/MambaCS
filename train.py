@@ -25,7 +25,8 @@ from progress import phase, progress_iter
 from train_config import EXPERIMENTS
 from DcTNN.lambda_scheduler import LambdaScheduler
 from train_utils import (FastMRIMaskGenerator, build_model, resolve_data_dirs,
-                         simulate_undersampling, unique_model_parameters)
+                         simulate_undersampling, unique_model_parameters,
+                         validate_resume_flattening_order)
 from DcTNN.loss import PerpendicularLoss, build_loss
 from DcTNN.dc import ifft_2d
 from normalizer import model_output_to_raw_kspace, reconstruction_to_image_magnitude
@@ -894,8 +895,14 @@ def main():
 
     checkpoint = None
     if cfg.resume and os.path.exists(cfg.resume):
+        saved_config_path = os.path.join(os.path.dirname(cfg.resume), "config.json")
+        if os.path.exists(saved_config_path):
+            with open(saved_config_path) as f:
+                validate_resume_flattening_order(cfg, json.load(f))
         phase(f"Loading checkpoint {cfg.resume}")
         checkpoint = torch.load(cfg.resume, map_location="cpu")
+        if isinstance(checkpoint.get("config"), dict):
+            validate_resume_flattening_order(cfg, checkpoint["config"])
 
     phase("Resolving batch size...")
     if cfg.auto_batch_size and device.type == "cuda":
