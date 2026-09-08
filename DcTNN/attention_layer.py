@@ -238,11 +238,11 @@ class ComplexCrossAttention(nn.Module):
 
 class TransformerEncoderLayer(nn.Module):
     def __init__(self, d_model, nhead, dim_feedforward, dropout, activation, layer_norm_eps,
-                 freqs_cis=None, attn_type="standard"):
+                 freqs_cis=None, attn_type="standard", ff=None):
         super().__init__()
         is_complex = attn_type in _COMPLEX_ATTN_TYPES
         self.attn = get_attention(attn_type, d_model, nhead, dropout, freqs_cis)
-        self.ff = FeedForward(d_model, dim_feedforward, dropout, activation, is_complex)
+        self.ff = ff if ff is not None else FeedForward(d_model, dim_feedforward, dropout, activation, is_complex)
         if is_complex:
             self.norm1 = ComplexLayerNorm(d_model)
             self.norm2 = ComplexLayerNorm(d_model)
@@ -259,8 +259,13 @@ class TransformerEncoderLayer(nn.Module):
 
 
 class TransformerEncoder(nn.Sequential):
-    def __init__(self, encoder_layer, num_layers):
+    def __init__(self, encoder_layer, num_layers, tie_ffn=False):
         super().__init__(*[copy.deepcopy(encoder_layer) for _ in range(num_layers)])
+        if tie_ffn:
+            # Replace each deep-copied FFN with the template's instance so all layers
+            # share one set of weights.
+            for layer in self:
+                layer.ff = encoder_layer.ff
 
     def forward(self, x, attn_mask=None, positions=None):
         for layer in self:
@@ -270,7 +275,7 @@ class TransformerEncoder(nn.Sequential):
 
 class CrossAttentionEncoderLayer(nn.Module):
     def __init__(self, d_model, nhead, dim_feedforward, dropout, activation, layer_norm_eps,
-                 freqs_cis=None, attn_type="complex"):
+                 freqs_cis=None, attn_type="complex", ff=None):
         super().__init__()
         if attn_type != "complex":
             raise ValueError(
@@ -278,7 +283,7 @@ class CrossAttentionEncoderLayer(nn.Module):
                 f"Received '{attn_type}'."
             )
         self.attn = ComplexCrossAttention(d_model, nhead, dropout, freqs_cis)
-        self.ff = FeedForward(d_model, dim_feedforward, dropout, activation, True)
+        self.ff = ff if ff is not None else FeedForward(d_model, dim_feedforward, dropout, activation, True)
         self.norm_q = ComplexLayerNorm(d_model)
         self.norm_kv = ComplexLayerNorm(d_model)
         self.norm2 = ComplexLayerNorm(d_model)

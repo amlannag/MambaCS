@@ -159,11 +159,27 @@ def _build_model_impl(cfg):
         enc_args,
         use_learned_lamb,
         learning=cfg.learning,
+        ffn_sharing=cfg.ffn_sharing,
     )
 
 
 def build_model(cfg):
     return _build_model_impl(cfg)
+
+
+def unique_model_parameters(model):
+    """
+    Yield trainable parameters once each, deduplicating tied/shared weights.
+
+    With ffn_sharing != "none" the same FeedForward module is registered under
+    several parents, so model.parameters() yields the shared tensors multiple
+    times. Optimizers and parameter counts must use this instead.
+    """
+    seen = set()
+    for p in model.parameters():
+        if p.requires_grad and id(p) not in seen:
+            seen.add(id(p))
+            yield p
 
 
 def build_model_from_config_dict(cfg_dict):
@@ -202,6 +218,7 @@ def build_model_from_config_dict(cfg_dict):
     cfg.rope_mixed_rotate = model_cfg.get("rope_mixed_rotate", True)
     cfg.axial_row_stride = model_cfg.get("axial_row_stride", 1)
     cfg.mask_vertical_attn = model_cfg.get("mask_vertical_attn", "none")
+    cfg.ffn_sharing = model_cfg.get("ffn_sharing", "none")
     return _build_model_impl(cfg)
 
 

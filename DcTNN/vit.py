@@ -36,27 +36,30 @@ class TokenVIT(BaseVIT):
         d_model (int)               -       Model dimension (defaults to patch_size² × numCh)
         nhead (int)                 -       Number of attention heads
         num_encoder_layers (int)    -       Transformer layers per encoder
-        dim_feedforward (int)       -       MLP width (defaults to d_model^1.5)
+        dim_feedforward (int)       -       MLP width (defaults to 4 × d_model)
         dropout (float)             -       Dropout rate
         activation                  -       Activation function
         pos_emb_type (str)          -       "APE" | "Rope-Axial" | "Rope-Mixed"
         rope_theta (float)          -       Base frequency for RoPE
         rope_mixed_rotate (bool)    -       Random rotation for Rope-Mixed freqs
+        ffn_sharing (str)           -       "none" | "per_stage" | "global"
+        shared_ffn                  -       Optional externally-provided shared FFN (global mode)
     """
     def __init__(self, N, patch_size=16, tokenizer_type="patch", layerNo=2, numCh=1, d_model=None,
                     nhead=8, num_encoder_layers=2, dim_feedforward=None, dropout=0.1, activation='relu',
                     layer_norm_eps=1e-05, batch_first=True, device=None, dtype=None,
-                    pos_emb_type="APE", rope_theta=100.0, rope_mixed_rotate=True, attn_type="standard"):
+                    pos_emb_type="APE", rope_theta=100.0, rope_mixed_rotate=True, attn_type="standard",
+                    ffn_sharing="none", shared_ffn=None):
         if d_model is None:
             ph, pw = pair(patch_size)
             d_model = ph * pw * numCh
         if dim_feedforward is None:
-            dim_feedforward = int(d_model ** (3 / 2))
+            dim_feedforward = int(d_model * 4)
         transformers = nn.ModuleList([
             TokenEncoder(N, patch_size, numCh, tokenizer_type, d_model, nhead, num_encoder_layers,
                          dim_feedforward, dropout, activation, layer_norm_eps, batch_first, device, dtype,
                          pos_emb_type=pos_emb_type, rope_theta=rope_theta, rope_mixed_rotate=rope_mixed_rotate,
-                         attn_type=attn_type)
+                         attn_type=attn_type, ffn_sharing=ffn_sharing, shared_ffn=shared_ffn)
             for _ in range(layerNo)
         ])
         super().__init__(N, layerNo, numCh, transformers)
@@ -74,28 +77,31 @@ class axVIT(BaseVIT):
         d_model (int)               -       Model dimension (defaults to N × numCh)
         nhead (int)                 -       Number of attention heads
         num_encoder_layers (int)    -       Transformer layers per encoder
-        dim_feedforward (int)       -       MLP width (defaults to d_model^1.5)
+        dim_feedforward (int)       -       MLP width (defaults to 4 × d_model)
         dropout (float)             -       Dropout rate
         activation                  -       Activation function
         pos_emb_type (str)          -       "APE" | "Rope-Axial" | "Rope-Mixed"
         rope_theta (float)          -       Base frequency for RoPE
         rope_mixed_rotate (bool)    -       Unused, kept for API consistency
+        ffn_sharing (str)           -       "none" | "per_stage" | "global"
+        shared_ffn                  -       Optional externally-provided shared FFN (global mode)
     """
     def __init__(self, N, layerNo=2, numCh=1, d_model=None, nhead=8, num_encoder_layers=2,
                     dim_feedforward=None, dropout=0.1, activation='relu',
                     layer_norm_eps=1e-05, batch_first=True, device=None, dtype=None,
                     pos_emb_type="APE", rope_theta=100.0, rope_mixed_rotate=True, attn_type="standard",
-                    row_stride=1, mask_vertical_attn="none"):
+                    row_stride=1, mask_vertical_attn="none", ffn_sharing="none", shared_ffn=None):
         if d_model is None:
             _, image_width = N if isinstance(N, (tuple, list)) else (N, N)
             d_model = image_width * numCh
         if dim_feedforward is None:
-            dim_feedforward = int(d_model ** (3 / 2))
+            dim_feedforward = int(d_model * 4)
         transformers = nn.ModuleList([
             axialEncoder(N, numCh, d_model, nhead, num_encoder_layers, dim_feedforward,
                          dropout, activation, layer_norm_eps, batch_first, device, dtype,
                          pos_emb_type=pos_emb_type, rope_theta=rope_theta, attn_type=attn_type,
-                         row_stride=row_stride, mask_vertical_attn=mask_vertical_attn)
+                         row_stride=row_stride, mask_vertical_attn=mask_vertical_attn,
+                         ffn_sharing=ffn_sharing, shared_ffn=shared_ffn)
             for _ in range(layerNo)
         ])
         super().__init__(N, layerNo, numCh, transformers)
@@ -115,7 +121,7 @@ class CrossAttentionVIT(BaseVIT):
                     dim_feedforward=None, dropout=0.1, activation='relu',
                     layer_norm_eps=1e-05, batch_first=True, device=None, dtype=None,
                     pos_emb_type="APE", rope_theta=100.0, rope_mixed_rotate=True, attn_type="complex",
-                    row_stride=1):
+                    row_stride=1, ffn_sharing="none", shared_ffn=None):
         if attn_type != "complex":
             raise ValueError(
                 "CrossAttentionVIT only supports attn_type='complex'. "
@@ -125,13 +131,13 @@ class CrossAttentionVIT(BaseVIT):
             _, image_width = N if isinstance(N, (tuple, list)) else (N, N)
             d_model = image_width * numCh
         if dim_feedforward is None:
-            dim_feedforward = int(d_model ** (3 / 2))
+            dim_feedforward = int(d_model * 4)
         transformers = nn.ModuleList([
             crossAxialEncoder(
                 N, numCh, d_model, nhead, num_encoder_layers, dim_feedforward,
                 dropout, activation, layer_norm_eps, batch_first, device, dtype,
                 pos_emb_type=pos_emb_type, rope_theta=rope_theta, attn_type=attn_type,
-                row_stride=row_stride
+                row_stride=row_stride, ffn_sharing=ffn_sharing, shared_ffn=shared_ffn
             )
             for _ in range(layerNo)
         ])

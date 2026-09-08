@@ -116,6 +116,12 @@ class Config:
     # "strict"  — all queries attend only to sampled keys
     # Cross-attention routing now lives in the separate "cross_axial" encoder family.
     mask_vertical_attn: str = "none"
+    # FFN weight sharing across transformer layers:
+    #   "none"      — every transformer layer gets its own FFN (default)
+    #   "per_stage" — one shared FFN per cascade stage (all layers in that stage)
+    #   "global"    — one shared FFN across the whole model (all stages; requires
+    #                 every stage to use the same d_model / FFN width / dtype)
+    ffn_sharing: str = "none"
     # ---------------------------------------------------------------------------
     # Training hyperparameters
     # ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ from .util import (
     get_mlp_head,
     ComplexLayerNorm,
     ComplexDropout,
+    FeedForward,
     _COMPLEX_ATTN_TYPES,
 )
 from .complex_init import apply_trabelsi_
@@ -78,23 +79,23 @@ class _CrossAxialInnerLayer(nn.Module):
     5. scatter updated unsampled tokens back into the full token tensor
     """
     def __init__(self, d_model, nhead, dim_feedforward, dropout, activation, layer_norm_eps,
-                 freqs_cis=None, attn_type="complex"):
+                 freqs_cis=None, attn_type="complex", ff=None):
         super().__init__()
         self.cross1 = CrossAttentionEncoderLayer(
             d_model, nhead, dim_feedforward, dropout, activation,
-            layer_norm_eps, freqs_cis=freqs_cis, attn_type=attn_type
+            layer_norm_eps, freqs_cis=freqs_cis, attn_type=attn_type, ff=ff
         )
         self.self_attn1 = TransformerEncoderLayer(
             d_model, nhead, dim_feedforward, dropout, activation,
-            layer_norm_eps, freqs_cis=freqs_cis, attn_type=attn_type
+            layer_norm_eps, freqs_cis=freqs_cis, attn_type=attn_type, ff=ff
         )
         self.cross2 = CrossAttentionEncoderLayer(
             d_model, nhead, dim_feedforward, dropout, activation,
-            layer_norm_eps, freqs_cis=freqs_cis, attn_type=attn_type
+            layer_norm_eps, freqs_cis=freqs_cis, attn_type=attn_type, ff=ff
         )
         self.self_attn2 = TransformerEncoderLayer(
             d_model, nhead, dim_feedforward, dropout, activation,
-            layer_norm_eps, freqs_cis=freqs_cis, attn_type=attn_type
+            layer_norm_eps, freqs_cis=freqs_cis, attn_type=attn_type, ff=ff
         )
 
     def forward(self, x, sampled_idx, unsampled_idx):
@@ -126,8 +127,15 @@ class _CrossAxialInnerLayer(nn.Module):
 
 
 class _CrossAxialEncoderStack(nn.Sequential):
-    def __init__(self, encoder_layer, num_layers):
+    def __init__(self, encoder_layer, num_layers, tie_ffn=False):
         super().__init__(*[copy.deepcopy(encoder_layer) for _ in range(num_layers)])
+        if tie_ffn:
+            # Re-point every deep-copied layer's FFN at the template's shared instance.
+            for layer in self:
+                layer.cross1.ff = encoder_layer.cross1.ff
+                layer.self_attn1.ff = encoder_layer.self_attn1.ff
+                layer.cross2.ff = encoder_layer.cross2.ff
+                layer.self_attn2.ff = encoder_layer.self_attn2.ff
 
     def forward(self, x, sampled_idx, unsampled_idx):
         for layer in self:
@@ -152,7 +160,8 @@ class BaseTokenEncoder(nn.Module):
     def _setup_pos_emb(self, grid_h, grid_w, num_patches, num_layers,
                        d_model, nhead, dim_feedforward, dropout, activation,
                        layer_norm_eps, batch_first, device, dtype, norm,
-                       rope_theta, rope_mixed_rotate, attn_type):
+                       rope_theta, rope_mixed_rotate, attn_type,
+                       ffn_sharing="none", shared_ffn=None):
 
         if self.pos_emb_type == "APE":
             dtype = torch.cfloat if self.is_complex else None
@@ -170,9 +179,13 @@ class BaseTokenEncoder(nn.Module):
             freqs_cis = cis_fn(dim=head_dim, end_x=grid_w, end_y=grid_h, theta=rope_theta)
 
 
+        if shared_ffn is None and ffn_sharing == "per_stage":
+            shared_ffn = FeedForward(d_model, dim_feedforward, dropout, activation, self.is_complex)
+
         layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation,
-                                        layer_norm_eps, freqs_cis=freqs_cis, attn_type=attn_type)
-        self.encoder = TransformerEncoder(layer, num_layers)
+                                        layer_norm_eps, freqs_cis=freqs_cis, attn_type=attn_type,
+                                        ff=shared_ffn)
+        self.encoder = TransformerEncoder(layer, num_layers, tie_ffn=shared_ffn is not None)
 
     def forward(self, img):
         x = self.to_embedding(img)
@@ -198,7 +211,7 @@ class TokenEncoder(BaseTokenEncoder):
                 num_layers=6, dim_feedforward=2048, dropout=0.1, activation='relu', layer_norm_eps=1e-05,
                 batch_first=True, device=None, dtype=None, norm=None,
                 pos_emb_type="APE", rope_theta=100.0, rope_mixed_rotate=True,
-                attn_type="standard"):
+                attn_type="standard", ffn_sharing="none", shared_ffn=None):
         super().__init__()
 
         self.pos_emb_type = pos_emb_type
@@ -227,7 +240,7 @@ class TokenEncoder(BaseTokenEncoder):
         self._setup_pos_emb(grid_h, grid_w, num_patches, num_layers, d_model, nhead,
                             dim_feedforward, dropout, activation, layer_norm_eps,
                             batch_first, device, dtype, norm, rope_theta, rope_mixed_rotate,
-                            attn_type)
+                            attn_type, ffn_sharing=ffn_sharing, shared_ffn=shared_ffn)
 
 
 class axialEncoder(nn.Module):
@@ -238,7 +251,7 @@ class axialEncoder(nn.Module):
                     dropout=0.1, activation='relu', layer_norm_eps=1e-05, batch_first=True,
                     device=None, dtype=None, norm=None,
                     pos_emb_type="APE", rope_theta=100.0, attn_type="standard", row_stride=1,
-                    mask_vertical_attn="none"):
+                    mask_vertical_attn="none", ffn_sharing="none", shared_ffn=None):
         super().__init__()
 
         self.pos_emb_type = pos_emb_type
@@ -279,12 +292,17 @@ class axialEncoder(nn.Module):
             freqs_h = cis_fn(dim=head_dim, end_x=h_tokens,    end_y=1, theta=rope_theta)
             freqs_v = cis_fn(dim=head_dim, end_x=image_width, end_y=1, theta=rope_theta)
 
+        if shared_ffn is None and ffn_sharing == "per_stage":
+            shared_ffn = FeedForward(d_model, dim_feedforward, dropout, activation, self.is_complex)
+
         h_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation,
-                                          layer_norm_eps, freqs_cis=freqs_h, attn_type=attn_type)
+                                          layer_norm_eps, freqs_cis=freqs_h, attn_type=attn_type,
+                                          ff=shared_ffn)
         v_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation,
-                                          layer_norm_eps, freqs_cis=freqs_v, attn_type=attn_type)
-        self.horizontalEncoder = TransformerEncoder(h_layer, numLayers)
-        self.verticalEncoder = TransformerEncoder(v_layer, numLayers)
+                                          layer_norm_eps, freqs_cis=freqs_v, attn_type=attn_type,
+                                          ff=shared_ffn)
+        self.horizontalEncoder = TransformerEncoder(h_layer, numLayers, tie_ffn=shared_ffn is not None)
+        self.verticalEncoder = TransformerEncoder(v_layer, numLayers, tie_ffn=shared_ffn is not None)
 
     def forward(self, img, col_mask=None):
         x = self.to_horizontal_embedding(img)
@@ -321,7 +339,8 @@ class crossAxialEncoder(nn.Module):
     def __init__(self, image_size, numCh=1, d_model=512, nhead=8, num_layers=6, dim_feedforward=None,
                     dropout=0.1, activation='relu', layer_norm_eps=1e-05, batch_first=True,
                     device=None, dtype=None, norm=None,
-                    pos_emb_type="APE", rope_theta=100.0, attn_type="complex", row_stride=1):
+                    pos_emb_type="APE", rope_theta=100.0, attn_type="complex", row_stride=1,
+                    ffn_sharing="none", shared_ffn=None):
         super().__init__()
         if row_stride != 1:
             raise ValueError("crossAxialEncoder supports vertical tokens only and requires row_stride=1")
@@ -365,11 +384,15 @@ class crossAxialEncoder(nn.Module):
         else:
             freqs_v = None
 
+        if shared_ffn is None and ffn_sharing == "per_stage":
+            shared_ffn = FeedForward(d_model, dim_feedforward, dropout, activation, self.is_complex)
+
         inner_layer = _CrossAxialInnerLayer(
             d_model, nhead, dim_feedforward, dropout, activation,
-            layer_norm_eps, freqs_cis=freqs_v, attn_type=attn_type
+            layer_norm_eps, freqs_cis=freqs_v, attn_type=attn_type, ff=shared_ffn
         )
-        self.verticalEncoder = _CrossAxialEncoderStack(inner_layer, num_layers)
+        self.verticalEncoder = _CrossAxialEncoderStack(inner_layer, num_layers,
+                                                       tie_ffn=shared_ffn is not None)
 
     def forward(self, img, col_mask=None):
         if col_mask is None:

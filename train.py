@@ -24,7 +24,8 @@ from config import Config
 from progress import phase, progress_iter
 from train_config import EXPERIMENTS
 from DcTNN.lambda_scheduler import LambdaScheduler
-from train_utils import FastMRIMaskGenerator, build_model, resolve_data_dirs, simulate_undersampling
+from train_utils import (FastMRIMaskGenerator, build_model, resolve_data_dirs,
+                         simulate_undersampling, unique_model_parameters)
 from DcTNN.loss import PerpendicularLoss, build_loss
 from DcTNN.dc import ifft_2d
 from normalizer import model_output_to_raw_kspace, reconstruction_to_image_magnitude
@@ -249,7 +250,7 @@ def _build_scheduler(cfg, optimizer):
 
 def _clip_gradients(model, max_norm):
     if max_norm is not None:
-        nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_norm)
+        nn.utils.clip_grad_norm_(unique_model_parameters(model), max_norm=max_norm)
 
 
 def _is_oom_error(error):
@@ -307,7 +308,7 @@ def _probe_batch_candidate(cfg, dataset, batch_size, device, checkpoint=None):
         t_build = time.time()
         model = build_model(cfg).to(device)
         phase(f"  Probe batch {batch_size}: model built in {time.time() - t_build:.1f}s")
-        optimizer = _build_optimizer(cfg, model.parameters())
+        optimizer = _build_optimizer(cfg, unique_model_parameters(model))
         final_criterion, intermediate_criterion = _build_criteria(cfg)
         if checkpoint is not None:
             model.load_state_dict(checkpoint["model"])
@@ -956,7 +957,7 @@ def main():
     phase("Building model...")
     t_model = time.time()
     model    = build_model(cfg).to(device)
-    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    n_params = sum(p.numel() for p in unique_model_parameters(model))
     phase(f"Model ready in {time.time() - t_model:.1f}s")
     print(f"Parameters : {n_params:,}")
     mask_generator = FastMRIMaskGenerator(
@@ -966,7 +967,7 @@ def main():
     )
 
     # ---- Optimiser / scheduler / loss ----
-    optimizer = _build_optimizer(cfg, model.parameters())
+    optimizer = _build_optimizer(cfg, unique_model_parameters(model))
     scheduler = _build_scheduler(cfg, optimizer)
     final_criterion, intermediate_criterion = _build_criteria(cfg)
 

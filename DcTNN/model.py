@@ -2,9 +2,47 @@ import torch
 from torch import nn
 from .dc import KSpace_DC
 from .vit import TokenVIT, axVIT, CrossAttentionVIT
-from .encoders import TokenEncoder, axialEncoder, crossAxialEncoder
+from .encoders import TokenEncoder, axialEncoder, crossAxialEncoder, pair
+from .util import FeedForward, _COMPLEX_ATTN_TYPES
 
 __all__ = ['cascadeNet', 'TokenVIT', 'axVIT', 'CrossAttentionVIT', 'TokenEncoder', 'axialEncoder', 'crossAxialEncoder']
+
+
+def _stage_ffn_spec(N, cls, args):
+    """Return (d_model, dim_feedforward, dropout, activation, is_complex) for one cascade stage."""
+    num_ch = args.get("numCh", 1)
+    if cls is TokenVIT:
+        patch_h, patch_w = pair(args.get("patch_size", (16, 16)))
+        d_model = args.get("d_model") or (patch_h * patch_w * num_ch)
+    else:
+        _, image_width = N if isinstance(N, (tuple, list)) else (N, N)
+        d_model = args.get("d_model") or (image_width * num_ch)
+    dim_ff = args.get("dim_feedforward") or int(d_model * 4)
+    dropout = args.get("dropout", 0.1)
+    activation = args.get("activation", "relu")
+    is_complex = args.get("attn_type", "standard") in _COMPLEX_ATTN_TYPES
+    return (d_model, dim_ff, dropout, activation, is_complex)
+
+
+def _apply_ffn_sharing(N, encList, encArgs, ffn_sharing):
+    """Return a copy of stage args with the FFN sharing mode applied."""
+    if ffn_sharing == "none":
+        return list(encArgs)
+    if ffn_sharing == "per_stage":
+        return [dict(args, ffn_sharing="per_stage") for args in encArgs]
+
+    # global: one FeedForward shared by every stage
+    specs = [_stage_ffn_spec(N, cls, args) for cls, args in zip(encList, encArgs)]
+    base = specs[0]
+    if any(spec != base for spec in specs[1:]):
+        raise ValueError(
+            "ffn_sharing='global' requires every cascade stage to use the same "
+            "d_model, dim_feedforward, dropout, activation, and complex dtype. "
+            f"Got stage specs: {specs}"
+        )
+    d_model, dim_ff, dropout, activation, is_complex = base
+    shared_ffn = FeedForward(d_model, dim_ff, dropout, activation, is_complex)
+    return [dict(args, shared_ffn=shared_ffn) for args in encArgs]
 
 
 class cascadeNet(nn.Module):
@@ -22,7 +60,7 @@ class cascadeNet(nn.Module):
         lamb (bool)             Whether to use a learned per-stage lambda
         learning (str)          "k_space", "image", or "complex_image"
     """
-    def __init__(self, N, encList, encArgs, lamb=True, learning="k_space"):
+    def __init__(self, N, encList, encArgs, lamb=True, learning="k_space", ffn_sharing="none"):
         super().__init__()
         if lamb:
             self.lamb = nn.Parameter(torch.ones(len(encList)) * 0.5)
@@ -36,6 +74,13 @@ class cascadeNet(nn.Module):
             raise ValueError(
                 f"Unknown learning domain '{learning}'. Choose from: {sorted(valid_domains)}"
             )
+
+        if ffn_sharing not in ("none", "per_stage", "global"):
+            raise ValueError(
+                f"Unknown ffn_sharing '{ffn_sharing}'. Choose from: none, per_stage, global"
+            )
+        self.ffn_sharing = ffn_sharing
+        encArgs = _apply_ffn_sharing(N, encList, encArgs, ffn_sharing)
 
         self.transformers = nn.ModuleList(
             enc(N, **args) for enc, args in zip(encList, encArgs)
