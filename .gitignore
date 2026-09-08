@@ -21,5 +21,6 @@ tests/
 benchmarks/
 alternative papers/
 apt-main/
-
+DCTNN_ARCHITECTURE.md
+kViT-main/
 download_bunya_fastmri.sh
