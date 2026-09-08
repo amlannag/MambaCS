@@ -20,5 +20,6 @@ data/
 tests/
 benchmarks/
 alternative papers/
+apt-main/
 
 download_bunya_fastmri.sh

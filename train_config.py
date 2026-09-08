@@ -5,7 +5,7 @@ Experiment definitions for DcTNN training.
 EXPERIMENTS = [
     {
         "prefix": "fastMRI",
-        "name": "dctnn_complex_hard_lambda_r4_100epochs",
+        "name": "dctnn_axial_complex_hard_lambda_r4_100epochs",
         "hpc_backend": "amd",
         "model_type": "dctnn",
         "dataset": "fastmri",
@@ -15,7 +15,7 @@ EXPERIMENTS = [
         "acceleration_factors": [4],
         "center_fractions": [0.08],
         "mask_type": "random",
-        "encoders": ["patch", "patch", "patch"],
+        "encoders": ["axial", "axial", "axial"],
         "attn_type": "complex",
         "lambda_schedule": "hard",
         "loss_mode": "final_only",
@@ -29,7 +29,7 @@ EXPERIMENTS = [
     },
     {
         "prefix": "fastMRI",
-        "name": "dctnn_phase_aware_hard_lambda_r4_100epochs",
+        "name": "dctnn_axial_phase_aware_hard_lambda_r4_100epochs",
         "hpc_backend": "amd",
         "model_type": "dctnn",
         "dataset": "fastmri",
@@ -39,7 +39,7 @@ EXPERIMENTS = [
         "acceleration_factors": [4],
         "center_fractions": [0.08],
         "mask_type": "random",
-        "encoders": ["patch", "patch", "patch"],
+        "encoders": ["axial", "axial", "axial"],
         "attn_type": "phase_aware",
         "lambda_schedule": "hard",
         "loss_mode": "final_only",
@@ -53,7 +53,7 @@ EXPERIMENTS = [
     },
     {
         "prefix": "fastMRI",
-        "name": "dctnn_real_valued_hard_lambda_r4_100epochs",
+        "name": "dctnn_axial_real_valued_hard_lambda_r4_100epochs",
         "hpc_backend": "amd",
         "model_type": "dctnn",
         "dataset": "fastmri",
@@ -63,7 +63,7 @@ EXPERIMENTS = [
         "acceleration_factors": [4],
         "center_fractions": [0.08],
         "mask_type": "random",
-        "encoders": ["patch", "patch", "patch"],
+        "encoders": ["axial", "axial", "axial"],
         "attn_type": "real_valued",
         "lambda_schedule": "hard",
         "loss_mode": "final_only",
