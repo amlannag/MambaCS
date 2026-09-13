@@ -9,7 +9,7 @@ import os
 import torch
 
 from config import Config
-from train_utils import build_model
+from train_utils import build_model, validate_resume_fixed_apt_config
 from normalizer import invert_normalization, reconstruction_to_image_magnitude
 
 
@@ -29,6 +29,7 @@ _MODEL_KEYS = {
     "lambda_schedule", "lambda_start", "lambda_end",
     "pos_emb_type", "attn_type", "rope_theta", "rope_mixed_rotate",
     "mask_vertical_attn", "ffn_sharing", "flattening_order",
+    "apt_layout", "apt_embed_dim", "apt_rope_ref_grid", "apt_use_abs_pos_emb",
 }
 
 
@@ -65,7 +66,7 @@ def _flat_to_cfg(flat: dict) -> Config:
         if k in {
             "image_size", "patch_size", "reconformer_num_ch", "reconformer_down_scales",
             "reconformer_num_heads", "reconformer_depths", "reconformer_window_sizes",
-            "reconformer_use_checkpoint",
+            "reconformer_use_checkpoint", "apt_rope_ref_grid",
         } and isinstance(v, list):
             v = tuple(v)
         setattr(cfg, k, v)
@@ -112,22 +113,26 @@ def load_experiment_model(exp_dir: str, device=None):
     config_path = os.path.join(exp_dir, "config.json")
     ckpt_path = os.path.join(exp_dir, "best_model.pth")
 
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(f"config.json not found in {exp_dir}")
-
-    with open(config_path) as f:
-        flat = _config_to_flat(json.load(f))
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True) if os.path.exists(ckpt_path) else None
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            flat = _config_to_flat(json.load(f))
+    elif ckpt is not None and isinstance(ckpt.get("config"), dict):
+        flat = _config_to_flat(ckpt["config"])
+    else:
+        raise FileNotFoundError(f"No config.json or checkpoint-embedded configuration found in {exp_dir}")
     if flat.get("norm") == "kspace_companding" and "companding_centering" not in flat:
         flat["companding_centering"] = "legacy"
 
     cfg = _flat_to_cfg(flat)
+    if ckpt is not None and isinstance(ckpt.get("config"), dict):
+        validate_resume_fixed_apt_config(cfg, ckpt["config"])
     model = build_model(cfg).to(device)
 
     ckpt_meta = {}
-    if os.path.exists(ckpt_path):
-        ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
+    if ckpt is not None:
         sd = _migrate_complex_layernorm(ckpt["model"])
-        missing, unexpected = model.load_state_dict(sd, strict=False)
+        missing, unexpected = model.load_state_dict(sd, strict="fixed_apt" in cfg.encoders)
         if missing or unexpected:
             print(f"  [WARN] {os.path.basename(exp_dir)}: "
                   f"{len(missing)} missing, {len(unexpected)} unexpected keys "

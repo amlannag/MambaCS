@@ -2,16 +2,19 @@ import torch
 from torch import nn
 from .dc import KSpace_DC
 from .vit import TokenVIT, axVIT, CrossAttentionVIT
+from .fixed_apt import FixedAPTVIT
 from .encoders import TokenEncoder, axialEncoder, crossAxialEncoder, pair
 from .util import FeedForward, _COMPLEX_ATTN_TYPES, validate_flattening_order
 
-__all__ = ['cascadeNet', 'TokenVIT', 'axVIT', 'CrossAttentionVIT', 'TokenEncoder', 'axialEncoder', 'crossAxialEncoder']
+__all__ = ['cascadeNet', 'TokenVIT', 'axVIT', 'CrossAttentionVIT', 'FixedAPTVIT', 'TokenEncoder', 'axialEncoder', 'crossAxialEncoder']
 
 
 def _stage_ffn_spec(N, cls, args):
     """Return (d_model, dim_feedforward, dropout, activation, is_complex) for one cascade stage."""
     num_ch = args.get("numCh", 1)
-    if cls is TokenVIT:
+    if cls is FixedAPTVIT:
+        d_model = args.get("d_model", 256)
+    elif cls is TokenVIT:
         patch_h, patch_w = pair(args.get("patch_size", (16, 16)))
         d_model = args.get("d_model") or (patch_h * patch_w * num_ch)
     else:
@@ -20,7 +23,8 @@ def _stage_ffn_spec(N, cls, args):
     dim_ff = args.get("dim_feedforward") or int(d_model * 4)
     dropout = args.get("dropout", 0.1)
     activation = args.get("activation", "relu")
-    is_complex = args.get("attn_type", "standard") in _COMPLEX_ATTN_TYPES
+    default_attn_type = "complex" if cls is FixedAPTVIT else "standard"
+    is_complex = args.get("attn_type", default_attn_type) in _COMPLEX_ATTN_TYPES
     return (d_model, dim_ff, dropout, activation, is_complex)
 
 
@@ -80,6 +84,8 @@ class cascadeNet(nn.Module):
                 f"Unknown ffn_sharing '{ffn_sharing}'. Choose from: none, per_stage, global"
             )
         self.ffn_sharing = ffn_sharing
+        if FixedAPTVIT in encList and learning != 'k_space':
+            raise ValueError("fixed_apt requires learning='k_space'")
         for args in encArgs:
             order = args.get('flattening_order', 'row_major')
             validate_flattening_order(order, args.get('tokenizer_type'))

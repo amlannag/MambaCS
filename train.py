@@ -26,7 +26,8 @@ from train_config import EXPERIMENTS
 from DcTNN.lambda_scheduler import LambdaScheduler
 from train_utils import (FastMRIMaskGenerator, build_model, resolve_data_dirs,
                          simulate_undersampling, unique_model_parameters,
-                         validate_resume_flattening_order)
+                         validate_resume_flattening_order, validate_resume_fixed_apt_config)
+from DcTNN.fixed_apt import resolve_fixed_apt_layout
 from DcTNN.loss import PerpendicularLoss, build_loss
 from DcTNN.dc import ifft_2d
 from normalizer import model_output_to_raw_kspace, reconstruction_to_image_magnitude
@@ -80,9 +81,33 @@ def config_to_dict(cfg):
     Convert a config object to a dictionary.
     This is used for saving the config as JSON and logging to wandb."""
 
-    if dataclasses.is_dataclass(cfg):
-        return {k: config_to_dict(v) for k, v in dataclasses.asdict(cfg).items()}
-    return cfg
+    if not dataclasses.is_dataclass(cfg):
+        return cfg
+    flat = dataclasses.asdict(cfg)
+    if "fixed_apt" not in flat.get("encoders", []):
+        return flat
+    flat["apt_layout"] = resolve_fixed_apt_layout(flat.get("apt_layout"))
+    data_keys = {
+        "dataset", "data_dir", "val_data_dir", "kspace_key", "image_size",
+        "num_channels", "acceleration_factors", "center_fractions", "mask_type",
+        "val_fraction", "seed", "max_train_files", "max_val_files", "norm",
+        "robust_clip", "robust_shift", "companding_p", "companding_a", "companding_centering",
+    }
+    model_keys = {
+        "model_type", "encoders", "patch_size", "axial_row_stride", "nhead_patch", "nhead_axial",
+        "layer_no", "num_encoder_layers", "learned_lambda", "learning",
+        "reconformer_num_ch", "reconformer_num_iter", "reconformer_down_scales",
+        "reconformer_num_heads", "reconformer_depths", "reconformer_window_sizes",
+        "reconformer_mlp_ratio", "reconformer_resi_connection", "reconformer_use_checkpoint",
+        "lambda_schedule", "lambda_start", "lambda_end", "pos_emb_type", "attn_type",
+        "rope_theta", "rope_mixed_rotate", "mask_vertical_attn", "ffn_sharing", "flattening_order",
+        "apt_layout", "apt_embed_dim", "apt_rope_ref_grid", "apt_use_abs_pos_emb",
+    }
+    return {
+        "data": {key: value for key, value in flat.items() if key in data_keys},
+        "model": {key: value for key, value in flat.items() if key in model_keys},
+        "train": {key: value for key, value in flat.items() if key not in data_keys | model_keys},
+    }
 
 def append_metrics(path, record):
     history = []
@@ -898,11 +923,19 @@ def main():
         saved_config_path = os.path.join(os.path.dirname(cfg.resume), "config.json")
         if os.path.exists(saved_config_path):
             with open(saved_config_path) as f:
-                validate_resume_flattening_order(cfg, json.load(f))
+                saved_config = json.load(f)
+            validate_resume_flattening_order(cfg, saved_config)
+            validate_resume_fixed_apt_config(cfg, saved_config)
         phase(f"Loading checkpoint {cfg.resume}")
         checkpoint = torch.load(cfg.resume, map_location="cpu")
         if isinstance(checkpoint.get("config"), dict):
             validate_resume_flattening_order(cfg, checkpoint["config"])
+            validate_resume_fixed_apt_config(cfg, checkpoint["config"])
+        elif "fixed_apt" in cfg.encoders and not os.path.exists(saved_config_path):
+            raise ValueError("fixed_apt resume requires saved configuration with an explicit apt_layout")
+
+    if "fixed_apt" in cfg.encoders:
+        cfg.apt_layout = resolve_fixed_apt_layout(cfg.apt_layout)
 
     phase("Resolving batch size...")
     if cfg.auto_batch_size and device.type == "cuda":
@@ -914,8 +947,9 @@ def main():
     cfg.batch_size = _resolve_batch_size(cfg, train_ds, device, checkpoint=checkpoint)
     _seed_everything(cfg.seed)
 
+    grouped_config = config_to_dict(cfg)
     with open(config_path, 'w') as f:
-        json.dump(config_to_dict(cfg), f, indent=2)
+        json.dump(grouped_config, f, indent=2)
 
     _WANDB_PROJECT = {"fastmri": "fastMRI", "oasis": "OASIS"}
     phase("Initializing Weights & Biases...")
@@ -923,7 +957,7 @@ def main():
     wandb.init(
         project=_WANDB_PROJECT.get(cfg.dataset, "MambaCS"),
         name=f"{cfg.prefix}_{cfg.name}",
-        config=config_to_dict(cfg),
+        config=grouped_config,
     )
     phase(f"W&B ready in {time.time() - t_wandb:.1f}s")
 
@@ -1091,6 +1125,7 @@ def main():
             torch.save({
                 'epoch':         epoch,
                 'model':         model.state_dict(),
+                'config':        grouped_config,
                 'optimizer':     optimizer.state_dict(),
                 'scheduler':     scheduler.state_dict(),
                 'checkpoint_metric': cfg.checkpoint_metric,
@@ -1104,6 +1139,7 @@ def main():
         torch.save({
             'epoch':         epoch,
             'model':         model.state_dict(),
+            'config':        grouped_config,
             'optimizer':     optimizer.state_dict(),
             'scheduler':     scheduler.state_dict(),
             'checkpoint_metric': cfg.checkpoint_metric,

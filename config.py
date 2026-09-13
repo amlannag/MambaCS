@@ -82,6 +82,10 @@ class Config:
     )
 
     patch_size: tuple = (16, 16)
+    apt_layout: Optional[dict] = None
+    apt_embed_dim: int = 256
+    apt_rope_ref_grid: Optional[Tuple[int, int]] = None
+    apt_use_abs_pos_emb: bool = False
     axial_row_stride: int = 1
     nhead_patch: int = 8
     nhead_axial: int = 8

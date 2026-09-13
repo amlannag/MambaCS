@@ -6,7 +6,9 @@ import torch
 from fastmri.data.subsample import EquiSpacedMaskFunc, RandomMaskFunc
 from fastmri.data.transforms import apply_mask
 
-from DcTNN.model import TokenVIT, axVIT, CrossAttentionVIT, cascadeNet
+from DcTNN.model import TokenVIT, axVIT, CrossAttentionVIT, FixedAPTVIT, cascadeNet
+from DcTNN.fixed_apt import resolve_fixed_apt_layout
+from DcTNN.util import _COMPLEX_ATTN_TYPES
 from ReconFormer import ReconFormerBaseline
 import normalizer as _norm
 
@@ -46,6 +48,22 @@ def psnr(pred, target, max_val=None):
 
 
 _ENCODER_ARGS = {
+    "fixed_apt": lambda cfg: (
+        FixedAPTVIT,
+        dict(
+            layerNo=cfg.layer_no,
+            numCh=cfg.num_channels,
+            d_model=getattr(cfg, "apt_embed_dim", 256),
+            nhead=cfg.nhead_patch,
+            num_encoder_layers=cfg.num_encoder_layers,
+            dim_feedforward=None,
+            attn_type=cfg.attn_type,
+            layout=resolve_fixed_apt_layout(getattr(cfg, "apt_layout", None)),
+            rope_theta=cfg.rope_theta,
+            rope_ref_grid=getattr(cfg, "apt_rope_ref_grid", None),
+            use_abs_pos_emb=getattr(cfg, "apt_use_abs_pos_emb", False),
+        ),
+    ),
     "axial": lambda cfg: (
         axVIT,
         dict(
@@ -127,8 +145,76 @@ def validate_resume_flattening_order(cfg, saved_config):
         )
 
 
+def validate_resume_fixed_apt_config(cfg, saved_config):
+    saved_model = saved_config.get("model", saved_config)
+    saved_data = saved_config.get("data", saved_config)
+    saved_encoders = saved_model.get("encoders", [])
+    requested_encoders = getattr(cfg, "encoders", [])
+    if "fixed_apt" not in saved_encoders and "fixed_apt" not in requested_encoders:
+        return
+    validate_resume_flattening_order(cfg, saved_config)
+    if list(saved_encoders) != list(requested_encoders):
+        raise ValueError("Checkpoint fixed_apt encoders do not match requested encoders")
+    if not isinstance(saved_model.get("apt_layout"), dict):
+        raise ValueError("Checkpoint fixed_apt config must contain an explicit apt_layout dictionary")
+    saved_layout = resolve_fixed_apt_layout(saved_model["apt_layout"])
+    requested_layout = resolve_fixed_apt_layout(getattr(cfg, "apt_layout", None))
+    for key in ("version", "image_size", "base_patch_size", "leaves"):
+        if saved_layout[key] != requested_layout[key]:
+            raise ValueError(f"Checkpoint fixed_apt apt_layout {key} does not match requested layout")
+    defaults = {
+        "apt_embed_dim": 256,
+        "apt_use_abs_pos_emb": False,
+        "rope_theta": 100.0,
+        "nhead_patch": 8,
+        "pos_emb_type": "APE",
+        "attn_type": "standard",
+        "learning": "k_space",
+        "layer_no": 1,
+        "num_encoder_layers": 2,
+        "ffn_sharing": "none",
+        "model_type": "dctnn",
+    }
+    for key, default in defaults.items():
+        saved_value = saved_model.get(key, default)
+        requested_value = getattr(cfg, key, default)
+        if saved_value != requested_value:
+            raise ValueError(
+                f"Checkpoint fixed_apt {key}={saved_value!r} does not match "
+                f"requested {key}={requested_value!r}"
+            )
+    saved_ref = saved_model.get("apt_rope_ref_grid")
+    requested_ref = getattr(cfg, "apt_rope_ref_grid", None)
+    default_ref = tuple(size // saved_layout["base_patch_size"] for size in saved_layout["image_size"])
+    saved_ref = default_ref if saved_ref is None else tuple(saved_ref)
+    requested_ref = default_ref if requested_ref is None else tuple(requested_ref)
+    if saved_ref != requested_ref:
+        raise ValueError("Checkpoint fixed_apt apt_rope_ref_grid does not match requested apt_rope_ref_grid")
+    saved_size = saved_data.get("image_size", saved_layout["image_size"])
+    saved_size = (saved_size, saved_size) if isinstance(saved_size, int) else tuple(saved_size)
+    requested_size = (cfg.image_size, cfg.image_size) if isinstance(cfg.image_size, int) else tuple(cfg.image_size)
+    if saved_size != requested_size:
+        raise ValueError("Checkpoint fixed_apt image_size does not match requested image_size")
+    if saved_data.get("num_channels", 1) != cfg.num_channels:
+        raise ValueError("Checkpoint fixed_apt num_channels does not match requested num_channels")
+
+
 def _build_model_impl(cfg):
     flattening_order = getattr(cfg, "flattening_order", "row_major")
+    if "fixed_apt" in cfg.encoders:
+        if cfg.model_type != "dctnn":
+            raise ValueError("fixed_apt requires model_type='dctnn'")
+        if cfg.learning != "k_space":
+            raise ValueError("fixed_apt requires learning='k_space'")
+        if flattening_order != "row_major":
+            raise ValueError("fixed_apt requires flattening_order='row_major'")
+        if cfg.pos_emb_type != "Rope-Axial":
+            raise ValueError("fixed_apt requires pos_emb_type='Rope-Axial'")
+        if cfg.attn_type not in _COMPLEX_ATTN_TYPES:
+            raise ValueError(
+                "fixed_apt requires a native complex attention type; "
+                f"choose from {sorted(_COMPLEX_ATTN_TYPES)}"
+            )
     if flattening_order not in ("row_major", "dc_radial"):
         raise ValueError(
             f"Unknown flattening_order {flattening_order!r}. Choose from: row_major, dc_radial"
@@ -211,10 +297,11 @@ def build_model_from_config_dict(cfg_dict):
         pass
 
     cfg = DictConfig()
-    data_cfg = cfg_dict["data"]
-    model_cfg = cfg_dict["model"]
+    data_cfg = cfg_dict.get("data", cfg_dict)
+    model_cfg = cfg_dict.get("model", cfg_dict)
 
-    cfg.image_size = data_cfg["image_size"]
+    image_size = data_cfg["image_size"]
+    cfg.image_size = (image_size, image_size) if isinstance(image_size, int) else tuple(image_size)
     cfg.num_channels = data_cfg.get("num_channels", 1)
     cfg.model_type = model_cfg.get("model_type", "dctnn")
     cfg.encoders = model_cfg.get("encoders", ["patch", "patch", "patch"])
@@ -229,9 +316,15 @@ def build_model_from_config_dict(cfg_dict):
     cfg.reconformer_use_checkpoint = tuple(model_cfg.get(
         "reconformer_use_checkpoint", (False, False, True, True, False, False)
     ))
-    cfg.patch_size = model_cfg["patch_size"]
-    cfg.nhead_patch = model_cfg["nhead_patch"]
-    cfg.nhead_axial = model_cfg["nhead_axial"]
+    patch_size = model_cfg.get("patch_size", (16, 16))
+    cfg.patch_size = (patch_size, patch_size) if isinstance(patch_size, int) else tuple(patch_size)
+    cfg.apt_layout = model_cfg.get("apt_layout")
+    cfg.apt_embed_dim = model_cfg.get("apt_embed_dim", 256)
+    apt_ref_grid = model_cfg.get("apt_rope_ref_grid")
+    cfg.apt_rope_ref_grid = None if apt_ref_grid is None else tuple(apt_ref_grid)
+    cfg.apt_use_abs_pos_emb = model_cfg.get("apt_use_abs_pos_emb", False)
+    cfg.nhead_patch = model_cfg.get("nhead_patch", 8)
+    cfg.nhead_axial = model_cfg.get("nhead_axial", 8)
     cfg.layer_no = model_cfg["layer_no"]
     cfg.num_encoder_layers = model_cfg["num_encoder_layers"]
     cfg.learning = model_cfg.get("learning", "k_space")
