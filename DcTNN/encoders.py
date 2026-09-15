@@ -236,7 +236,8 @@ class TokenEncoder(BaseTokenEncoder):
                                              is_complex=self.is_complex, flattening_order=flattening_order)
         self.mlp_head = get_mlp_head(tokenizer_type, d_model, patch_dim, patch_height, patch_width,
                                      grid_h, numCh, image_height=image_height, image_width=image_width,
-                                     is_complex=self.is_complex, flattening_order=flattening_order)
+                                     is_complex=self.is_complex, flattening_order=flattening_order,
+                                     layer_norm_eps=layer_norm_eps)
         
         self.dropout = ComplexDropout(dropout) if self.is_complex else nn.Dropout(dropout)
 
@@ -277,7 +278,8 @@ class axialEncoder(nn.Module):
 
         self.horizontal_mlp_head, self.vertical_mlp_head = get_mlp_head(
             "axial", d_model, numCh=numCh, image_height=image_height, image_width=image_width,
-            row_stride=row_stride, is_complex=self.is_complex, flattening_order=flattening_order)
+            row_stride=row_stride, is_complex=self.is_complex, flattening_order=flattening_order,
+            layer_norm_eps=layer_norm_eps)
 
         self.dropout = ComplexDropout(dropout) if self.is_complex else nn.Dropout(dropout)
 
@@ -372,7 +374,7 @@ class crossAxialEncoder(nn.Module):
             nn.Linear(image_height * numCh, d_model, dtype=dtype),
         )
         self.vertical_mlp_head = nn.Sequential(
-            norm(d_model),
+            norm(d_model, eps=layer_norm_eps),
             nn.Linear(d_model, image_height * numCh, dtype=dtype),
             v_from,
         )

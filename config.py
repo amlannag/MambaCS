@@ -91,6 +91,7 @@ class Config:
     nhead_axial: int = 8
     layer_no: int = 1
     num_encoder_layers: int = 2
+    layer_norm_eps: float = 1e-5
     learned_lambda: bool = True
     # Domain the model operates in: "k_space", "image", or "complex_image"
     learning: str = "k_space"

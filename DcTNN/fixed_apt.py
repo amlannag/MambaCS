@@ -206,11 +206,11 @@ class FixedAPTPatchEmbedding(nn.Module):
 
 
 class FixedAPTReconstructionHead(nn.Module):
-    def __init__(self, geometry, num_channels=1, embed_dim=256):
+    def __init__(self, geometry, num_channels=1, embed_dim=256, layer_norm_eps=1e-5):
         super().__init__()
         self.geometry = geometry
         self.num_channels = num_channels
-        self.norm = ComplexLayerNorm(embed_dim)
+        self.norm = ComplexLayerNorm(embed_dim, eps=layer_norm_eps)
         self.projections = nn.ModuleDict({str(size): nn.Linear(embed_dim, num_channels * size * size, dtype=torch.cfloat)
                                          for size in geometry.patch_sizes})
         for projection in self.projections.values():
@@ -242,7 +242,7 @@ class FixedAPTEncoder(nn.Module):
         freqs = fixed_apt_rope(geometry.positions, d_model // nhead, rope_theta)
         self.d_model, self.nhead, self.is_complex = d_model, nhead, True
         self.to_embedding = FixedAPTPatchEmbedding(geometry, numCh, d_model, use_abs_pos_emb)
-        self.mlp_head = FixedAPTReconstructionHead(geometry, numCh, d_model)
+        self.mlp_head = FixedAPTReconstructionHead(geometry, numCh, d_model, layer_norm_eps=layer_norm_eps)
         self.dropout = ComplexDropout(dropout)
         dim_feedforward = dim_feedforward if dim_feedforward is not None else 4 * d_model
         layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation, layer_norm_eps,

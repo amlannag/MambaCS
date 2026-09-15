@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -37,12 +39,16 @@ class ComplexLayerNorm(nn.Module):
     used in circularly-symmetric normalization. This properly decorrelates
     real and imaginary parts without assuming equal variance or zero correlation.
     """
-    def __init__(self, normalized_shape, eps=1e-8):
+    _version = 2
+
+    def __init__(self, normalized_shape, eps=1e-8, whitening_version='stable'):
         super().__init__()
         if isinstance(normalized_shape, int):
             normalized_shape = (normalized_shape,)
+        if not normalized_shape or any(type(size) is not int or size <= 0 for size in normalized_shape):
+            raise ValueError('normalized_shape must contain positive integers')
         self.normalized_shape = torch.Size(normalized_shape)
-        self.eps = eps
+        self._set_whitening(whitening_version, eps)
 
         inv_sqrt2 = 2 ** -0.5
         self.gamma_rr = nn.Parameter(torch.full(self.normalized_shape, inv_sqrt2))
@@ -50,7 +56,71 @@ class ComplexLayerNorm(nn.Module):
         self.gamma_ri = nn.Parameter(torch.zeros(self.normalized_shape))
         self.beta = nn.Parameter(torch.zeros(self.normalized_shape, dtype=torch.cfloat))
 
+    def _set_whitening(self, version, eps):
+        if version not in ('legacy', 'stable'):
+            raise ValueError(f'Unknown complex whitening version: {version!r}')
+        eps = float(eps)
+        if not math.isfinite(eps) or eps <= 0 or not 0 < eps * eps < float('inf'):
+            raise ValueError('eps must be positive and finite with a representable nonzero square')
+        self.whitening_version = version
+        self.eps = eps
+
+    def extra_repr(self):
+        return f'{tuple(self.normalized_shape)}, eps={self.eps}, whitening_version={self.whitening_version!r}'
+
+    def _save_to_state_dict(self, destination, prefix, keep_vars):
+        super()._save_to_state_dict(destination, prefix, keep_vars)
+        version = 1 if self.whitening_version == 'legacy' else 2
+        destination[prefix + '_whitening_state'] = torch.tensor([version, self.eps], dtype=torch.float64)
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+        saved = state_dict.pop(prefix + '_whitening_state', None)
+        try:
+            if saved is None:
+                if local_metadata.get('version', 1) >= 2:
+                    raise ValueError('Missing whitening state in a versioned checkpoint')
+                self._set_whitening('legacy', 1e-8)
+            else:
+                if (not isinstance(saved, torch.Tensor) or saved.shape != (2,)
+                        or not saved.is_floating_point() or not torch.isfinite(saved).all()):
+                    raise ValueError('Invalid whitening state')
+                version, eps = saved.detach().cpu().tolist()
+                if version not in (1, 2):
+                    raise ValueError(f'Unsupported whitening version: {version}')
+                self._set_whitening('legacy' if version == 1 else 'stable', eps)
+        except (ValueError, TypeError) as error:
+            error_msgs.append(f'{prefix}complex whitening configuration: {error}')
+            return
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
+
     def forward(self, x):
+        if self.whitening_version == 'legacy':
+            return self._legacy_forward(x)
+        if not x.is_complex():
+            raise TypeError('ComplexLayerNorm requires complex-valued input')
+        dimensions = len(self.normalized_shape)
+        if x.ndim < dimensions or x.shape[-dimensions:] != self.normalized_shape:
+            raise ValueError(f'Expected trailing dimensions {tuple(self.normalized_shape)}, got {tuple(x.shape)}')
+        leading = x.shape[:-dimensions]
+        features = math.prod(self.normalized_shape)
+        r = x.real.to(torch.float64).reshape(*leading, features)
+        i = x.imag.to(torch.float64).reshape(*leading, features)
+        r = r - r.mean(dim=-1, keepdim=True)
+        i = i - i.mean(dim=-1, keepdim=True)
+        rr, ii = r.square().mean(-1), i.square().mean(-1)
+        ri = (r * i).mean(-1)
+        determinant = (rr * ii - ri.square()).clamp_min(0) + self.eps * (rr + ii) + self.eps ** 2
+        s = determinant.clamp_min(self.eps ** 2).sqrt()
+        t = (rr + ii + 2 * self.eps + 2 * s).sqrt()
+        matrix = torch.stack((rr + self.eps + s, ri, ri, ii + self.eps + s), dim=-1).reshape(*leading, 2, 2)
+        centered = torch.stack((r, i), dim=-2)
+        whitened = torch.linalg.solve(matrix, t[..., None, None] * centered)
+        real_hat, imag_hat = (part.reshape(x.shape) for part in whitened.unbind(-2))
+        real_out = self.gamma_rr * real_hat + self.gamma_ri * imag_hat + self.beta.real
+        imag_out = self.gamma_ri * real_hat + self.gamma_ii * imag_hat + self.beta.imag
+        return torch.complex(real_out, imag_out).to(x.dtype)
+
+    def _legacy_forward(self, x):
         mean = torch.mean(x, dim=-1, keepdim=True)
         centered = x - mean
 
@@ -280,7 +350,7 @@ def get_from_embedding(tokenizer_type, patch_height=None, patch_width=None, grid
 
 def get_mlp_head(tokenizer_type, d_model, patch_dim=None, patch_height=None, patch_width=None,
                  grid_h=None, numCh=None, image_height=None, image_width=None, row_stride=1, is_complex=False,
-                 flattening_order='row_major'):
+                 flattening_order='row_major', layer_norm_eps=1e-5):
     validate_flattening_order(flattening_order, tokenizer_type)
     norm = ComplexLayerNorm if is_complex else nn.LayerNorm
     dtype = torch.cfloat if is_complex else None
@@ -288,7 +358,7 @@ def get_mlp_head(tokenizer_type, d_model, patch_dim=None, patch_height=None, pat
         from_emb = get_from_embedding(tokenizer_type, patch_height, patch_width, grid_h, numCh,
                                       image_height, image_width, flattening_order=flattening_order)
         seq = nn.Sequential(
-            norm(d_model),
+            norm(d_model, eps=layer_norm_eps),
             nn.Linear(d_model, patch_dim, dtype=dtype),
             from_emb,
         )
@@ -300,8 +370,8 @@ def get_mlp_head(tokenizer_type, d_model, patch_dim=None, patch_height=None, pat
         h_from, v_from = get_from_embedding("axial", numCh=numCh, image_height=image_height,
                                             image_width=image_width, row_stride=row_stride,
                                             flattening_order=flattening_order)
-        h_seq = nn.Sequential(norm(d_model), nn.Linear(d_model, row_stride * image_width * numCh, dtype=dtype), h_from)
-        v_seq = nn.Sequential(norm(d_model), nn.Linear(d_model, image_height * numCh, dtype=dtype), v_from)
+        h_seq = nn.Sequential(norm(d_model, eps=layer_norm_eps), nn.Linear(d_model, row_stride * image_width * numCh, dtype=dtype), h_from)
+        v_seq = nn.Sequential(norm(d_model, eps=layer_norm_eps), nn.Linear(d_model, image_height * numCh, dtype=dtype), v_from)
         if is_complex:
             apply_trabelsi_(h_seq[1], criterion="glorot")
             apply_trabelsi_(v_seq[1], criterion="glorot")

@@ -244,8 +244,8 @@ class TransformerEncoderLayer(nn.Module):
         self.attn = get_attention(attn_type, d_model, nhead, dropout, freqs_cis)
         self.ff = ff if ff is not None else FeedForward(d_model, dim_feedforward, dropout, activation, is_complex)
         if is_complex:
-            self.norm1 = ComplexLayerNorm(d_model)
-            self.norm2 = ComplexLayerNorm(d_model)
+            self.norm1 = ComplexLayerNorm(d_model, eps=layer_norm_eps)
+            self.norm2 = ComplexLayerNorm(d_model, eps=layer_norm_eps)
             self.drop = ComplexDropout(dropout)
         else:
             self.norm1 = nn.LayerNorm(d_model, eps=layer_norm_eps)
@@ -284,9 +284,9 @@ class CrossAttentionEncoderLayer(nn.Module):
             )
         self.attn = ComplexCrossAttention(d_model, nhead, dropout, freqs_cis)
         self.ff = ff if ff is not None else FeedForward(d_model, dim_feedforward, dropout, activation, True)
-        self.norm_q = ComplexLayerNorm(d_model)
-        self.norm_kv = ComplexLayerNorm(d_model)
-        self.norm2 = ComplexLayerNorm(d_model)
+        self.norm_q = ComplexLayerNorm(d_model, eps=layer_norm_eps)
+        self.norm_kv = ComplexLayerNorm(d_model, eps=layer_norm_eps)
+        self.norm2 = ComplexLayerNorm(d_model, eps=layer_norm_eps)
         self.drop = ComplexDropout(dropout)
 
     def forward(self, q, kv, attn_mask=None, q_positions=None, kv_positions=None):

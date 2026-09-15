@@ -107,8 +107,38 @@ class cascadeNet(nn.Module):
         sampleMask : [H, W]
         Returns same domain as xPrev. When return_intermediates=True, also returns
         the ordered list of post-DC stage states.
+
+        Data consistency runs directly in the model's normalized domain: the raw
+        measured k-space is converted into the normalized domain once (using the
+        same transform as the input), and each stage blends the candidate with it
+        in place. Nothing is converted back to raw units inside the cascade; that
+        happens only at inference/validation via model_output_to_raw_kspace.
+        For k-space learning with k-space-domain normalization (robust_shifted,
+        kspace_companding, log_kspace, fastmri_magnitude) the transform and the
+        DC both stay in k-space with no image-domain round trip. The raw-domain
+        path is retained for the real-image learning mode or missing stats.
         """
-        from normalizer import model_output_to_raw_kspace, raw_kspace_to_model_output
+        from normalizer import apply_normalization, model_output_to_raw_kspace, raw_kspace_to_model_output
+        from DcTNN.dc import fft_2d, ifft_2d
+
+        use_normalized_dc = stats is not None and self.learning in ("k_space", "complex_image")
+        normalization_domain = stats.get("normalization_domain", self.learning) if stats else self.learning
+        # k-space learning always operates on k-space tensors, so DC blends the
+        # candidate's k-space coefficients directly. complex_image operates on
+        # images, so the blend happens in k-space via one FFT/IFFT pair.
+        dc_domain_is_k_space = use_normalized_dc and self.learning == "k_space"
+        y_model = None
+        if use_normalized_dc:
+            if normalization_domain == "k_space":
+                # K-space-domain normalization (robust_shifted, kspace_companding,
+                # log_kspace, fastmri_magnitude): normalize the measured k-space
+                # directly, no image-domain detour at all.
+                y_model = apply_normalization(y, stats)
+            else:
+                # Image-domain normalization (zscore, complex_image): normalize the
+                # measured k-space in the model's image domain and FFT once so DC
+                # still blends k-space coefficients without denormalizing.
+                y_model = fft_2d(apply_normalization(ifft_2d(y), stats))
 
         x = xPrev
         intermediates = []
@@ -120,15 +150,25 @@ class cascadeNet(nn.Module):
             else:
                 lamb_i = None
             candidate = x + transformer(x, col_mask=sampleMask)
-            raw_candidate_kspace = model_output_to_raw_kspace(
-                candidate, stats, self.learning
-            )
-            raw_corrected_kspace = KSpace_DC(
-                raw_candidate_kspace, y, sampleMask, lamb_i
-            )
-            x = raw_kspace_to_model_output(
-                raw_corrected_kspace, stats, self.learning
-            )
+            if use_normalized_dc:
+                candidate_kspace = candidate if dc_domain_is_k_space else fft_2d(candidate)
+                if lamb_i is None:
+                    corrected = (1 - sampleMask) * candidate_kspace + sampleMask * y_model
+                else:
+                    corrected = (1 - sampleMask) * candidate_kspace + sampleMask * (
+                        candidate_kspace + lamb_i * y_model
+                    ) / (1 + lamb_i)
+                x = corrected if dc_domain_is_k_space else ifft_2d(corrected)
+            else:
+                raw_candidate_kspace = model_output_to_raw_kspace(
+                    candidate, stats, self.learning
+                )
+                raw_corrected_kspace = KSpace_DC(
+                    raw_candidate_kspace, y, sampleMask, lamb_i
+                )
+                x = raw_kspace_to_model_output(
+                    raw_corrected_kspace, stats, self.learning
+                )
             if return_intermediates:
                 intermediates.append(x)
         if return_intermediates:

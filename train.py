@@ -95,7 +95,7 @@ def config_to_dict(cfg):
     }
     model_keys = {
         "model_type", "encoders", "patch_size", "axial_row_stride", "nhead_patch", "nhead_axial",
-        "layer_no", "num_encoder_layers", "learned_lambda", "learning",
+        "layer_no", "num_encoder_layers", "layer_norm_eps", "learned_lambda", "learning",
         "reconformer_num_ch", "reconformer_num_iter", "reconformer_down_scales",
         "reconformer_num_heads", "reconformer_depths", "reconformer_window_sizes",
         "reconformer_mlp_ratio", "reconformer_resi_connection", "reconformer_use_checkpoint",
@@ -588,6 +588,8 @@ def validate(cfg, model, loader, accel_factors, image_size, final_criterion,
             cfg.learning,
             cfg.norm,
             kspace_us=kspace_us,
+            robust_clip=cfg.robust_clip,
+            robust_shift=cfg.robust_shift,
             companding_p=cfg.companding_p,
             companding_a=cfg.companding_a,
             companding_centering=cfg.companding_centering,
