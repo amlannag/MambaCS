@@ -103,22 +103,35 @@ class ComplexLayerNorm(nn.Module):
             raise ValueError(f'Expected trailing dimensions {tuple(self.normalized_shape)}, got {tuple(x.shape)}')
         leading = x.shape[:-dimensions]
         features = math.prod(self.normalized_shape)
-        r = x.real.to(torch.float64).reshape(*leading, features)
-        i = x.imag.to(torch.float64).reshape(*leading, features)
+        r = x.real.reshape(*leading, features)
+        i = x.imag.reshape(*leading, features)
         r = r - r.mean(dim=-1, keepdim=True)
         i = i - i.mean(dim=-1, keepdim=True)
         rr, ii = r.square().mean(-1), i.square().mean(-1)
         ri = (r * i).mean(-1)
-        determinant = (rr * ii - ri.square()).clamp_min(0) + self.eps * (rr + ii) + self.eps ** 2
-        s = determinant.clamp_min(self.eps ** 2).sqrt()
+        # Stable 2x2 whitening computed entirely in the input dtype (no FP64, no
+        # linalg.solve). Same matrix as before: s = sqrt(max(q, 0) + eps*(rr+ii) + eps^2)
+        # with q = rr*ii - ri^2, M = [[rr+eps+s, ri], [ri, ii+eps+s]], and
+        # whitened = t * M^-1 * centered, t = sqrt(rr+ii+2*eps+2*s).
+        # The inverse is applied via adj(M) * t / det(M); det(M) = s*t^2 exactly,
+        # and the adjugate products are rewritten so no term is a cancellation of
+        # two large products, keeping the closed form stable in FP32.
+        q = rr * ii - ri.square()
+        s = (q.clamp_min(0) + self.eps * (rr + ii) + self.eps ** 2).clamp_min(self.eps ** 2).sqrt()
         t = (rr + ii + 2 * self.eps + 2 * s).sqrt()
-        matrix = torch.stack((rr + self.eps + s, ri, ri, ii + self.eps + s), dim=-1).reshape(*leading, 2, 2)
-        centered = torch.stack((r, i), dim=-2)
-        whitened = torch.linalg.solve(matrix, t[..., None, None] * centered)
-        real_hat, imag_hat = (part.reshape(x.shape) for part in whitened.unbind(-2))
+        det = s * t.square() + torch.minimum(q, torch.zeros_like(q))
+        scale = (t / det)[..., None]
+        c = self.eps + s
+        rmb = r - i
+        rr_ri = rr - ri
+        ii_ri = ii - ri
+        real_hat = (ii[..., None] * rmb + c[..., None] * r + ii_ri[..., None] * i) * scale
+        imag_hat = (rr[..., None] * -rmb + c[..., None] * i + rr_ri[..., None] * r) * scale
+        real_hat = real_hat.reshape(x.shape)
+        imag_hat = imag_hat.reshape(x.shape)
         real_out = self.gamma_rr * real_hat + self.gamma_ri * imag_hat + self.beta.real
         imag_out = self.gamma_ri * real_hat + self.gamma_ii * imag_hat + self.beta.imag
-        return torch.complex(real_out, imag_out).to(x.dtype)
+        return torch.complex(real_out, imag_out)
 
     def _legacy_forward(self, x):
         mean = torch.mean(x, dim=-1, keepdim=True)
