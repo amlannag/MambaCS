@@ -434,7 +434,7 @@ def interpolate_kspace_us(kspace_us, mask, strategy):
     """
     Replace the zero-filled unmeasured k-space with an interpolated estimate.
 
-    Only Cartesian full-column masks are supported (see notebooks/radial_interpolation.py).
+    Only Cartesian full-column masks are supported (see DcTNN/radial_interpolation.py).
     Measured points are preserved exactly; only unmeasured points are filled. The returned
     tensor is only meant as the MODEL INPUT — data consistency still uses the raw measured
     k-space (simulate_undersampling returns the measured k-space as the DC input).
@@ -443,7 +443,7 @@ def interpolate_kspace_us(kspace_us, mask, strategy):
         raise ValueError(
             f"Unknown kspace_fill strategy '{strategy}'. Choose from: {sorted(KSPACE_FILL_STRATEGIES)}"
         )
-    from notebooks.radial_interpolation import radial_complex_interpolate
+    from DcTNN.radial_interpolation import radial_complex_interpolate
 
     if kspace_us.ndim != 4:
         raise ValueError(f"Expected [B, 1, H, W] k-space, got {tuple(kspace_us.shape)}")
@@ -478,7 +478,7 @@ def simulate_undersampling(
     norm=None     : no normalisation — tensors left in raw k-space units
     kspace_fill  : pre-fill the unmeasured k-space before normalisation instead of zero-filling.
                    One of "linear", "cartesian_linear", "exponential", "inverse_distance"
-                   (see notebooks/radial_interpolation.py). None/"none"/"zero_fill" = zero-fill.
+                   (see DcTNN/radial_interpolation.py). None/"none"/"zero_fill" = zero-fill.
                    The filled k-space is used as the model input; the raw measured k-space is
                    still returned as the DC input.
     """

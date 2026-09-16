@@ -99,7 +99,7 @@ class Config:
     norm: str = "zscore"
     # Pre-fill the undersampled (unmeasured) k-space BEFORE normalisation instead of
     # zero-filling: "linear", "cartesian_linear", "exponential", "inverse_distance"
-    # (see notebooks/radial_interpolation.py), or None/"zero_fill" for standard zero-fill.
+    # (see DcTNN/radial_interpolation.py), or None/"zero_fill" for standard zero-fill.
     # Only Cartesian full-column masks are supported. The fill only affects the model input;
     # data consistency still uses the raw measured k-space.
     kspace_fill: Optional[str] = None

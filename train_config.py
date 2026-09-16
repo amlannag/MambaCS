@@ -9,7 +9,7 @@ EXPERIMENTS = [
     # (instead of zeros) BEFORE normalisation. The fill only changes the model input;
     # data consistency still uses the raw measured k-space. Strategies:
     #   "linear", "cartesian_linear", "exponential", "inverse_distance"
-    # (see notebooks/linear_interpolation.ipynb and notebooks/radial_interpolation.py).
+    # (see notebooks/linear_interpolation.ipynb and DcTNN/radial_interpolation.py).
     # Requires a Cartesian full-column mask (fastmri random/equispaced masks qualify).
     # NOTE: on this data, interpolated k-space alone reconstructs to a slightly LOWER
     # image PSNR than zero-fill (phase winds too fast between measured lines) — the
@@ -101,8 +101,8 @@ EXPERIMENTS = [
     #       lambda = lambda_start + t * (lambda_end - lambda_start)
     # ---------------------------------------------------------------------------
     {
-        "prefix": "linear_interp_fastmri_mag_learned_lambda",
-        "name": "dctnn_axial_fastmri_mag_linear_fill_learned_lambda_r4",
+        "prefix": "fastmri_mag_learned_lambda",
+        "name": "dctnn_axial_fastmri_mag_learned_lambda_r4",
         "hpc_backend": "amd",
         "model_type": "dctnn",
         "resume": None,
@@ -111,7 +111,7 @@ EXPERIMENTS = [
         "image_size": (320, 320),
         "learning": "k_space",
         "norm": "fastmri_magnitude",
-        "kspace_fill": "linear",
+        "kspace_fill": None,
         "acceleration_factors": [4],
         "center_fractions": [0.08],
         "mask_type": "random",
@@ -138,8 +138,8 @@ EXPERIMENTS = [
         "ffn_sharing": "global",
     },
     {
-        "prefix": "linear_interp_fastmri_mag_lambda_linear",
-        "name": "dctnn_axial_fastmri_mag_linear_fill_lambda_linear_0to1_r4",
+        "prefix": "fastmri_mag_lambda_linear",
+        "name": "dctnn_axial_fastmri_mag_lambda_linear_0to1_r4",
         "hpc_backend": "amd",
         "model_type": "dctnn",
         "resume": None,
@@ -148,7 +148,7 @@ EXPERIMENTS = [
         "image_size": (320, 320),
         "learning": "k_space",
         "norm": "fastmri_magnitude",
-        "kspace_fill": "linear",
+        "kspace_fill": None,
         "acceleration_factors": [4],
         "center_fractions": [0.08],
         "mask_type": "random",
