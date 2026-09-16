@@ -232,12 +232,15 @@ def _build_model_impl(cfg):
         if "kaleidoscope" in cfg.encoders:
             raise ValueError("flattening_order='dc_radial' is not supported for kaleidoscope")
     if cfg.model_type == "reconformer":
-        if cfg.learning != "complex_image":
-            raise ValueError("ReconFormer requires learning='complex_image'")
+        if cfg.learning not in {"complex_image", "k_space"}:
+            raise ValueError("ReconFormer requires learning='complex_image' or 'k_space'")
+        if cfg.learning == "k_space" and cfg.norm == "reconformer":
+            raise ValueError("ReconFormer in k-space needs a k-space-compatible norm (e.g. fastmri_magnitude), not 'reconformer'")
         image_size = tuple(int(value) for value in cfg.image_size)
         if len(image_size) != 2 or image_size[0] != image_size[1]:
             raise ValueError(f"ReconFormer requires a square image_size, got {image_size}")
         return ReconFormerBaseline(
+            domain="kspace" if cfg.learning == "k_space" else "image",
             num_ch=cfg.reconformer_num_ch,
             down_scales=cfg.reconformer_down_scales,
             num_iter=cfg.reconformer_num_iter,

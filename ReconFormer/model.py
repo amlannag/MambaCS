@@ -32,8 +32,26 @@ def centered_ifft2(x: torch.Tensor) -> torch.Tensor:
     return torch.fft.fftshift(x, dim=(-2, -1))
 
 
+_VALID_DOMAINS = ("image", "kspace")
+
+
+def _validate_domain(domain: str) -> str:
+    if domain not in _VALID_DOMAINS:
+        raise ValueError(f"domain must be one of {_VALID_DOMAINS}, got {domain!r}")
+    return domain
+
+
 class DataConsistencyInKspace(nn.Module):
-    """Hard replacement of sampled coefficients in centered k-space."""
+    """
+    Hard replacement of sampled coefficients in centered k-space.
+
+    domain="image":  x is a [B,2,H,W] real/imag *image*; it is FFT'd, corrected, and IFFT'd back.
+    domain="kspace": x is already [B,2,H,W] real/imag *k-space*; the replacement is applied directly.
+    """
+
+    def __init__(self, domain: str = "image"):
+        super().__init__()
+        self.domain = _validate_domain(domain)
 
     @staticmethod
     def data_consistency(k, k0, mask):
@@ -55,8 +73,12 @@ class DataConsistencyInKspace(nn.Module):
         if mask.shape[-2:] != x.shape[-2:]:
             raise ValueError("mask spatial dimensions must match x")
 
-        k = centered_fft2(_pair_to_complex(x))
         measured = _pair_to_complex(k0)
+        if self.domain == "kspace":
+            k = _pair_to_complex(x)
+            complex_mask = mask[:, 0].to(dtype=k.real.dtype)
+            return _complex_to_pair(self.data_consistency(k, measured, complex_mask))
+        k = centered_fft2(_pair_to_complex(x))
         complex_mask = mask[:, 0].to(dtype=k.real.dtype)
         corrected = self.data_consistency(k, measured, complex_mask)
         return _complex_to_pair(centered_ifft2(corrected))
@@ -149,6 +171,7 @@ class TransBlock_UC(nn.Module):
         mlp_ratio=2.0,
         use_checkpoint=(False, False),
         resi_connection="1conv",
+        domain="image",
     ):
         super().__init__()
         if down_scale == 2:
@@ -182,7 +205,7 @@ class TransBlock_UC(nn.Module):
             nn.ConvTranspose2d(nf, out_channels, kernel1, stride1, padding=1, bias=True),
         )
         self.activation = nn.PReLU()
-        self.DC_layer = DataConsistencyInKspace()
+        self.DC_layer = DataConsistencyInKspace(domain)
 
     def forward(self, x, hidden=None, h1_att=None, h2_att=None, k0=None, mask=None):
         if hidden is None:
@@ -210,6 +233,7 @@ class TransBlock_OC(nn.Module):
         mlp_ratio=2.0,
         use_checkpoint=(False, False),
         resi_connection="1conv",
+        domain="image",
     ):
         super().__init__()
         self.encoder = nn.Sequential(
@@ -237,7 +261,7 @@ class TransBlock_OC(nn.Module):
             nn.Conv2d(nf, out_channels, 3, 1, padding=1, bias=True),
         )
         self.activation = nn.PReLU()
-        self.DC_layer = DataConsistencyInKspace()
+        self.DC_layer = DataConsistencyInKspace(domain)
 
     def forward(self, x, hidden=None, h1_att=None, h2_att=None, k0=None, mask=None):
         if hidden is None:
@@ -252,7 +276,7 @@ class TransBlock_OC(nn.Module):
 class RefineModule(nn.Module):
     """Fuse the outputs from ReconFormer's three resolution branches."""
 
-    def __init__(self, in_channels, nf, out_channels):
+    def __init__(self, in_channels, nf, out_channels, domain="image"):
         super().__init__()
         self.rm = nn.Sequential(
             nn.Conv2d(in_channels, nf, 3, 1, padding=1, bias=True),
@@ -262,7 +286,7 @@ class RefineModule(nn.Module):
             nn.Conv2d(nf, nf, 3, 1, padding=1, bias=True),
             nn.Conv2d(nf, out_channels, 3, 1, padding=1, bias=True),
         )
-        self.DC_layer = DataConsistencyInKspace()
+        self.DC_layer = DataConsistencyInKspace(domain)
 
     def forward(self, x, k0=None, mask=None):
         return self.DC_layer(self.rm(x), k0, mask)
@@ -294,10 +318,12 @@ class ReconFormer(nn.Module):
         resi_connection="1conv",
         mlp_ratio=2.0,
         use_checkpoint=(False, False, False, False, False, False),
+        domain="image",
     ):
         super().__init__()
         if in_channels != 2 or out_channels != 2:
             raise ValueError("ReconFormer requires two real/imaginary input and output channels")
+        self.domain = _validate_domain(domain)
         if not isinstance(img_size, int) or img_size <= 0:
             raise ValueError(f"img_size must be a positive integer, got {img_size!r}")
         if not isinstance(num_iter, int) or num_iter < 1:
@@ -323,6 +349,7 @@ class ReconFormer(nn.Module):
             mlp_ratio=mlp_ratio,
             use_checkpoint=(use_checkpoint[0], use_checkpoint[1]),
             resi_connection=resi_connection,
+            domain=domain,
         )
         self.block2 = TransBlock_UC(
             in_channels=in_channels,
@@ -336,6 +363,7 @@ class ReconFormer(nn.Module):
             mlp_ratio=mlp_ratio,
             use_checkpoint=(use_checkpoint[2], use_checkpoint[3]),
             resi_connection=resi_connection,
+            domain=domain,
         )
         self.block3 = TransBlock_OC(
             in_channels=in_channels,
@@ -349,11 +377,13 @@ class ReconFormer(nn.Module):
             mlp_ratio=mlp_ratio,
             use_checkpoint=(use_checkpoint[4], use_checkpoint[5]),
             resi_connection=resi_connection,
+            domain=domain,
         )
         self.RM = RefineModule(
             in_channels=out_channels * 3,
             nf=num_ch[2],
             out_channels=out_channels,
+            domain=domain,
         )
 
     def forward(self, x, k0=None, mask=None):
@@ -412,7 +442,15 @@ class ReconFormer(nn.Module):
 
 
 class ReconFormerBaseline(ReconFormer):
-    """MambaCS adapter for normalized complex-image ReconFormer inputs."""
+    """
+    MambaCS adapter for normalized complex ReconFormer inputs.
+
+    domain="image":  model_input is the normalized complex image (learning="complex_image");
+                     the network operates on the image and DC round-trips through the FFT.
+    domain="kspace": model_input is the normalized complex k-space (learning="k_space");
+                     the network operates on the 2-channel real/imag k-space directly and DC
+                     is a plain masked replacement, no FFTs inside the network.
+    """
 
     num_intermediate_stages = 0
 
@@ -428,6 +466,7 @@ class ReconFormerBaseline(ReconFormer):
         resi_connection="1conv",
         mlp_ratio=2.0,
         use_checkpoint=(False, False, False, False, False, False),
+        domain="image",
     ):
         super().__init__(
             in_channels=2,
@@ -442,8 +481,26 @@ class ReconFormerBaseline(ReconFormer):
             resi_connection=resi_connection,
             mlp_ratio=mlp_ratio,
             use_checkpoint=use_checkpoint,
+            domain=domain,
         )
         self.lamb = False
+
+    def _measured_kspace(self, model_input, dc_input, stats):
+        """Measured k-space in the same normalized units the network sees."""
+        batch = model_input.shape[0]
+        if self.domain == "kspace":
+            if stats is None:
+                return model_input[:, 0]
+            from normalizer import raw_kspace_to_model_output
+            return raw_kspace_to_model_output(dc_input, stats, "k_space")[:, 0]
+        if stats is None:
+            return centered_fft2(model_input[:, 0])
+        if stats.get("normalization") != "reconformer" or "scale" not in stats:
+            raise ValueError("ReconFormer requires reconformer normalization statistics")
+        scale = torch.as_tensor(stats["scale"], device=dc_input.device, dtype=dc_input.real.dtype)
+        if scale.numel() == batch:
+            scale = scale.reshape(batch, 1, 1, 1)
+        return (dc_input / scale)[:, 0]
 
     @staticmethod
     def _validate_complex_image(name, value, expected_shape=None):
@@ -521,21 +578,10 @@ class ReconFormerBaseline(ReconFormer):
             model_input.device,
             model_input.real.dtype,
         )
-        normalized_image = model_input[:, 0]
-        if stats is None:
-            measured_kspace = centered_fft2(normalized_image)
-        else:
-            if stats.get("normalization") != "reconformer" or "scale" not in stats:
-                raise ValueError("ReconFormer requires reconformer normalization statistics")
-            scale = torch.as_tensor(
-                stats["scale"], device=dc_input.device, dtype=dc_input.real.dtype
-            )
-            if scale.numel() == batch:
-                scale = scale.reshape(batch, 1, 1, 1)
-            measured_kspace = (dc_input / scale)[:, 0]
-        image_pair = _complex_to_pair(normalized_image)
+        measured_kspace = self._measured_kspace(model_input, dc_input, stats)
+        input_pair = _complex_to_pair(model_input[:, 0])
         kspace_pair = _complex_to_pair(measured_kspace)
-        output_pair = super().forward(image_pair, k0=kspace_pair, mask=mask)
+        output_pair = super().forward(input_pair, k0=kspace_pair, mask=mask)
         reconstruction = _pair_to_complex(output_pair).unsqueeze(1)
         if return_intermediates:
             return reconstruction, []
