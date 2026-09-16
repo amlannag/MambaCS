@@ -97,6 +97,12 @@ class Config:
     learning: str = "k_space"
     # Normalisation: "zscore", "fastmri_magnitude", "robust_shifted", "kspace_companding", "log_kspace", or None
     norm: str = "zscore"
+    # Pre-fill the undersampled (unmeasured) k-space BEFORE normalisation instead of
+    # zero-filling: "linear", "cartesian_linear", "exponential", "inverse_distance"
+    # (see notebooks/radial_interpolation.py), or None/"zero_fill" for standard zero-fill.
+    # Only Cartesian full-column masks are supported. The fill only affects the model input;
+    # data consistency still uses the raw measured k-space.
+    kspace_fill: Optional[str] = None
     robust_clip: float = 3.0
     robust_shift: float = 3.0
     companding_p: float = 0.8

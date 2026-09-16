@@ -413,6 +413,7 @@ def robust_shifted(
     kspace_us=None,
     robust_clip: float = 3.0,
     robust_shift: float = 3.0,
+    kspace_prefilled: bool = False,
     **_unused,
 ):
     """Apply reversible median/IQR scaling, smooth clipping, and a magnitude shift."""
@@ -441,7 +442,12 @@ def robust_shifted(
             "robust_clip": float(robust_clip),
             "robust_shift": float(robust_shift),
         }
-        kspace_us_norm = apply_normalization(kspace_us, metric) * expanded_mask
+        kspace_us_norm = apply_normalization(kspace_us, metric)
+        if not kspace_prefilled:
+            # Zero-fill mode: force unmeasured points to exactly 0 (the +shift would
+            # otherwise map them to ~robust_shift). With a pre-filled input (e.g. k-space
+            # interpolation) the filled values are kept instead.
+            kspace_us_norm = kspace_us_norm * expanded_mask
         kspace_full_norm = apply_normalization(kspace_full, metric)
         target = {
             "image": ifft_2d(kspace_full).abs(),

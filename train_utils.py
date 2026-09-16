@@ -413,6 +413,49 @@ _NORMALIZERS = {
 }
 
 
+KSPACE_FILL_STRATEGIES = {"linear", "cartesian_linear", "exponential", "inverse_distance"}
+
+
+def _mask_to_2d(mask):
+    """Collapse a broadcastable sampling mask to [H, W] for the interpolator."""
+    if mask.ndim == 2:
+        return mask
+    squeezed = mask.squeeze()
+    if squeezed.ndim == 2:
+        return squeezed
+    if squeezed.ndim == 1:
+        h, w = squeezed.numel(), squeezed.numel()
+        return squeezed.view(1, w).expand(h, w)
+    raise ValueError(f"Cannot interpret mask with shape {tuple(mask.shape)} as a 2D Cartesian mask")
+
+
+@torch.no_grad()
+def interpolate_kspace_us(kspace_us, mask, strategy):
+    """
+    Replace the zero-filled unmeasured k-space with an interpolated estimate.
+
+    Only Cartesian full-column masks are supported (see notebooks/radial_interpolation.py).
+    Measured points are preserved exactly; only unmeasured points are filled. The returned
+    tensor is only meant as the MODEL INPUT — data consistency still uses the raw measured
+    k-space (simulate_undersampling returns the measured k-space as the DC input).
+    """
+    if strategy not in KSPACE_FILL_STRATEGIES:
+        raise ValueError(
+            f"Unknown kspace_fill strategy '{strategy}'. Choose from: {sorted(KSPACE_FILL_STRATEGIES)}"
+        )
+    from notebooks.radial_interpolation import radial_complex_interpolate
+
+    if kspace_us.ndim != 4:
+        raise ValueError(f"Expected [B, 1, H, W] k-space, got {tuple(kspace_us.shape)}")
+    mask2d = _mask_to_2d(mask).to(device=kspace_us.device)
+    filled = []
+    for index in range(kspace_us.shape[0]):
+        sample = kspace_us[index, 0]
+        interp, _ = radial_complex_interpolate(sample, mask2d, strategy=strategy)
+        filled.append(interp.unsqueeze(0))
+    return torch.stack(filled, dim=0)
+
+
 def simulate_undersampling(
     kspace_full,
     mask,
@@ -424,6 +467,7 @@ def simulate_undersampling(
     companding_p: float = 0.8,
     companding_a: float = 0.5,
     companding_centering: str = "fft",
+    kspace_fill: str | None = None,
 ):
     """
     learning="complex_image" : preserve complex image values through the model and FFT data consistency
@@ -432,18 +476,33 @@ def simulate_undersampling(
     norm="kspace_companding" : radial magnitude companding in k-space (k_space learning only)
     norm="log_kspace" : log1p magnitude k-space normalization with preserved phase (k_space learning only)
     norm=None     : no normalisation — tensors left in raw k-space units
+    kspace_fill  : pre-fill the unmeasured k-space before normalisation instead of zero-filling.
+                   One of "linear", "cartesian_linear", "exponential", "inverse_distance"
+                   (see notebooks/radial_interpolation.py). None/"none"/"zero_fill" = zero-fill.
+                   The filled k-space is used as the model input; the raw measured k-space is
+                   still returned as the DC input.
     """
+    measured = kspace_full * mask if kspace_us is None else kspace_us
+    prefilled = kspace_fill not in (None, "none", "zero_fill")
+    if prefilled:
+        model_kspace = interpolate_kspace_us(measured, mask, kspace_fill)
+    else:
+        model_kspace = measured
     fn = _NORMALIZERS.get(norm)
     if fn is None:
         raise ValueError(f"Unknown norm '{norm}'. Choose from: {list(_NORMALIZERS)}")
-    return fn(
+    model_input, _, target, metric = fn(
         kspace_full,
         mask,
         learning,
-        kspace_us=kspace_us,
+        kspace_us=model_kspace,
+        kspace_prefilled=prefilled,
         robust_clip=robust_clip,
         robust_shift=robust_shift,
         companding_p=companding_p,
         companding_a=companding_a,
         companding_centering=companding_centering,
     )
+    # Data consistency always blends with the raw measured k-space (the interpolated
+    # points are only a model-input initialisation and must not be re-imposed by DC).
+    return model_input, measured, target, metric
