@@ -147,6 +147,15 @@ class Config:
     perpendicular_mag_weight_m_schedule: str = "none"
     perpendicular_mag_weight_m_start: float = 1.0
     perpendicular_mag_weight_m_end: float = 1.0
+    # LORAKS C-matrix low-rank penalty (loss types "complex_l2_loraks" / "loraks_c"):
+    #   loraks_weight    — lambda on the low-rank term added to complex_l2
+    #   loraks_radius    — k-space neighbourhood radius R (Nr = 13 / 29 / 49 for R = 2 / 3 / 4)
+    #   loraks_rank      — truncation rank r_C; None -> Nr // 2 (best in the notebook sweep)
+    #   loraks_normalize — "ratio" (tail energy / total energy, scale-free) or "mean"
+    loraks_weight: float = 0.05
+    loraks_radius: int = 3
+    loraks_rank: Optional[int] = None
+    loraks_normalize: str = "ratio"
     epochs: int = 400
     batch_size: int = 32
     auto_batch_size: bool = True

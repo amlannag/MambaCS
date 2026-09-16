@@ -148,6 +148,80 @@ class PerpendicularLoss(nn.Module):
         return torch.mean(branched + magnitude_l1)
 
 
+def _loraks_offsets(radius: int):
+    return [(dx, dy) for dx in range(-radius, radius + 1) for dy in range(-radius, radius + 1)
+            if dx * dx + dy * dy <= radius * radius]
+
+
+class LoraksCLoss(nn.Module):
+    """
+    LORAKS C-matrix (support-constraint) low-rank penalty on the predicted k-space.
+
+    Row n of P_C(k) is the radius-R k-space neighbourhood around point n (Haldar 2014, Eq. 5).
+    The penalty is the energy of the singular values beyond `rank`,
+        ||P_C(k) - SVD_rank(P_C(k))||_F^2 = sum_{i > rank} sigma_i^2,
+    computed from the small Nr x Nr Gram matrix C^H C so the full SVD is never needed.
+    With normalize="ratio" this is divided by ||P_C(k)||_F^2 (scale-free, in [0, 1]);
+    with normalize="mean" it is divided by the number of matrix entries.
+
+    This is an unsupervised prior: it only looks at `pred`, never at `gt`.
+    """
+
+    def __init__(self, radius: int = 3, rank=None, normalize: str = "ratio", eps: float = 1e-8):
+        super().__init__()
+        self.radius = int(radius)
+        self.offsets = _loraks_offsets(self.radius)
+        self.Nr = len(self.offsets)
+        self.rank = int(rank) if rank is not None else max(1, self.Nr // 2)
+        if not 0 < self.rank < self.Nr:
+            raise ValueError(f"loraks rank must be in (0, {self.Nr}) for radius {self.radius}, got {self.rank}")
+        if normalize not in {"ratio", "mean"}:
+            raise ValueError("normalize must be 'ratio' or 'mean'")
+        self.normalize = normalize
+        self.eps = eps
+
+    def c_matrix(self, kspace: torch.Tensor) -> torch.Tensor:
+        """[B, H, W] complex k-space -> [B, K, Nr] C matrix (K = valid centres)."""
+        R = self.radius
+        H, W = kspace.shape[-2:]
+        cols = [kspace[..., R + dx:H - R + dx, R + dy:W - R + dy].reshape(kspace.shape[0], -1)
+                for dx, dy in self.offsets]
+        return torch.stack(cols, dim=-1)
+
+    def forward(self, pred, gt=None, stats=None):
+        if not pred.is_complex():
+            raise ValueError("loraks_c requires a complex prediction tensor")
+        if _complex_target_domain(stats) == "complex_image":
+            from DcTNN.dc import fft_2d
+            pred = fft_2d(pred)
+        kspace = pred.reshape(-1, *pred.shape[-2:])
+        if kspace.dtype != torch.complex128:
+            kspace = kspace.to(torch.complex64)
+        C = self.c_matrix(kspace)                                 # [B, K, Nr]
+        gram = C.transpose(-1, -2).conj() @ C                     # [B, Nr, Nr]
+        gram = gram + self.eps * torch.eye(self.Nr, device=gram.device, dtype=gram.dtype)
+        sigma_sq = torch.linalg.eigvalsh(gram)                    # ascending, real
+        tail = sigma_sq[:, :self.Nr - self.rank].sum(dim=-1)
+        if self.normalize == "ratio":
+            per_sample = tail / (sigma_sq.sum(dim=-1) + self.eps)
+        else:
+            per_sample = tail / C.shape[-1] / C.shape[-2]
+        return per_sample.mean()
+
+
+class ComplexL2LoraksLoss(nn.Module):
+    """complex_l2 data term plus weight * LORAKS C low-rank penalty on the prediction."""
+
+    def __init__(self, weight: float = 0.05, radius: int = 3, rank=None, normalize: str = "ratio"):
+        super().__init__()
+        self.weight = float(weight)
+        self.l2 = ComplexL2Loss()
+        self.loraks = LoraksCLoss(radius=radius, rank=rank, normalize=normalize)
+
+    def forward(self, pred, gt, stats=None):
+        return self.l2(pred, gt, stats=stats) + self.weight * self.loraks(pred, stats=stats)
+
+
 def build_loss(loss_type: str, **kwargs) -> nn.Module:
     """Factory for magnitude-domain reconstruction losses."""
     loss_type = loss_type.lower()
@@ -163,10 +237,14 @@ def build_loss(loss_type: str, **kwargs) -> nn.Module:
         return ReconFormerMagnitudeL1Loss()
     if loss_type == "perpendicular_loss":
         return PerpendicularLoss(**kwargs)
+    if loss_type == "loraks_c":
+        return LoraksCLoss(**kwargs)
+    if loss_type == "complex_l2_loraks":
+        return ComplexL2LoraksLoss(**kwargs)
     raise ValueError(
         "Unknown loss_type "
         f"'{loss_type}'. Choose from: ['l1', 'l2', 'image_domain_l1', 'image_domain_l2', "
-        "'complex_l1', 'complex_l2', 'reconformer_l1', 'perpendicular_loss']"
+        "'complex_l1', 'complex_l2', 'reconformer_l1', 'perpendicular_loss', 'loraks_c', 'complex_l2_loraks']"
     )
 
 

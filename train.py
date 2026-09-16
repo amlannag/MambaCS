@@ -239,18 +239,31 @@ def _build_epoch_metrics(total_loss, final_loss, intermediate_loss_sum, total_ps
     }
 
 
-def _build_criteria(cfg):
-    loss_kwargs = {}
-    if cfg.perpendicular_mag_weighting:
-        loss_kwargs = {
+def _loss_kwargs_for(cfg, loss_type):
+    loss_type = loss_type.lower()
+    if loss_type == "perpendicular_loss" and cfg.perpendicular_mag_weighting:
+        return {
             "magnitude_weighting": True,
             "magnitude_weight_m": cfg.perpendicular_mag_weight_m,
             "magnitude_weight_k": cfg.perpendicular_mag_weight_k,
             "magnitude_weight_p": cfg.perpendicular_mag_weight_p,
         }
+    if loss_type in {"loraks_c", "complex_l2_loraks"}:
+        kwargs = {
+            "radius": cfg.loraks_radius,
+            "rank": cfg.loraks_rank,
+            "normalize": cfg.loraks_normalize,
+        }
+        if loss_type == "complex_l2_loraks":
+            kwargs["weight"] = cfg.loraks_weight
+        return kwargs
+    return {}
+
+
+def _build_criteria(cfg):
     return (
-        build_loss(cfg.final_loss_type, **loss_kwargs),
-        build_loss(cfg.intermediate_loss_type, **loss_kwargs),
+        build_loss(cfg.final_loss_type, **_loss_kwargs_for(cfg, cfg.final_loss_type)),
+        build_loss(cfg.intermediate_loss_type, **_loss_kwargs_for(cfg, cfg.intermediate_loss_type)),
     )
 
 
