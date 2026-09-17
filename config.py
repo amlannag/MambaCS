@@ -91,6 +91,9 @@ class Config:
     nhead_axial: int = 8
     layer_no: int = 1
     num_encoder_layers: int = 2
+    # Optional per-stage override of num_encoder_layers (one int per entry of `encoders`),
+    # e.g. [1, 2, 1, 2] for a cross_axial/axial cascade with 1 layer per cross stage and 2 per axial.
+    stage_encoder_layers: Optional[List[int]] = None
     layer_norm_eps: float = 1e-5
     learned_lambda: bool = True
     # Domain the model operates in: "k_space", "image", or "complex_image"
@@ -148,6 +151,15 @@ class Config:
     loss_function_domain: str = "all_kspace"
     final_loss_type: str = "l1"
     intermediate_loss_type: str = "l1"
+    # Radial frequency weighting for loss type "freq_weighted_complex_l2" (k-space only):
+    #   r is the radius on the normalised square [-1, 1]^2 centred at DC, r_max = sqrt(2) (corner);
+    #   w(r) = 1 + (freq_weight_m - 1) * (r / r_max)^freq_weight_gamma, then normalised to mean 1.
+    #   freq_weight_m > 1 up-weights high frequencies (w = m in the corners); m == 1 == complex_l2.
+    #   freq_weight_r_cap (optional): use r_max = r_cap and plateau at m for r >= r_cap, so only
+    #   the region inside r_cap is de-emphasised (e.g. 0.6 = keep the central 60% box uniform).
+    freq_weight_m: float = 5.0
+    freq_weight_gamma: float = 1.0
+    freq_weight_r_cap: Optional[float] = None
     perpendicular_mag_weighting: bool = False
     perpendicular_mag_weight_m: float = 1.0
     perpendicular_mag_weight_k: float = 0.103

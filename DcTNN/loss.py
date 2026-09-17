@@ -127,6 +127,65 @@ class ComplexL2Loss(nn.Module):
         return _reduce((pred.real - gt_complex.real) ** 2 + (pred.imag - gt_complex.imag) ** 2, mask)
 
 
+def _normalized_radius_grid_like(x: torch.Tensor) -> torch.Tensor:
+    """
+    Radius of every k-space cell on the normalised square [-1, 1]^2 centred at (0, 0):
+    x = (col - W//2) / (W/2), y = (row - H//2) / (H/2), r = sqrt(x^2 + y^2).
+    r = 0 at DC, r = 1 at the edge midpoints, r = sqrt(2) at the corners.
+    """
+    if x.ndim != 4:
+        raise ValueError(f"Expected a [B, C, H, W] tensor, got shape {tuple(x.shape)}")
+    _, _, h, w = x.shape
+    dtype = x.real.dtype if x.is_complex() else x.dtype
+    ys = (torch.arange(h, device=x.device, dtype=dtype) - h // 2) / (h / 2)
+    xs = (torch.arange(w, device=x.device, dtype=dtype) - w // 2) / (w / 2)
+    yy, xx = torch.meshgrid(ys, xs, indexing="ij")
+    return torch.sqrt(xx ** 2 + yy ** 2).unsqueeze(0).unsqueeze(0)
+
+
+_FREQ_WEIGHT_R_MAX = math.sqrt(2.0)   # corner of the normalised [-1, 1]^2 square
+
+
+def _radial_frequency_weight_map(x: torch.Tensor, m: float, gamma: float, r_cap=None) -> torch.Tensor:
+    """
+    Monotone radial k-space weight on the normalised square: w(r) = 1 + (m - 1) * (r / r_max)^gamma,
+    with r from _normalized_radius_grid_like and r_max = sqrt(2) (the corner), so w = 1 at DC and
+    w = m in the corners. m > 1 emphasises high frequencies, m == 1 is uniform.
+    If r_cap is given, r_max = r_cap and the weight plateaus at m for r >= r_cap, so only the
+    region inside r_cap is de-emphasised and everything outside it is weighted uniformly.
+    """
+    r_max = _FREQ_WEIGHT_R_MAX if r_cap is None else float(r_cap)
+    ratio = (_normalized_radius_grid_like(x) / r_max).clamp(max=1.0)
+    return 1.0 + (m - 1.0) * ratio.pow(gamma)
+
+
+class FrequencyWeightedComplexL2Loss(nn.Module):
+    """
+    complex_l2 in k-space with each element weighted by a radial frequency weight.
+    The weight is normalised to mean 1 over the reduced region (all k-space, or the
+    unsampled region when a mask is given) so the loss scale matches complex_l2.
+    """
+
+    def __init__(self, weight_m: float = 5.0, weight_gamma: float = 1.0, weight_r_cap=None):
+        super().__init__()
+        self.weight_m = float(weight_m)
+        self.weight_gamma = float(weight_gamma)
+        self.weight_r_cap = None if weight_r_cap is None else float(weight_r_cap)
+
+    def weight_map(self, x: torch.Tensor) -> torch.Tensor:
+        return _radial_frequency_weight_map(x, self.weight_m, self.weight_gamma, self.weight_r_cap)
+
+    def forward(self, pred, gt, stats=None, mask=None):
+        if _complex_target_domain(stats) != "kspace":
+            raise ValueError("freq_weighted_complex_l2 requires a k-space prediction (learning='k_space')")
+        gt_complex = _resolve_target(gt, "kspace")
+        if not pred.is_complex() or not gt_complex.is_complex():
+            raise ValueError("freq_weighted_complex_l2 requires complex prediction and target tensors")
+        elementwise = (pred.real - gt_complex.real) ** 2 + (pred.imag - gt_complex.imag) ** 2
+        weight = self.weight_map(pred).to(elementwise.dtype)
+        return _reduce(elementwise * weight, mask) / _reduce(weight.expand_as(elementwise), mask)
+
+
 class ReconFormerMagnitudeL1Loss(nn.Module):
     def forward(self, pred, gt, stats=None, mask=None):
         _check_kspace_mask(mask, False, "reconformer_l1")
@@ -262,6 +321,8 @@ def build_loss(loss_type: str, **kwargs) -> nn.Module:
         return ComplexL1Loss()
     if loss_type == "complex_l2":
         return ComplexL2Loss()
+    if loss_type == "freq_weighted_complex_l2":
+        return FrequencyWeightedComplexL2Loss(**kwargs)
     if loss_type == "reconformer_l1":
         return ReconFormerMagnitudeL1Loss()
     if loss_type == "perpendicular_loss":
@@ -273,7 +334,8 @@ def build_loss(loss_type: str, **kwargs) -> nn.Module:
     raise ValueError(
         "Unknown loss_type "
         f"'{loss_type}'. Choose from: ['l1', 'l2', 'image_domain_l1', 'image_domain_l2', "
-        "'complex_l1', 'complex_l2', 'reconformer_l1', 'perpendicular_loss', 'loraks_c', 'complex_l2_loraks']"
+        "'complex_l1', 'complex_l2', 'freq_weighted_complex_l2', 'reconformer_l1', 'perpendicular_loss', "
+        "'loraks_c', 'complex_l2_loraks']"
     )
 
 

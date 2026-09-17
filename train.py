@@ -258,6 +258,12 @@ def _loss_kwargs_for(cfg, loss_type):
             "magnitude_weight_k": cfg.perpendicular_mag_weight_k,
             "magnitude_weight_p": cfg.perpendicular_mag_weight_p,
         }
+    if loss_type == "freq_weighted_complex_l2":
+        return {
+            "weight_m": cfg.freq_weight_m,
+            "weight_gamma": cfg.freq_weight_gamma,
+            "weight_r_cap": cfg.freq_weight_r_cap,
+        }
     if loss_type in {"loraks_c", "complex_l2_loraks"}:
         kwargs = {
             "radius": cfg.loraks_radius,

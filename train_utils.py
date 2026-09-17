@@ -259,14 +259,22 @@ def _build_model_impl(cfg):
     if cfg.learning == "complex_image" and cfg.attn_type == "standard":
         raise ValueError("learning='complex_image' requires a complex-valued attention type")
 
+    stage_layers = getattr(cfg, "stage_encoder_layers", None)
+    if stage_layers is not None and len(stage_layers) != len(cfg.encoders):
+        raise ValueError(
+            f"stage_encoder_layers has {len(stage_layers)} entries but encoders has {len(cfg.encoders)}"
+        )
+
     enc_list = []
     enc_args = []
-    for name in cfg.encoders:
+    for i, name in enumerate(cfg.encoders):
         if name not in _ENCODER_ARGS:
             raise ValueError(f"Unknown encoder '{name}'. Choose from: {list(_ENCODER_ARGS)}")
         cls, args = _ENCODER_ARGS[name](cfg)
         args["numCh"] = num_ch
         args["flattening_order"] = flattening_order
+        if stage_layers is not None and "num_encoder_layers" in args:
+            args["num_encoder_layers"] = int(stage_layers[i])
         enc_list.append(cls)
         enc_args.append(args)
 
