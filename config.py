@@ -138,6 +138,14 @@ class Config:
     # Training hyperparameters
     # ---------------------------------------------------------------------------
     loss_mode: str = "final_only"
+    # Region of k-space the reconstruction loss is computed over:
+    #   "all_kspace"       — every k-space location (default)
+    #   "unsampled_kspace" — only locations NOT acquired by the sampling mask; the
+    #                        measured region contributes nothing to the loss.
+    # "unsampled_kspace" requires a loss that operates in k-space (e.g. complex_l1 /
+    # complex_l2 / perpendicular_loss with a k-space prediction, or l1 / l2 with a
+    # kspace_companding / log_kspace norm).
+    loss_function_domain: str = "all_kspace"
     final_loss_type: str = "l1"
     intermediate_loss_type: str = "l1"
     perpendicular_mag_weighting: bool = False

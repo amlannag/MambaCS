@@ -28,7 +28,7 @@ from train_utils import (FastMRIMaskGenerator, build_model, resolve_data_dirs,
                          simulate_undersampling, unique_model_parameters,
                          validate_resume_flattening_order, validate_resume_fixed_apt_config)
 from DcTNN.fixed_apt import resolve_fixed_apt_layout
-from DcTNN.loss import PerpendicularLoss, build_loss
+from DcTNN.loss import LOSS_FUNCTION_DOMAINS, PerpendicularLoss, build_loss
 from DcTNN.dc import ifft_2d
 from normalizer import model_output_to_raw_kspace, reconstruction_to_image_magnitude
 
@@ -174,9 +174,19 @@ def _mean_volume_psnr(store):
     return float(np.mean(volume_psnr)) if volume_psnr else None
 
 
-def _compute_losses(recon, intermediates, target, final_criterion, intermediate_criterion, loss_mode, stats=None, zf_recon=None):
-    final_loss = final_criterion(recon, target, stats=stats)
-    stage_losses = [intermediate_criterion(stage_out, target, stats=stats) for stage_out in intermediates]
+def _loss_mask_for(cfg, mask):
+    """Sampling mask handed to the criteria, or None when the loss covers all of k-space."""
+    domain = getattr(cfg, "loss_function_domain", "all_kspace")
+    if domain not in LOSS_FUNCTION_DOMAINS:
+        raise ValueError(
+            f"Unknown loss_function_domain '{domain}'. Choose from: {list(LOSS_FUNCTION_DOMAINS)}"
+        )
+    return mask if domain == "unsampled_kspace" else None
+
+
+def _compute_losses(recon, intermediates, target, final_criterion, intermediate_criterion, loss_mode, stats=None, zf_recon=None, mask=None):
+    final_loss = final_criterion(recon, target, stats=stats, mask=mask)
+    stage_losses = [intermediate_criterion(stage_out, target, stats=stats, mask=mask) for stage_out in intermediates]
     if stage_losses:
         intermediate_loss_sum = torch.stack(stage_losses).sum()
     else:
@@ -418,6 +428,7 @@ def _probe_batch_candidate(cfg, dataset, batch_size, device, checkpoint=None):
                 cfg.loss_mode,
                 stats=stats,
                 zf_recon=model_input,
+                mask=_loss_mask_for(cfg, mask),
             )
             total_loss.backward()
             _clip_gradients(model, cfg.grad_clip)
@@ -510,7 +521,8 @@ def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer
             model_input, DC_input, mask, return_intermediates=True, stats=stats
         )
         total_batch_loss, final_loss, intermediate_loss_sum, stage_losses, stage_psnr_gains = _compute_losses(
-            recon, intermediates, target, final_criterion, intermediate_criterion, loss_mode, stats=stats, zf_recon=model_input
+            recon, intermediates, target, final_criterion, intermediate_criterion, loss_mode,
+            stats=stats, zf_recon=model_input, mask=_loss_mask_for(cfg, mask),
         )
         total_batch_loss.backward()
         _clip_gradients(model, cfg.grad_clip)
@@ -614,7 +626,8 @@ def validate(cfg, model, loader, accel_factors, image_size, final_criterion,
             model_input, DC_input, mask, return_intermediates=True, stats=stats
         )
         total_batch_loss, final_loss, intermediate_loss_sum, stage_losses, stage_psnr_gains = _compute_losses(
-            recon, intermediates, target, final_criterion, intermediate_criterion, loss_mode, stats=stats, zf_recon=model_input
+            recon, intermediates, target, final_criterion, intermediate_criterion, loss_mode,
+            stats=stats, zf_recon=model_input, mask=_loss_mask_for(cfg, mask),
         )
 
         gt_image = target["image"] if isinstance(target, dict) else target

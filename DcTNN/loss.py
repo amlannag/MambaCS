@@ -7,6 +7,7 @@ from normalizer import reconstruction_to_image_magnitude
 
 
 _NORMALIZED_KSPACE_LOSS_NORMS = {"kspace_companding", "log_kspace"}
+LOSS_FUNCTION_DOMAINS = ("all_kspace", "unsampled_kspace")
 
 
 def _resolve_target(target, domain: str):
@@ -21,6 +22,25 @@ def _use_normalized_kspace_loss(stats) -> bool:
 
 def _complex_target_domain(stats) -> str:
     return "complex_image" if stats and stats.get("prediction_domain") == "complex_image" else "kspace"
+
+
+def _check_kspace_mask(mask, in_kspace: bool, name: str):
+    if mask is not None and not in_kspace:
+        raise ValueError(
+            f"loss_function_domain='unsampled_kspace' requires {name} to operate in k-space, "
+            "but the prediction is in the image domain"
+        )
+
+
+def _reduce(elementwise: torch.Tensor, mask=None) -> torch.Tensor:
+    """
+    Mean over all elements (mask=None) or over the unsampled k-space locations only
+    (mask broadcastable to `elementwise`, 1 = sampled, 0 = unsampled).
+    """
+    if mask is None:
+        return elementwise.mean()
+    weight = (1.0 - mask).to(elementwise.dtype).expand_as(elementwise)
+    return (elementwise * weight).sum() / weight.sum().clamp_min(1.0)
 
 
 def _to_magnitude(x, stats=None):
@@ -67,42 +87,49 @@ def _perpendicular_mag_weight_map(x: torch.Tensor, m: float, k: float, p: float)
 
 class MagnitudeImageLoss(nn.Module):
     """MSE in the normalised magnitude image domain."""
-    def forward(self, pred, gt, stats=None):
-        target_domain = "kspace" if _use_normalized_kspace_loss(stats) else "image"
-        gt_tensor = _resolve_target(gt, target_domain)
-        return torch.mean((_to_magnitude(pred, stats) - _to_magnitude(gt_tensor, stats)) ** 2)
+    def forward(self, pred, gt, stats=None, mask=None):
+        in_kspace = _use_normalized_kspace_loss(stats)
+        _check_kspace_mask(mask, in_kspace, "l2")
+        gt_tensor = _resolve_target(gt, "kspace" if in_kspace else "image")
+        return _reduce((_to_magnitude(pred, stats) - _to_magnitude(gt_tensor, stats)) ** 2, mask)
 
 
 class MagnitudeL1Loss(nn.Module):
     """L1 loss in the normalised magnitude image domain."""
-    def forward(self, pred, gt, stats=None):
-        target_domain = "kspace" if _use_normalized_kspace_loss(stats) else "image"
-        gt_tensor = _resolve_target(gt, target_domain)
-        return torch.mean(torch.abs(_to_magnitude(pred, stats) - _to_magnitude(gt_tensor, stats)))
+    def forward(self, pred, gt, stats=None, mask=None):
+        in_kspace = _use_normalized_kspace_loss(stats)
+        _check_kspace_mask(mask, in_kspace, "l1")
+        gt_tensor = _resolve_target(gt, "kspace" if in_kspace else "image")
+        return _reduce(torch.abs(_to_magnitude(pred, stats) - _to_magnitude(gt_tensor, stats)), mask)
 
 
 class ComplexL1Loss(nn.Module):
     """L1 loss in the active complex domain: |Re diff| + |Im diff|."""
 
-    def forward(self, pred, gt, stats=None):
-        gt_complex = _resolve_target(gt, _complex_target_domain(stats))
+    def forward(self, pred, gt, stats=None, mask=None):
+        domain = _complex_target_domain(stats)
+        _check_kspace_mask(mask, domain == "kspace", "complex_l1")
+        gt_complex = _resolve_target(gt, domain)
         if not pred.is_complex() or not gt_complex.is_complex():
             raise ValueError("complex_l1 requires complex prediction and target tensors")
-        return torch.mean(torch.abs(pred.real - gt_complex.real) + torch.abs(pred.imag - gt_complex.imag))
+        return _reduce(torch.abs(pred.real - gt_complex.real) + torch.abs(pred.imag - gt_complex.imag), mask)
 
 
 class ComplexL2Loss(nn.Module):
     """L2 loss in the active complex domain: squared real diff + squared imag diff."""
 
-    def forward(self, pred, gt, stats=None):
-        gt_complex = _resolve_target(gt, _complex_target_domain(stats))
+    def forward(self, pred, gt, stats=None, mask=None):
+        domain = _complex_target_domain(stats)
+        _check_kspace_mask(mask, domain == "kspace", "complex_l2")
+        gt_complex = _resolve_target(gt, domain)
         if not pred.is_complex() or not gt_complex.is_complex():
             raise ValueError("complex_l2 requires complex prediction and target tensors")
-        return torch.mean((pred.real - gt_complex.real) ** 2 + (pred.imag - gt_complex.imag) ** 2)
+        return _reduce((pred.real - gt_complex.real) ** 2 + (pred.imag - gt_complex.imag) ** 2, mask)
 
 
 class ReconFormerMagnitudeL1Loss(nn.Module):
-    def forward(self, pred, gt, stats=None):
+    def forward(self, pred, gt, stats=None, mask=None):
+        _check_kspace_mask(mask, False, "reconformer_l1")
         gt_complex = _resolve_target(gt, "complex_image")
         if not pred.is_complex() or not gt_complex.is_complex():
             raise ValueError("reconformer_l1 requires complex prediction and target tensors")
@@ -130,8 +157,10 @@ class PerpendicularLoss(nn.Module):
     def set_current_m(self, value: float):
         self.current_m = float(value)
 
-    def forward(self, pred, gt, stats=None):
-        gt_complex = _resolve_target(gt, _complex_target_domain(stats))
+    def forward(self, pred, gt, stats=None, mask=None):
+        domain = _complex_target_domain(stats)
+        _check_kspace_mask(mask, domain == "kspace", "perpendicular_loss")
+        gt_complex = _resolve_target(gt, domain)
         if not pred.is_complex() or not gt_complex.is_complex():
             raise ValueError("perpendicular_loss requires complex prediction and target tensors")
 
@@ -145,7 +174,7 @@ class PerpendicularLoss(nn.Module):
             magnitude_l1 = magnitude_l1 * _perpendicular_mag_weight_map(
                 pred, m=self.current_m, k=self.magnitude_weight_k, p=self.magnitude_weight_p
             )
-        return torch.mean(branched + magnitude_l1)
+        return _reduce(branched + magnitude_l1, mask)
 
 
 def _loraks_offsets(radius: int):
@@ -188,7 +217,7 @@ class LoraksCLoss(nn.Module):
                 for dx, dy in self.offsets]
         return torch.stack(cols, dim=-1)
 
-    def forward(self, pred, gt=None, stats=None):
+    def forward(self, pred, gt=None, stats=None, mask=None):
         if not pred.is_complex():
             raise ValueError("loraks_c requires a complex prediction tensor")
         if _complex_target_domain(stats) == "complex_image":
@@ -218,8 +247,8 @@ class ComplexL2LoraksLoss(nn.Module):
         self.l2 = ComplexL2Loss()
         self.loraks = LoraksCLoss(radius=radius, rank=rank, normalize=normalize)
 
-    def forward(self, pred, gt, stats=None):
-        return self.l2(pred, gt, stats=stats) + self.weight * self.loraks(pred, stats=stats)
+    def forward(self, pred, gt, stats=None, mask=None):
+        return self.l2(pred, gt, stats=stats, mask=mask) + self.weight * self.loraks(pred, stats=stats)
 
 
 def build_loss(loss_type: str, **kwargs) -> nn.Module:
@@ -279,7 +308,8 @@ class SSIMLoss(nn.Module):
         den = (mu_x ** 2 + mu_y ** 2 + self.C1) * (sigma_x + sigma_y + self.C2)
         return (num / den).mean()
 
-    def forward(self, pred: torch.Tensor, gt: torch.Tensor, stats=None) -> torch.Tensor:
+    def forward(self, pred: torch.Tensor, gt: torch.Tensor, stats=None, mask=None) -> torch.Tensor:
+        _check_kspace_mask(mask, False, "ssim")
         gt_image = _resolve_target(gt, "image")
         p = _to_magnitude(pred, stats)
         g = _to_magnitude(gt_image)
