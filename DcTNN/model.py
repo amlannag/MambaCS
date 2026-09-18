@@ -1,12 +1,12 @@
 import torch
 from torch import nn
 from .dc import KSpace_DC
-from .vit import TokenVIT, axVIT, CrossAttentionVIT
+from .vit import TokenVIT, axVIT, CrossAttentionVIT, FNetVIT
 from .fixed_apt import FixedAPTVIT
 from .encoders import TokenEncoder, axialEncoder, crossAxialEncoder, pair
 from .util import FeedForward, _COMPLEX_ATTN_TYPES, validate_flattening_order
 
-__all__ = ['cascadeNet', 'TokenVIT', 'axVIT', 'CrossAttentionVIT', 'FixedAPTVIT', 'TokenEncoder', 'axialEncoder', 'crossAxialEncoder']
+__all__ = ['cascadeNet', 'TokenVIT', 'axVIT', 'CrossAttentionVIT', 'FNetVIT', 'FixedAPTVIT', 'TokenEncoder', 'axialEncoder', 'crossAxialEncoder']
 
 
 def _stage_ffn_spec(N, cls, args):

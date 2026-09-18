@@ -419,3 +419,140 @@ class crossAxialEncoder(nn.Module):
         x = self.verticalEncoder(x, sampled_idx, unsampled_idx)
         x = self.vertical_mlp_head(x)
         return x
+
+
+# ---------------------------------------------------------------------------
+# FNet: parameter-free Fourier token mixing (Lee-Thorp et al. 2021) on vertical column tokens
+# ---------------------------------------------------------------------------
+
+class FourierMixing(nn.Module):
+    """
+    FNet token mixing: 2-D FFT over the (sequence, hidden) axes of [B, seq, hidden].
+    complex tokens -> the complex FFT output is kept (no information discarded);
+    real tokens    -> the real part is taken, as in the original FNet.
+    fft_norm="ortho" keeps |mix(x)| ~ |x| so the residual stream is not swamped.
+    """
+    def __init__(self, fft_norm="ortho"):
+        super().__init__()
+        if fft_norm not in {"ortho", "backward", "forward"}:
+            raise ValueError("fft_norm must be 'ortho', 'backward' or 'forward'")
+        self.fft_norm = fft_norm
+
+    def forward(self, x):
+        y = torch.fft.fft2(x, dim=(-2, -1), norm=self.fft_norm)
+        return y if x.is_complex() else y.real
+
+
+class _FNetLayer(nn.Module):
+    """x = LN(x + mix(x)); x = LN(x + FFN(x))  (pre-LN variant matching TransformerEncoderLayer style)."""
+    def __init__(self, d_model, dim_feedforward, dropout, activation, layer_norm_eps,
+                 is_complex=True, ff=None, fft_norm="ortho"):
+        super().__init__()
+        norm = ComplexLayerNorm if is_complex else nn.LayerNorm
+        self.mix = FourierMixing(fft_norm)
+        self.ff = ff if ff is not None else FeedForward(d_model, dim_feedforward, dropout, activation, is_complex)
+        self.norm1 = norm(d_model, eps=layer_norm_eps)
+        self.norm2 = norm(d_model, eps=layer_norm_eps)
+        self.drop = ComplexDropout(dropout) if is_complex else nn.Dropout(dropout)
+
+    def forward(self, x):
+        x = x + self.drop(self.mix(self.norm1(x)))
+        x = x + self.drop(self.ff(self.norm2(x)))
+        return x
+
+
+class _FNetStack(nn.Sequential):
+    def __init__(self, layer, num_layers, tie_ffn=False):
+        super().__init__(*[copy.deepcopy(layer) for _ in range(num_layers)])
+        if tie_ffn:
+            for l in self:
+                l.ff = layer.ff
+
+    def forward(self, x):
+        for layer in self:
+            x = layer(x)
+        return x
+
+
+_FNET_TOKEN_AXES = ("vertical", "horizontal", "both")
+
+
+class fnetEncoder(nn.Module):
+    """
+    FNet encoder on axial (row / column) tokens.
+
+    token_axis:
+      "vertical"   — each k-space column is one token (same tokenisation as the axial vertical branch
+                     and crossAxialEncoder); mixing runs over (columns, hidden).
+      "horizontal" — each k-space row (group of `row_stride` rows) is one token; mixing over (rows, hidden).
+      "both"       — horizontal branch followed by the vertical branch, exactly like axialEncoder, each
+                     with its own embedding / FNet stack / head.
+    All learning is in the per-token FFN; the column mask is accepted for interface compatibility
+    but not used (the Fourier mixing is global).
+    """
+    def __init__(self, image_size, numCh=1, d_model=512, nhead=8, num_layers=2, dim_feedforward=None,
+                    dropout=0.1, activation='relu', layer_norm_eps=1e-05, batch_first=True,
+                    device=None, dtype=None, norm=None,
+                    pos_emb_type="APE", rope_theta=100.0, attn_type="complex", row_stride=1,
+                    ffn_sharing="none", shared_ffn=None, flattening_order="row_major", fft_norm="ortho",
+                    token_axis="vertical"):
+        super().__init__()
+        if token_axis not in _FNET_TOKEN_AXES:
+            raise ValueError(f"token_axis must be one of {_FNET_TOKEN_AXES}, got '{token_axis}'")
+        if token_axis == "vertical" and row_stride != 1:
+            raise ValueError("row_stride only applies to horizontal tokens; use row_stride=1 with token_axis='vertical'")
+
+        self.token_axis = token_axis
+        self.pos_emb_type = pos_emb_type
+        self.d_model = d_model
+        self.is_complex = attn_type in _COMPLEX_ATTN_TYPES
+
+        image_height, image_width = pair(image_size)
+        h_tokens = image_height // row_stride
+        ape_dtype = torch.cfloat if self.is_complex else None
+
+        h_emb, v_emb = get_to_embedding(
+            "axial", image_height=image_height, image_width=image_width, numCh=numCh, d_model=d_model,
+            row_stride=row_stride, is_complex=self.is_complex, flattening_order=flattening_order)
+        h_head, v_head = get_mlp_head(
+            "axial", d_model, numCh=numCh, image_height=image_height, image_width=image_width,
+            row_stride=row_stride, is_complex=self.is_complex, flattening_order=flattening_order,
+            layer_norm_eps=layer_norm_eps)
+        self.dropout = ComplexDropout(dropout) if self.is_complex else nn.Dropout(dropout)
+
+        if shared_ffn is None and ffn_sharing == "per_stage":
+            shared_ffn = FeedForward(d_model, dim_feedforward, dropout, activation, self.is_complex)
+
+        def make_stack():
+            layer = _FNetLayer(d_model, dim_feedforward, dropout, activation, layer_norm_eps,
+                               is_complex=self.is_complex, ff=shared_ffn, fft_norm=fft_norm)
+            return _FNetStack(layer, num_layers, tie_ffn=shared_ffn is not None)
+
+        # RoPE has no q/k to rotate; the DFT is already position-dependent. Only APE adds a learned embedding.
+        if token_axis in ("horizontal", "both"):
+            self.to_horizontal_embedding, self.horizontal_mlp_head = h_emb, h_head
+            self.horizontalEncoder = make_stack()
+            if pos_emb_type == "APE":
+                self.horizontal_pos_embedding = nn.Parameter(torch.randn(1, h_tokens, d_model, dtype=ape_dtype))
+        if token_axis in ("vertical", "both"):
+            self.to_vertical_embedding, self.vertical_mlp_head = v_emb, v_head
+            self.verticalEncoder = make_stack()
+            if pos_emb_type == "APE":
+                self.vertical_pos_embedding = nn.Parameter(torch.randn(1, image_width, d_model, dtype=ape_dtype))
+
+    def _run_branch(self, x, embed, pos_emb, encoder, head):
+        x = embed(x)
+        if pos_emb is not None:
+            x = x + pos_emb
+        x = self.dropout(x)
+        return head(encoder(x))
+
+    def forward(self, img, col_mask=None):
+        x = img
+        if self.token_axis in ("horizontal", "both"):
+            x = self._run_branch(x, self.to_horizontal_embedding, getattr(self, "horizontal_pos_embedding", None),
+                                 self.horizontalEncoder, self.horizontal_mlp_head)
+        if self.token_axis in ("vertical", "both"):
+            x = self._run_branch(x, self.to_vertical_embedding, getattr(self, "vertical_pos_embedding", None),
+                                 self.verticalEncoder, self.vertical_mlp_head)
+        return x

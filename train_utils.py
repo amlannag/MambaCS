@@ -6,7 +6,7 @@ import torch
 from fastmri.data.subsample import EquiSpacedMaskFunc, RandomMaskFunc
 from fastmri.data.transforms import apply_mask
 
-from DcTNN.model import TokenVIT, axVIT, CrossAttentionVIT, FixedAPTVIT, cascadeNet
+from DcTNN.model import TokenVIT, axVIT, CrossAttentionVIT, FNetVIT, FixedAPTVIT, cascadeNet
 from DcTNN.fixed_apt import resolve_fixed_apt_layout
 from DcTNN.util import _COMPLEX_ATTN_TYPES
 from ReconFormer import ReconFormerBaseline
@@ -98,6 +98,25 @@ _ENCODER_ARGS = {
             rope_mixed_rotate=cfg.rope_mixed_rotate,
             attn_type=cfg.attn_type,
             row_stride=cfg.axial_row_stride,
+        ),
+    ),
+    "fnet": lambda cfg: (
+        FNetVIT,
+        dict(
+            layerNo=cfg.layer_no,
+            numCh=cfg.num_channels,
+            d_model=None,
+            nhead=cfg.nhead_axial,
+            num_encoder_layers=cfg.num_encoder_layers,
+            layer_norm_eps=getattr(cfg, "layer_norm_eps", 1e-5),
+            dim_feedforward=None,
+            pos_emb_type=cfg.pos_emb_type,
+            rope_theta=cfg.rope_theta,
+            rope_mixed_rotate=cfg.rope_mixed_rotate,
+            attn_type=cfg.attn_type,
+            row_stride=cfg.axial_row_stride,
+            fft_norm=getattr(cfg, "fnet_fft_norm", "ortho"),
+            token_axis=getattr(cfg, "fnet_token_axis", "vertical"),
         ),
     ),
     "kaleidoscope": lambda cfg: (

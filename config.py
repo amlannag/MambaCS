@@ -6,6 +6,7 @@ To run experiments, define overrides in train_config.py and run:
 
 Encoder options for `encoders`:
     "cross_axial"   — vertical-only sampled/unsampled complex cross-attention
+    "fnet"          — FNet Fourier token mixing over vertical column tokens (no attention)
     "axial"         — axial row/column transformer (global structure)
     "kaleidoscope"  — kaleidoscope patch transformer (non-local features)
     "patch"         — standard patch transformer (local texture)
@@ -91,6 +92,15 @@ class Config:
     nhead_axial: int = 8
     layer_no: int = 1
     num_encoder_layers: int = 2
+    # FNet stage ("fnet" in `encoders`): FFT normalisation of the Fourier token mixing.
+    # "ortho" keeps |mix(x)| ~ |x| so the residual stream is preserved (recommended);
+    # "backward" is the unnormalised FFT of the original FNet paper.
+    fnet_fft_norm: str = "ortho"
+    # Which axial tokens the FNet stage mixes over:
+    #   "vertical"   — k-space columns are tokens (default; matches cross_axial / axial vertical branch)
+    #   "horizontal" — k-space rows are tokens (row groups of axial_row_stride)
+    #   "both"       — horizontal branch then vertical branch, like the axial encoder
+    fnet_token_axis: str = "vertical"
     # Optional per-stage override of num_encoder_layers (one int per entry of `encoders`),
     # e.g. [1, 2, 1, 2] for a cross_axial/axial cascade with 1 layer per cross stage and 2 per axial.
     stage_encoder_layers: Optional[List[int]] = None
