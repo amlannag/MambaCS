@@ -156,9 +156,11 @@ class Config:
     #   "unsampled_kspace" — only locations NOT acquired by the sampling mask; the
     #                        measured region contributes nothing to the loss.
     # "unsampled_kspace" requires a loss that operates in k-space (e.g. complex_l1 /
-    # complex_l2 / perpendicular_loss with a k-space prediction, or l1 / l2 with a
-    # kspace_companding / log_kspace norm).
+    # complex_l2 / complex_l2_nmse / perpendicular_loss with a k-space prediction, or
+    # l1 / l2 with a kspace_companding / log_kspace norm).
     loss_function_domain: str = "all_kspace"
+    # "complex_l2_nmse": per-sample sum|pred-gt|^2 / sum|gt|^2 over the loss region (scale-free complex L2).
+    # "complex_l2_pointwise_normalized": mean |pred-gt|^2 / (|gt| + eps), each cell normalised by its own target.
     final_loss_type: str = "l1"
     intermediate_loss_type: str = "l1"
     # Radial frequency weighting for loss type "freq_weighted_complex_l2" (k-space only):

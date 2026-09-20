@@ -115,16 +115,81 @@ class ComplexL1Loss(nn.Module):
         return _reduce(torch.abs(pred.real - gt_complex.real) + torch.abs(pred.imag - gt_complex.imag), mask)
 
 
-class ComplexL2Loss(nn.Module):
-    """L2 loss in the active complex domain: squared real diff + squared imag diff."""
+def _complex_pair(pred, gt, stats, mask, name):
+    """Resolve the complex target for a complex loss and run the shared validity checks."""
+    domain = _complex_target_domain(stats)
+    _check_kspace_mask(mask, domain == "kspace", name)
+    gt_complex = _resolve_target(gt, domain)
+    if not pred.is_complex() or not gt_complex.is_complex():
+        raise ValueError(f"{name} requires complex prediction and target tensors")
+    return gt_complex
+
+
+def _squared_error(pred, gt_complex):
+    return (pred.real - gt_complex.real) ** 2 + (pred.imag - gt_complex.imag) ** 2
+
+
+class _ElementwiseComplexLoss(nn.Module):
+    """
+    Base for complex losses that are the region mean of a per-element term:
+    `elementwise` returns the per-cell term so that forward == _reduce(elementwise, mask).
+    """
+    name = "complex"
+
+    def elementwise(self, pred, gt, stats=None, mask=None):
+        raise NotImplementedError
 
     def forward(self, pred, gt, stats=None, mask=None):
-        domain = _complex_target_domain(stats)
-        _check_kspace_mask(mask, domain == "kspace", "complex_l2")
-        gt_complex = _resolve_target(gt, domain)
-        if not pred.is_complex() or not gt_complex.is_complex():
-            raise ValueError("complex_l2 requires complex prediction and target tensors")
-        return _reduce((pred.real - gt_complex.real) ** 2 + (pred.imag - gt_complex.imag) ** 2, mask)
+        return _reduce(self.elementwise(pred, gt, stats, mask), mask)
+
+
+class ComplexL2Loss(_ElementwiseComplexLoss):
+    """L2 loss in the active complex domain: squared real diff + squared imag diff."""
+    name = "complex_l2"
+
+    def elementwise(self, pred, gt, stats=None, mask=None):
+        return _squared_error(pred, _complex_pair(pred, gt, stats, mask, self.name))
+
+
+class ComplexL2NMSELoss(_ElementwiseComplexLoss):
+    """
+    Normalised complex L2 in the active complex domain, per sample:
+        sum |pred - gt|^2 / sum |gt|^2
+    over all elements, or over the unsampled k-space locations only when a mask is given.
+    Scale-free, so slices with very different k-space energy contribute comparably.
+    The per-element term is |pred - gt|^2 divided by the sample's mean |gt|^2 over the region.
+    """
+    name = "complex_l2_nmse"
+
+    def __init__(self, eps: float = 1e-12):
+        super().__init__()
+        self.eps = float(eps)
+
+    def elementwise(self, pred, gt, stats=None, mask=None):
+        gt_complex = _complex_pair(pred, gt, stats, mask, self.name)
+        error = _squared_error(pred, gt_complex)
+        energy = gt_complex.real ** 2 + gt_complex.imag ** 2
+        weight = torch.ones_like(error) if mask is None else (1.0 - mask).to(error.dtype).expand_as(error)
+        dims = tuple(range(1, error.ndim))
+        mean_energy = (energy * weight).sum(dims, keepdim=True) / weight.sum(dims, keepdim=True).clamp_min(1.0)
+        return error / mean_energy.clamp_min(self.eps)
+
+
+class PointwiseNormalizedComplexL2Loss(_ElementwiseComplexLoss):
+    """
+    Pixel-by-pixel normalised complex L2:  mean |pred - gt|^2 / (|gt| + eps).
+    Each k-space cell's squared error is divided by the magnitude of its own target, so low-energy
+    (high-frequency) cells are not swamped by the bright centre.
+    """
+    name = "complex_l2_pointwise_normalized"
+
+    def __init__(self, eps: float = 1e-8):
+        super().__init__()
+        self.eps = float(eps)
+
+    def elementwise(self, pred, gt, stats=None, mask=None):
+        gt_complex = _complex_pair(pred, gt, stats, mask, self.name)
+        return _squared_error(pred, gt_complex) / (gt_complex.abs() + self.eps)
 
 
 def _normalized_radius_grid_like(x: torch.Tensor) -> torch.Tensor:
@@ -159,12 +224,13 @@ def _radial_frequency_weight_map(x: torch.Tensor, m: float, gamma: float, r_cap=
     return 1.0 + (m - 1.0) * ratio.pow(gamma)
 
 
-class FrequencyWeightedComplexL2Loss(nn.Module):
+class FrequencyWeightedComplexL2Loss(_ElementwiseComplexLoss):
     """
     complex_l2 in k-space with each element weighted by a radial frequency weight.
     The weight is normalised to mean 1 over the reduced region (all k-space, or the
     unsampled region when a mask is given) so the loss scale matches complex_l2.
     """
+    name = "freq_weighted_complex_l2"
 
     def __init__(self, weight_m: float = 5.0, weight_gamma: float = 1.0, weight_r_cap=None):
         super().__init__()
@@ -175,15 +241,12 @@ class FrequencyWeightedComplexL2Loss(nn.Module):
     def weight_map(self, x: torch.Tensor) -> torch.Tensor:
         return _radial_frequency_weight_map(x, self.weight_m, self.weight_gamma, self.weight_r_cap)
 
-    def forward(self, pred, gt, stats=None, mask=None):
+    def elementwise(self, pred, gt, stats=None, mask=None):
         if _complex_target_domain(stats) != "kspace":
             raise ValueError("freq_weighted_complex_l2 requires a k-space prediction (learning='k_space')")
-        gt_complex = _resolve_target(gt, "kspace")
-        if not pred.is_complex() or not gt_complex.is_complex():
-            raise ValueError("freq_weighted_complex_l2 requires complex prediction and target tensors")
-        elementwise = (pred.real - gt_complex.real) ** 2 + (pred.imag - gt_complex.imag) ** 2
-        weight = self.weight_map(pred).to(elementwise.dtype)
-        return _reduce(elementwise * weight, mask) / _reduce(weight.expand_as(elementwise), mask)
+        error = _squared_error(pred, _complex_pair(pred, gt, stats, mask, self.name))
+        weight = self.weight_map(pred).to(error.dtype).expand_as(error)
+        return error * weight / _reduce(weight, mask)
 
 
 class ReconFormerMagnitudeL1Loss(nn.Module):
@@ -195,8 +258,9 @@ class ReconFormerMagnitudeL1Loss(nn.Module):
         return F.l1_loss(pred.abs(), gt_complex.abs())
 
 
-class PerpendicularLoss(nn.Module):
+class PerpendicularLoss(_ElementwiseComplexLoss):
     """Perpendicular loss with a magnitude L1 term in the active complex domain."""
+    name = "perpendicular_loss"
 
     def __init__(
         self,
@@ -216,12 +280,8 @@ class PerpendicularLoss(nn.Module):
     def set_current_m(self, value: float):
         self.current_m = float(value)
 
-    def forward(self, pred, gt, stats=None, mask=None):
-        domain = _complex_target_domain(stats)
-        _check_kspace_mask(mask, domain == "kspace", "perpendicular_loss")
-        gt_complex = _resolve_target(gt, domain)
-        if not pred.is_complex() or not gt_complex.is_complex():
-            raise ValueError("perpendicular_loss requires complex prediction and target tensors")
+    def elementwise(self, pred, gt, stats=None, mask=None):
+        gt_complex = _complex_pair(pred, gt, stats, mask, self.name)
 
         cross = pred * gt_complex.conj()
         phi_hat = torch.angle(cross)
@@ -233,7 +293,7 @@ class PerpendicularLoss(nn.Module):
             magnitude_l1 = magnitude_l1 * _perpendicular_mag_weight_map(
                 pred, m=self.current_m, k=self.magnitude_weight_k, p=self.magnitude_weight_p
             )
-        return _reduce(branched + magnitude_l1, mask)
+        return branched + magnitude_l1
 
 
 def _loraks_offsets(radius: int):
@@ -321,6 +381,10 @@ def build_loss(loss_type: str, **kwargs) -> nn.Module:
         return ComplexL1Loss()
     if loss_type == "complex_l2":
         return ComplexL2Loss()
+    if loss_type == "complex_l2_nmse":
+        return ComplexL2NMSELoss()
+    if loss_type == "complex_l2_pointwise_normalized":
+        return PointwiseNormalizedComplexL2Loss(**kwargs)
     if loss_type == "freq_weighted_complex_l2":
         return FrequencyWeightedComplexL2Loss(**kwargs)
     if loss_type == "reconformer_l1":
@@ -334,7 +398,8 @@ def build_loss(loss_type: str, **kwargs) -> nn.Module:
     raise ValueError(
         "Unknown loss_type "
         f"'{loss_type}'. Choose from: ['l1', 'l2', 'image_domain_l1', 'image_domain_l2', "
-        "'complex_l1', 'complex_l2', 'freq_weighted_complex_l2', 'reconformer_l1', 'perpendicular_loss', "
+        "'complex_l1', 'complex_l2', 'complex_l2_nmse', 'complex_l2_pointwise_normalized', 'freq_weighted_complex_l2', "
+        "'reconformer_l1', 'perpendicular_loss', "
         "'loraks_c', 'complex_l2_loraks']"
     )
 
