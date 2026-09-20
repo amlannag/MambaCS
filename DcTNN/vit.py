@@ -163,7 +163,7 @@ class FNetVIT(BaseVIT):
                     layer_norm_eps=1e-05, batch_first=True, device=None, dtype=None,
                     pos_emb_type="APE", rope_theta=100.0, rope_mixed_rotate=True, attn_type="complex",
                     row_stride=1, ffn_sharing="none", shared_ffn=None, flattening_order="row_major",
-                    fft_norm="ortho", token_axis="vertical"):
+                    fft_norm="ortho", token_axis="vertical", with_embedding=True):
         if d_model is None:
             _, image_width = N if isinstance(N, (tuple, list)) else (N, N)
             d_model = image_width * numCh
@@ -175,7 +175,8 @@ class FNetVIT(BaseVIT):
                 dropout, activation, layer_norm_eps, batch_first, device, dtype,
                 pos_emb_type=pos_emb_type, rope_theta=rope_theta, attn_type=attn_type,
                 row_stride=row_stride, ffn_sharing=ffn_sharing, shared_ffn=shared_ffn,
-                flattening_order=flattening_order, fft_norm=fft_norm, token_axis=token_axis
+                flattening_order=flattening_order, fft_norm=fft_norm, token_axis=token_axis,
+                with_embedding=with_embedding
             )
             for _ in range(layerNo)
         ])

@@ -487,6 +487,11 @@ class fnetEncoder(nn.Module):
       "horizontal" — each k-space row (group of `row_stride` rows) is one token; mixing over (rows, hidden).
       "both"       — horizontal branch followed by the vertical branch, exactly like axialEncoder, each
                      with its own embedding / FNet stack / head.
+    with_embedding:
+      True  — tokens go through the same Rearrange -> Linear(token_dim, d_model) embedding as the other
+              encoders and come back through LayerNorm -> Linear(d_model, token_dim) -> Rearrange.
+      False — raw k-space rows / columns are the tokens (hidden dim = token_dim: H*numCh for columns,
+              row_stride*W*numCh for rows); no linear projection in or out, only the Rearrange.
     All learning is in the per-token FFN; the column mask is accepted for interface compatibility
     but not used (the Fourier mixing is global).
     """
@@ -495,7 +500,7 @@ class fnetEncoder(nn.Module):
                     device=None, dtype=None, norm=None,
                     pos_emb_type="APE", rope_theta=100.0, attn_type="complex", row_stride=1,
                     ffn_sharing="none", shared_ffn=None, flattening_order="row_major", fft_norm="ortho",
-                    token_axis="vertical"):
+                    token_axis="vertical", with_embedding=True):
         super().__init__()
         if token_axis not in _FNET_TOKEN_AXES:
             raise ValueError(f"token_axis must be one of {_FNET_TOKEN_AXES}, got '{token_axis}'")
@@ -505,6 +510,7 @@ class fnetEncoder(nn.Module):
         self.token_axis = token_axis
         self.pos_emb_type = pos_emb_type
         self.d_model = d_model
+        self.with_embedding = with_embedding
         self.is_complex = attn_type in _COMPLEX_ATTN_TYPES
 
         image_height, image_width = pair(image_size)
@@ -518,27 +524,43 @@ class fnetEncoder(nn.Module):
             "axial", d_model, numCh=numCh, image_height=image_height, image_width=image_width,
             row_stride=row_stride, is_complex=self.is_complex, flattening_order=flattening_order,
             layer_norm_eps=layer_norm_eps)
+        # Hidden width per branch: d_model when embedded, otherwise the raw token length.
+        h_dim = d_model if with_embedding else row_stride * image_width * numCh
+        v_dim = d_model if with_embedding else image_height * numCh
+        if not with_embedding:
+            h_emb, v_emb = h_emb[0], v_emb[0]            # keep only the Rearrange (token unroll)
+            h_head, v_head = h_head[-1], v_head[-1]      # keep only the Rearrange back to the image
         self.dropout = ComplexDropout(dropout) if self.is_complex else nn.Dropout(dropout)
 
-        if shared_ffn is None and ffn_sharing == "per_stage":
+        if shared_ffn is None and ffn_sharing == "per_stage" and with_embedding:
             shared_ffn = FeedForward(d_model, dim_feedforward, dropout, activation, self.is_complex)
+        if shared_ffn is not None and not with_embedding:
+            for name, dim in (("horizontal", h_dim), ("vertical", v_dim)):
+                if name in (token_axis, "both") and shared_ffn.net[0].in_features != dim:
+                    raise ValueError(
+                        f"Shared FFN expects d_model={shared_ffn.net[0].in_features} but the un-embedded FNet "
+                        f"{name} tokens have width {dim}; use with_embedding=True or ffn_sharing='none'"
+                    )
 
-        def make_stack():
-            layer = _FNetLayer(d_model, dim_feedforward, dropout, activation, layer_norm_eps,
-                               is_complex=self.is_complex, ff=shared_ffn, fft_norm=fft_norm)
-            return _FNetStack(layer, num_layers, tie_ffn=shared_ffn is not None)
+        def make_stack(dim):
+            ff = shared_ffn
+            if ff is None and ffn_sharing == "per_stage":      # un-embedded branches may differ in width
+                ff = FeedForward(dim, dim_feedforward, dropout, activation, self.is_complex)
+            layer = _FNetLayer(dim, dim_feedforward, dropout, activation, layer_norm_eps,
+                               is_complex=self.is_complex, ff=ff, fft_norm=fft_norm)
+            return _FNetStack(layer, num_layers, tie_ffn=ff is not None)
 
         # RoPE has no q/k to rotate; the DFT is already position-dependent. Only APE adds a learned embedding.
         if token_axis in ("horizontal", "both"):
             self.to_horizontal_embedding, self.horizontal_mlp_head = h_emb, h_head
-            self.horizontalEncoder = make_stack()
+            self.horizontalEncoder = make_stack(h_dim)
             if pos_emb_type == "APE":
-                self.horizontal_pos_embedding = nn.Parameter(torch.randn(1, h_tokens, d_model, dtype=ape_dtype))
+                self.horizontal_pos_embedding = nn.Parameter(torch.randn(1, h_tokens, h_dim, dtype=ape_dtype))
         if token_axis in ("vertical", "both"):
             self.to_vertical_embedding, self.vertical_mlp_head = v_emb, v_head
-            self.verticalEncoder = make_stack()
+            self.verticalEncoder = make_stack(v_dim)
             if pos_emb_type == "APE":
-                self.vertical_pos_embedding = nn.Parameter(torch.randn(1, image_width, d_model, dtype=ape_dtype))
+                self.vertical_pos_embedding = nn.Parameter(torch.randn(1, image_width, v_dim, dtype=ape_dtype))
 
     def _run_branch(self, x, embed, pos_emb, encoder, head):
         x = embed(x)

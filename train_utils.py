@@ -117,6 +117,7 @@ _ENCODER_ARGS = {
             row_stride=cfg.axial_row_stride,
             fft_norm=getattr(cfg, "fnet_fft_norm", "ortho"),
             token_axis=getattr(cfg, "fnet_token_axis", "vertical"),
+            with_embedding=getattr(cfg, "fnet_with_embedding", True),
         ),
     ),
     "kaleidoscope": lambda cfg: (

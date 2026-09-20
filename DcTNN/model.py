@@ -29,14 +29,22 @@ def _stage_ffn_spec(N, cls, args):
 
 
 def _apply_ffn_sharing(N, encList, encArgs, ffn_sharing):
-    """Return a copy of stage args with the FFN sharing mode applied."""
+    """
+    Return a copy of stage args with the FFN sharing mode applied.
+    FNet stages are never part of FFN sharing: their per-token FFN is all they learn, and their hidden
+    width may differ from the attention stages (un-embedded tokens), so they always keep their own FFNs.
+    """
     if ffn_sharing == "none":
         return list(encArgs)
+    shared = [cls is not FNetVIT for cls in encList]
     if ffn_sharing == "per_stage":
-        return [dict(args, ffn_sharing="per_stage") for args in encArgs]
+        return [dict(args, ffn_sharing="per_stage") if share else dict(args, ffn_sharing="none")
+                for args, share in zip(encArgs, shared)]
 
-    # global: one FeedForward shared by every stage
-    specs = [_stage_ffn_spec(N, cls, args) for cls, args in zip(encList, encArgs)]
+    # global: one FeedForward shared by every non-FNet stage
+    specs = [_stage_ffn_spec(N, cls, args) for cls, args, share in zip(encList, encArgs, shared) if share]
+    if not specs:
+        return [dict(args, ffn_sharing="none") for args in encArgs]
     base = specs[0]
     if any(spec != base for spec in specs[1:]):
         raise ValueError(
@@ -46,7 +54,8 @@ def _apply_ffn_sharing(N, encList, encArgs, ffn_sharing):
         )
     d_model, dim_ff, dropout, activation, is_complex = base
     shared_ffn = FeedForward(d_model, dim_ff, dropout, activation, is_complex)
-    return [dict(args, shared_ffn=shared_ffn) for args in encArgs]
+    return [dict(args, shared_ffn=shared_ffn) if share else dict(args, ffn_sharing="none")
+            for args, share in zip(encArgs, shared)]
 
 
 class cascadeNet(nn.Module):
