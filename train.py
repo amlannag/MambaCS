@@ -251,18 +251,28 @@ def _build_epoch_metrics(total_loss, final_loss, intermediate_loss_sum, total_ps
 
 def _loss_kwargs_for(cfg, loss_type):
     loss_type = loss_type.lower()
-    if loss_type == "perpendicular_loss" and cfg.perpendicular_mag_weighting:
-        return {
-            "magnitude_weighting": True,
-            "magnitude_weight_m": cfg.perpendicular_mag_weight_m,
-            "magnitude_weight_k": cfg.perpendicular_mag_weight_k,
-            "magnitude_weight_p": cfg.perpendicular_mag_weight_p,
-        }
+    if loss_type == "perpendicular_loss":
+        kwargs = {"magnitude_norm": getattr(cfg, "perpendicular_magnitude_norm", "l1")}
+        if cfg.perpendicular_mag_weighting:
+            kwargs.update(
+                magnitude_weighting=True,
+                magnitude_weight_m=cfg.perpendicular_mag_weight_m,
+                magnitude_weight_k=cfg.perpendicular_mag_weight_k,
+                magnitude_weight_p=cfg.perpendicular_mag_weight_p,
+            )
+        return kwargs
     if loss_type == "freq_weighted_complex_l2":
         return {
             "weight_m": cfg.freq_weight_m,
             "weight_gamma": cfg.freq_weight_gamma,
             "weight_r_cap": cfg.freq_weight_r_cap,
+            "weight_form": getattr(cfg, "freq_weight_form", "power"),
+            "weight_a": getattr(cfg, "freq_weight_a", 1.0),
+            "weight_r_stop": getattr(cfg, "freq_weight_r_stop", None),
+            "weight_ring_edges": getattr(cfg, "freq_weight_ring_edges", None),
+            "weight_ring_weights": getattr(cfg, "freq_weight_ring_weights", None),
+            "weight_kx_ring_edges": getattr(cfg, "freq_weight_kx_ring_edges", None),
+            "weight_kx_ring_weights": getattr(cfg, "freq_weight_kx_ring_weights", None),
         }
     if loss_type in {"loraks_c", "complex_l2_loraks"}:
         kwargs = {

@@ -167,15 +167,31 @@ class Config:
     # "complex_l2_pointwise_normalized": mean |pred-gt|^2 / (|gt| + eps), each cell normalised by its own target.
     final_loss_type: str = "l1"
     intermediate_loss_type: str = "l1"
-    # Radial frequency weighting for loss type "freq_weighted_complex_l2" (k-space only):
-    #   r is the radius on the normalised square [-1, 1]^2 centred at DC, r_max = sqrt(2) (corner);
-    #   w(r) = 1 + (freq_weight_m - 1) * (r / r_max)^freq_weight_gamma, then normalised to mean 1.
-    #   freq_weight_m > 1 up-weights high frequencies (w = m in the corners); m == 1 == complex_l2.
-    #   freq_weight_r_cap (optional): use r_max = r_cap and plateau at m for r >= r_cap, so only
-    #   the region inside r_cap is de-emphasised (e.g. 0.6 = keep the central 60% box uniform).
+    # Radial frequency weighting for loss type "freq_weighted_complex_l2" (k-space only).
+    # r is the radius on the normalised square [-1, 1]^2 centred at DC (edge = 1, corner = sqrt2);
+    # every form is normalised to mean 1 afterwards, so only its shape matters. freq_weight_form:
+    #   "power"          w = 1 + (m-1) (r/r_max)^gamma;  r_max = sqrt2, or freq_weight_r_cap (plateau at m beyond it)
+    #   "exp"            w = exp(a r) for r < freq_weight_r_stop, else 1  (a > 0 boosts high freq, a < 0 suppresses;
+    #                    the return to 1 at r_stop is a hard step)
+    #   "exp_saturating" w = 1 + (m-1) (1 - exp(-a r))   smooth rise to m, 63% reached at r = 1/a
+    #   "gauss_dip"      w = 1 - (1 - 1/m) exp(-(a r)^2)   1/m at DC rising to 1; only the centre is de-emphasised
+    #   "rings"          piecewise constant: freq_weight_ring_weights[i] for ring_edges[i] <= r < ring_edges[i+1]
+    #                    (normalised radii; len(weights) == len(edges) - 1; beyond the last edge -> 1)
+    # freq_weight_r_stop (any form): weight reset to exactly 1 for r >= r_stop.
+    freq_weight_form: str = "power"
     freq_weight_m: float = 5.0
     freq_weight_gamma: float = 1.0
     freq_weight_r_cap: Optional[float] = None
+    freq_weight_a: float = 1.0
+    freq_weight_r_stop: Optional[float] = None
+    freq_weight_ring_edges: Optional[List[float]] = None
+    freq_weight_ring_weights: Optional[List[float]] = None
+    # Optional extra piecewise factor on the normalised column distance |kx| (0 = centre column, 1 = edge),
+    # multiplied into any form. The Cartesian mask varies along kx, so this targets the unmeasured columns.
+    freq_weight_kx_ring_edges: Optional[List[float]] = None
+    freq_weight_kx_ring_weights: Optional[List[float]] = None
+    # Norm of the magnitude term inside "perpendicular_loss": "l1" = | |gt|-|pred| | (original), "l2" = (|gt|-|pred|)^2
+    perpendicular_magnitude_norm: str = "l1"
     perpendicular_mag_weighting: bool = False
     perpendicular_mag_weight_m: float = 1.0
     perpendicular_mag_weight_k: float = 0.103

@@ -211,17 +211,70 @@ def _normalized_radius_grid_like(x: torch.Tensor) -> torch.Tensor:
 _FREQ_WEIGHT_R_MAX = math.sqrt(2.0)   # corner of the normalised [-1, 1]^2 square
 
 
-def _radial_frequency_weight_map(x: torch.Tensor, m: float, gamma: float, r_cap=None) -> torch.Tensor:
+FREQ_WEIGHT_FORMS = ("power", "exp", "exp_saturating", "gauss_dip", "rings")
+
+
+def _normalized_kx_grid_like(x: torch.Tensor) -> torch.Tensor:
+    """|kx| of every cell on the normalised square: 0 at the centre column, 1 at the left/right edge."""
+    if x.ndim != 4:
+        raise ValueError(f"Expected a [B, C, H, W] tensor, got shape {tuple(x.shape)}")
+    _, _, h, w = x.shape
+    dtype = x.real.dtype if x.is_complex() else x.dtype
+    xs = ((torch.arange(w, device=x.device, dtype=dtype) - w // 2) / (w / 2)).abs()
+    return xs.expand(h, w).unsqueeze(0).unsqueeze(0)
+
+
+def _piecewise_rings(coord: torch.Tensor, edges, weights) -> torch.Tensor:
+    if edges is None or weights is None or len(weights) != len(edges) - 1:
+        raise ValueError("rings need edges (n+1 ascending values) and weights (n values)")
+    w = torch.ones_like(coord)
+    for lo, hi, wt in zip(edges[:-1], edges[1:], weights):
+        w = torch.where((coord >= float(lo)) & (coord < float(hi)), torch.full_like(coord, float(wt)), w)
+    return w
+
+
+def _radial_frequency_weight_map(x: torch.Tensor, m: float, gamma: float, r_cap=None,
+                                 form: str = "power", a: float = 1.0, r_stop=None,
+                                 ring_edges=None, ring_weights=None,
+                                 kx_ring_edges=None, kx_ring_weights=None) -> torch.Tensor:
     """
-    Monotone radial k-space weight on the normalised square: w(r) = 1 + (m - 1) * (r / r_max)^gamma,
-    with r from _normalized_radius_grid_like and r_max = sqrt(2) (the corner), so w = 1 at DC and
-    w = m in the corners. m > 1 emphasises high frequencies, m == 1 is uniform.
-    If r_cap is given, r_max = r_cap and the weight plateaus at m for r >= r_cap, so only the
-    region inside r_cap is de-emphasised and everything outside it is weighted uniformly.
+    Radial k-space weight w(r) on the normalised square (r from _normalized_radius_grid_like:
+    0 at DC, 1 at the edge midpoints, sqrt(2) in the corners). The loss divides by mean(w), so only
+    the SHAPE matters; the continuous forms have w(0) = 1 before normalisation.
+
+    form="power"          w = 1 + (m - 1) * (r / r_max)^gamma,  r_max = sqrt2 or r_cap (plateau at m beyond r_cap)
+    form="exp"            w = exp(a * r);  a > 0 boosts high frequencies, a < 0 suppresses them
+    form="exp_saturating" w = 1 + (m - 1) * (1 - exp(-a * r))   smooth rise from 1 toward m (63% at r = 1/a)
+    form="gauss_dip"      w = 1 - (1 - 1/m) * exp(-(a * r)^2)   1/m at DC rising to 1; only the centre is de-emphasised
+    form="rings"          piecewise constant: w = ring_weights[i] for ring_edges[i] <= r < ring_edges[i+1]
+                          (len(ring_weights) == len(ring_edges) - 1; r beyond the last edge -> 1)
+
+    kx_ring_edges / kx_ring_weights (any form, optional): an additional piecewise-constant factor on the
+    normalised column distance |kx| (0 = centre column, 1 = edge), multiplied into w. Useful because the
+    Cartesian mask varies along kx only, so the unmeasured region is a function of |kx| rather than r.
+
+    r_stop (any form): for r >= r_stop the weight is reset to exactly 1, i.e. the weighting only acts
+    inside r_stop. This is a hard step unless the form is already ~1 there.
     """
-    r_max = _FREQ_WEIGHT_R_MAX if r_cap is None else float(r_cap)
-    ratio = (_normalized_radius_grid_like(x) / r_max).clamp(max=1.0)
-    return 1.0 + (m - 1.0) * ratio.pow(gamma)
+    if form not in FREQ_WEIGHT_FORMS:
+        raise ValueError(f"form must be one of {FREQ_WEIGHT_FORMS}, got '{form}'")
+    r = _normalized_radius_grid_like(x)
+    if form == "power":
+        r_max = _FREQ_WEIGHT_R_MAX if r_cap is None else float(r_cap)
+        w = 1.0 + (m - 1.0) * (r / r_max).clamp(max=1.0).pow(gamma)
+    elif form == "exp":
+        w = torch.exp((a * r).clamp(max=80.0))
+    elif form == "exp_saturating":
+        w = 1.0 + (m - 1.0) * (1.0 - torch.exp(-a * r))
+    elif form == "gauss_dip":
+        w = 1.0 - (1.0 - 1.0 / m) * torch.exp(-(a * r) ** 2)
+    else:
+        w = _piecewise_rings(r, ring_edges, ring_weights)
+    if kx_ring_edges is not None or kx_ring_weights is not None:
+        w = w * _piecewise_rings(_normalized_kx_grid_like(x), kx_ring_edges, kx_ring_weights)
+    if r_stop is not None:
+        w = torch.where(r < float(r_stop), w, torch.ones_like(w))
+    return w
 
 
 class FrequencyWeightedComplexL2Loss(_ElementwiseComplexLoss):
@@ -232,14 +285,29 @@ class FrequencyWeightedComplexL2Loss(_ElementwiseComplexLoss):
     """
     name = "freq_weighted_complex_l2"
 
-    def __init__(self, weight_m: float = 5.0, weight_gamma: float = 1.0, weight_r_cap=None):
+    def __init__(self, weight_m: float = 5.0, weight_gamma: float = 1.0, weight_r_cap=None,
+                 weight_form: str = "power", weight_a: float = 1.0, weight_r_stop=None,
+                 weight_ring_edges=None, weight_ring_weights=None,
+                 weight_kx_ring_edges=None, weight_kx_ring_weights=None):
         super().__init__()
+        if weight_form not in FREQ_WEIGHT_FORMS:
+            raise ValueError(f"weight_form must be one of {FREQ_WEIGHT_FORMS}, got '{weight_form}'")
+        self.weight_kx_ring_edges = None if weight_kx_ring_edges is None else [float(v) for v in weight_kx_ring_edges]
+        self.weight_kx_ring_weights = None if weight_kx_ring_weights is None else [float(v) for v in weight_kx_ring_weights]
         self.weight_m = float(weight_m)
         self.weight_gamma = float(weight_gamma)
         self.weight_r_cap = None if weight_r_cap is None else float(weight_r_cap)
+        self.weight_form = weight_form
+        self.weight_a = float(weight_a)
+        self.weight_r_stop = None if weight_r_stop is None else float(weight_r_stop)
+        self.weight_ring_edges = None if weight_ring_edges is None else [float(v) for v in weight_ring_edges]
+        self.weight_ring_weights = None if weight_ring_weights is None else [float(v) for v in weight_ring_weights]
 
     def weight_map(self, x: torch.Tensor) -> torch.Tensor:
-        return _radial_frequency_weight_map(x, self.weight_m, self.weight_gamma, self.weight_r_cap)
+        return _radial_frequency_weight_map(x, self.weight_m, self.weight_gamma, self.weight_r_cap,
+                                            form=self.weight_form, a=self.weight_a, r_stop=self.weight_r_stop,
+                                            ring_edges=self.weight_ring_edges, ring_weights=self.weight_ring_weights,
+                                            kx_ring_edges=self.weight_kx_ring_edges, kx_ring_weights=self.weight_kx_ring_weights)
 
     def elementwise(self, pred, gt, stats=None, mask=None):
         if _complex_target_domain(stats) != "kspace":
@@ -259,7 +327,10 @@ class ReconFormerMagnitudeL1Loss(nn.Module):
 
 
 class PerpendicularLoss(_ElementwiseComplexLoss):
-    """Perpendicular loss with a magnitude L1 term in the active complex domain."""
+    """
+    Perpendicular loss (phase term) plus a magnitude term in the active complex domain.
+    magnitude_norm: "l1" -> | |gt| - |pred| |   (original),  "l2" -> (|gt| - |pred|)^2.
+    """
     name = "perpendicular_loss"
 
     def __init__(
@@ -269,9 +340,13 @@ class PerpendicularLoss(_ElementwiseComplexLoss):
         magnitude_weight_m: float = 1.0,
         magnitude_weight_k: float = 0.103,
         magnitude_weight_p: float = 67.0,
+        magnitude_norm: str = "l1",
     ):
         super().__init__()
+        if magnitude_norm not in {"l1", "l2"}:
+            raise ValueError(f"magnitude_norm must be 'l1' or 'l2', got '{magnitude_norm}'")
         self.eps = eps
+        self.magnitude_norm = magnitude_norm
         self.magnitude_weighting = magnitude_weighting
         self.magnitude_weight_k = float(magnitude_weight_k)
         self.magnitude_weight_p = float(magnitude_weight_p)
@@ -288,12 +363,13 @@ class PerpendicularLoss(_ElementwiseComplexLoss):
         perp = 0.5*torch.abs(pred * gt_complex.conj() - pred.conj() * gt_complex) / (pred.abs() + self.eps)
         target_abs = gt_complex.abs()
         branched = torch.where(phi_hat.abs() < (math.pi / 2), perp, 2 * target_abs - perp)
-        magnitude_l1 = torch.abs(target_abs - pred.abs())
+        magnitude_diff = target_abs - pred.abs()
+        magnitude_term = magnitude_diff ** 2 if self.magnitude_norm == "l2" else torch.abs(magnitude_diff)
         if self.magnitude_weighting:
-            magnitude_l1 = magnitude_l1 * _perpendicular_mag_weight_map(
+            magnitude_term = magnitude_term * _perpendicular_mag_weight_map(
                 pred, m=self.current_m, k=self.magnitude_weight_k, p=self.magnitude_weight_p
             )
-        return branched + magnitude_l1
+        return branched + magnitude_term
 
 
 def _loraks_offsets(radius: int):
