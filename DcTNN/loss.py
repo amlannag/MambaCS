@@ -192,6 +192,30 @@ class PointwiseNormalizedComplexL2Loss(_ElementwiseComplexLoss):
         return _squared_error(pred, gt_complex) / (gt_complex.abs() + self.eps)
 
 
+class ComplexBerhuLoss(_ElementwiseComplexLoss):
+    """
+    Plain reverse-Huber (Berhu) loss on the complex error modulus e = |pred - gt|:
+        |e|                      if |e| <= delta      (linear for small errors)
+        (e^2 + delta^2) / (2 delta)   otherwise        (quadratic for large errors)
+    The two branches meet with matching value and slope at |e| = delta. With delta = 1 this is the
+    smooth version of max(|e|, e^2). Unlike Huber it is L1-like near zero and L2-like in the tails,
+    so large errors are penalised quadratically while small ones keep a constant-magnitude gradient.
+    """
+    name = "complex_berhu"
+
+    def __init__(self, delta: float = 1.0):
+        super().__init__()
+        if delta <= 0:
+            raise ValueError(f"delta must be positive, got {delta}")
+        self.delta = float(delta)
+
+    def elementwise(self, pred, gt, stats=None, mask=None):
+        gt_complex = _complex_pair(pred, gt, stats, mask, self.name)
+        e = (pred - gt_complex).abs()
+        quadratic = (e ** 2 + self.delta ** 2) / (2.0 * self.delta)
+        return torch.where(e <= self.delta, e, quadratic)
+
+
 def _normalized_radius_grid_like(x: torch.Tensor) -> torch.Tensor:
     """
     Radius of every k-space cell on the normalised square [-1, 1]^2 centred at (0, 0):
@@ -461,6 +485,8 @@ def build_loss(loss_type: str, **kwargs) -> nn.Module:
         return ComplexL2NMSELoss()
     if loss_type == "complex_l2_pointwise_normalized":
         return PointwiseNormalizedComplexL2Loss(**kwargs)
+    if loss_type == "complex_berhu":
+        return ComplexBerhuLoss(**kwargs)
     if loss_type == "freq_weighted_complex_l2":
         return FrequencyWeightedComplexL2Loss(**kwargs)
     if loss_type == "reconformer_l1":
@@ -474,7 +500,7 @@ def build_loss(loss_type: str, **kwargs) -> nn.Module:
     raise ValueError(
         "Unknown loss_type "
         f"'{loss_type}'. Choose from: ['l1', 'l2', 'image_domain_l1', 'image_domain_l2', "
-        "'complex_l1', 'complex_l2', 'complex_l2_nmse', 'complex_l2_pointwise_normalized', 'freq_weighted_complex_l2', "
+        "'complex_l1', 'complex_l2', 'complex_l2_nmse', 'complex_l2_pointwise_normalized', 'complex_berhu', 'freq_weighted_complex_l2', "
         "'reconformer_l1', 'perpendicular_loss', "
         "'loraks_c', 'complex_l2_loraks']"
     )

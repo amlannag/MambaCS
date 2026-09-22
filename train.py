@@ -261,6 +261,8 @@ def _loss_kwargs_for(cfg, loss_type):
                 magnitude_weight_p=cfg.perpendicular_mag_weight_p,
             )
         return kwargs
+    if loss_type == "complex_berhu":
+        return {"delta": getattr(cfg, "berhu_delta", 1.0)}
     if loss_type == "freq_weighted_complex_l2":
         return {
             "weight_m": cfg.freq_weight_m,

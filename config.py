@@ -165,8 +165,10 @@ class Config:
     loss_function_domain: str = "all_kspace"
     # "complex_l2_nmse": per-sample sum|pred-gt|^2 / sum|gt|^2 over the loss region (scale-free complex L2).
     # "complex_l2_pointwise_normalized": mean |pred-gt|^2 / (|gt| + eps), each cell normalised by its own target.
+    # "complex_berhu": plain reverse Huber on |pred-gt|: linear below berhu_delta, quadratic above (delta=1 ~ max(|e|, e^2)).
     final_loss_type: str = "l1"
     intermediate_loss_type: str = "l1"
+    berhu_delta: float = 1.0
     # Radial frequency weighting for loss type "freq_weighted_complex_l2" (k-space only).
     # r is the radius on the normalised square [-1, 1]^2 centred at DC (edge = 1, corner = sqrt2);
     # every form is normalised to mean 1 afterwards, so only its shape matters. freq_weight_form:
