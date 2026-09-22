@@ -364,6 +364,9 @@ class PerpendicularLoss(_ElementwiseComplexLoss):
         (0 = DC, 1 = edge midpoint, sqrt2 = corner): cells with r >= r_boundary have their phase term multiplied
         by branch_multiplier (0 = phase loss off outside the boundary); cells inside keep multiplier 1.
         r_boundary=None disables the gating.
+    phase_norm:     "l1" -> branched term as is;  "l2" -> branched term squared (applied after phase_scale,
+                    before the radial multiplier). With phase_scale="none", "l2" gives |gt|^2 sin^2(dphi), which is
+                    quadratic in the cell's scale like the L2 magnitude term.
     magnitude_norm: "l1" -> | |gt| - |pred| |   (original),  "l2" -> (|gt| - |pred|)^2.
     """
     name = "perpendicular_loss"
@@ -377,6 +380,7 @@ class PerpendicularLoss(_ElementwiseComplexLoss):
         magnitude_weight_p: float = 67.0,
         magnitude_norm: str = "l1",
         phase_scale: str = "none",
+        phase_norm: str = "l1",
         r_boundary=None,
         branch_multiplier: float = 1.0,
     ):
@@ -385,9 +389,12 @@ class PerpendicularLoss(_ElementwiseComplexLoss):
             raise ValueError(f"magnitude_norm must be 'l1' or 'l2', got '{magnitude_norm}'")
         if phase_scale not in {"none", "pred"}:
             raise ValueError(f"phase_scale must be 'none' or 'pred', got '{phase_scale}'")
+        if phase_norm not in {"l1", "l2"}:
+            raise ValueError(f"phase_norm must be 'l1' or 'l2', got '{phase_norm}'")
         self.eps = eps
         self.magnitude_norm = magnitude_norm
         self.phase_scale = phase_scale
+        self.phase_norm = phase_norm
         self.r_boundary = None if r_boundary is None else float(r_boundary)
         self.branch_multiplier = float(branch_multiplier)
         self.magnitude_weighting = magnitude_weighting
@@ -416,6 +423,8 @@ class PerpendicularLoss(_ElementwiseComplexLoss):
         branched = torch.where(phi_hat.abs() < (math.pi / 2), perp, 2 * target_abs - perp)
         if self.phase_scale == "pred":
             branched = branched * pred.abs()
+        if self.phase_norm == "l2":
+            branched = branched ** 2
         if self.r_boundary is not None:
             branched = branched * self.phase_multiplier_map(pred).to(branched.dtype)
         magnitude_diff = target_abs - pred.abs()

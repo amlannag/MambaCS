@@ -255,6 +255,7 @@ def _loss_kwargs_for(cfg, loss_type):
         kwargs = {
             "magnitude_norm": getattr(cfg, "perpendicular_magnitude_norm", "l1"),
             "phase_scale": getattr(cfg, "perpendicular_phase_scale", "none"),
+            "phase_norm": getattr(cfg, "perpendicular_phase_norm", "l1"),
             "r_boundary": getattr(cfg, "perpendicular_r_boundary", None),
             "branch_multiplier": getattr(cfg, "perpendicular_branch_multiplier", 1.0),
         }

@@ -197,6 +197,8 @@ class Config:
     # Scaling of the branched phase term: "none" = as published (|gt||sin dphi|, scale-free in |pred|);
     # "pred" = multiplied by |pred| (removes the 1/|pred| normalisation: SNR-weighted gradient, -> 0 at pred = 0).
     perpendicular_phase_scale: str = "none"
+    # Norm of the branched phase term: "l1" = as is, "l2" = squared (quadratic in the cell scale, like the L2 magnitude term)
+    perpendicular_phase_norm: str = "l1"
     # Optional radial gating of the phase term (normalised radius: 0 = DC, 1 = edge, sqrt2 = corner):
     # cells with r >= perpendicular_r_boundary get their phase term x perpendicular_branch_multiplier
     # (0 = no phase loss outside; inside always x1). None = gating off.
