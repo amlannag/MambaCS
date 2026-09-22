@@ -352,7 +352,18 @@ class ReconFormerMagnitudeL1Loss(nn.Module):
 
 class PerpendicularLoss(_ElementwiseComplexLoss):
     """
-    Perpendicular loss (phase term) plus a magnitude term in the active complex domain.
+    Perpendicular loss (branched phase term) plus a magnitude term in the active complex domain.
+
+    phase term (Terpstra et al. eq. 3-4):  perp = |gt| |sin dphi| = |Im(pred conj(gt))| / |pred|,
+        branched = perp if |dphi| < 90 deg else 2|gt| - perp.
+    phase_scale:    "none" -> branched as published (scale-free in |pred|; gradient ~ |gt|/|pred|)
+                    "pred" -> |pred| * branched  (= |Im(pred conj(gt))| for |dphi| < 90 deg): removes the
+                              1/|pred| normalisation so a wrong phase costs in proportion to the asserted
+                              magnitude, the gradient scales with |gt| (SNR-weighted) and the term -> 0 at pred = 0.
+    r_boundary / branch_multiplier: optional radial gating of the phase term on the normalised k-space radius
+        (0 = DC, 1 = edge midpoint, sqrt2 = corner): cells with r >= r_boundary have their phase term multiplied
+        by branch_multiplier (0 = phase loss off outside the boundary); cells inside keep multiplier 1.
+        r_boundary=None disables the gating.
     magnitude_norm: "l1" -> | |gt| - |pred| |   (original),  "l2" -> (|gt| - |pred|)^2.
     """
     name = "perpendicular_loss"
@@ -365,12 +376,20 @@ class PerpendicularLoss(_ElementwiseComplexLoss):
         magnitude_weight_k: float = 0.103,
         magnitude_weight_p: float = 67.0,
         magnitude_norm: str = "l1",
+        phase_scale: str = "none",
+        r_boundary=None,
+        branch_multiplier: float = 1.0,
     ):
         super().__init__()
         if magnitude_norm not in {"l1", "l2"}:
             raise ValueError(f"magnitude_norm must be 'l1' or 'l2', got '{magnitude_norm}'")
+        if phase_scale not in {"none", "pred"}:
+            raise ValueError(f"phase_scale must be 'none' or 'pred', got '{phase_scale}'")
         self.eps = eps
         self.magnitude_norm = magnitude_norm
+        self.phase_scale = phase_scale
+        self.r_boundary = None if r_boundary is None else float(r_boundary)
+        self.branch_multiplier = float(branch_multiplier)
         self.magnitude_weighting = magnitude_weighting
         self.magnitude_weight_k = float(magnitude_weight_k)
         self.magnitude_weight_p = float(magnitude_weight_p)
@@ -379,7 +398,15 @@ class PerpendicularLoss(_ElementwiseComplexLoss):
     def set_current_m(self, value: float):
         self.current_m = float(value)
 
-    def elementwise(self, pred, gt, stats=None, mask=None):
+    def phase_multiplier_map(self, x: torch.Tensor) -> torch.Tensor:
+        """[1, 1, H, W] radial multiplier applied to the phase term (1 inside r_boundary, branch_multiplier outside)."""
+        r = _normalized_radius_grid_like(x)
+        if self.r_boundary is None:
+            return torch.ones_like(r)
+        return torch.where(r < self.r_boundary, torch.ones_like(r), torch.full_like(r, self.branch_multiplier))
+
+    def components(self, pred, gt, stats=None, mask=None):
+        """Per-cell (phase term, magnitude term); their sum is `elementwise`."""
         gt_complex = _complex_pair(pred, gt, stats, mask, self.name)
 
         cross = pred * gt_complex.conj()
@@ -387,13 +414,21 @@ class PerpendicularLoss(_ElementwiseComplexLoss):
         perp = 0.5*torch.abs(pred * gt_complex.conj() - pred.conj() * gt_complex) / (pred.abs() + self.eps)
         target_abs = gt_complex.abs()
         branched = torch.where(phi_hat.abs() < (math.pi / 2), perp, 2 * target_abs - perp)
+        if self.phase_scale == "pred":
+            branched = branched * pred.abs()
+        if self.r_boundary is not None:
+            branched = branched * self.phase_multiplier_map(pred).to(branched.dtype)
         magnitude_diff = target_abs - pred.abs()
         magnitude_term = magnitude_diff ** 2 if self.magnitude_norm == "l2" else torch.abs(magnitude_diff)
         if self.magnitude_weighting:
             magnitude_term = magnitude_term * _perpendicular_mag_weight_map(
                 pred, m=self.current_m, k=self.magnitude_weight_k, p=self.magnitude_weight_p
             )
-        return branched + magnitude_term
+        return branched, magnitude_term
+
+    def elementwise(self, pred, gt, stats=None, mask=None):
+        phase_term, magnitude_term = self.components(pred, gt, stats, mask)
+        return phase_term + magnitude_term
 
 
 def _loraks_offsets(radius: int):

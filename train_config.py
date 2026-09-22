@@ -40,15 +40,31 @@ _BASE = {
 
 
 EXPERIMENTS = [
-    # Exp 3: plain reverse-Huber (Berhu) on the complex k-space error: |e| for |e| <= 1, (e^2 + 1)/2 above.
-    # Same 3x axial / learned lambda / fastmri_magnitude / final-only recipe as the other loss experiments.
     {
         **_BASE,
-        "prefix": "berhu_loss",
-        "name": "berhu_d1_loss_final_r4",
+        "prefix": "perpendicular_loss",
+        "name": "perpendicular_predscaled_magL2_final_r4",
         "encoders": ["axial", "axial", "axial"],
-        "final_loss_type": "complex_berhu",
-        "intermediate_loss_type": "complex_berhu",
-        "berhu_delta": 1.0,
+        "final_loss_type": "perpendicular_loss",
+        "intermediate_loss_type": "perpendicular_loss",
+        "perpendicular_magnitude_norm": "l2",
+        "perpendicular_phase_scale": "pred",
+        "perpendicular_r_boundary": None,
+        "perpendicular_branch_multiplier": 1.0,
+    },
+
+    # Exp: published perpendicular loss, phase term gated by radius: full weight inside r < 0.6 (96 px),
+    # x0.01 outside (the noise-dominated region). Magnitude term (L2) applies everywhere.
+    {
+        **_BASE,
+        "prefix": "perpendicular_loss",
+        "name": "perpendicular_rboundary0.6_mult0.01_magL2_final_r4",
+        "encoders": ["axial", "axial", "axial"],
+        "final_loss_type": "perpendicular_loss",
+        "intermediate_loss_type": "perpendicular_loss",
+        "perpendicular_magnitude_norm": "l2",
+        "perpendicular_phase_scale": "none",
+        "perpendicular_r_boundary": 0.6,
+        "perpendicular_branch_multiplier": 0.05,
     },
 ]

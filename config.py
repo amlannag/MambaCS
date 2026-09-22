@@ -194,6 +194,14 @@ class Config:
     freq_weight_kx_ring_weights: Optional[List[float]] = None
     # Norm of the magnitude term inside "perpendicular_loss": "l1" = | |gt|-|pred| | (original), "l2" = (|gt|-|pred|)^2
     perpendicular_magnitude_norm: str = "l1"
+    # Scaling of the branched phase term: "none" = as published (|gt||sin dphi|, scale-free in |pred|);
+    # "pred" = multiplied by |pred| (removes the 1/|pred| normalisation: SNR-weighted gradient, -> 0 at pred = 0).
+    perpendicular_phase_scale: str = "none"
+    # Optional radial gating of the phase term (normalised radius: 0 = DC, 1 = edge, sqrt2 = corner):
+    # cells with r >= perpendicular_r_boundary get their phase term x perpendicular_branch_multiplier
+    # (0 = no phase loss outside; inside always x1). None = gating off.
+    perpendicular_r_boundary: Optional[float] = None
+    perpendicular_branch_multiplier: float = 1.0
     perpendicular_mag_weighting: bool = False
     perpendicular_mag_weight_m: float = 1.0
     perpendicular_mag_weight_k: float = 0.103

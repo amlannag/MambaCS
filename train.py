@@ -252,7 +252,12 @@ def _build_epoch_metrics(total_loss, final_loss, intermediate_loss_sum, total_ps
 def _loss_kwargs_for(cfg, loss_type):
     loss_type = loss_type.lower()
     if loss_type == "perpendicular_loss":
-        kwargs = {"magnitude_norm": getattr(cfg, "perpendicular_magnitude_norm", "l1")}
+        kwargs = {
+            "magnitude_norm": getattr(cfg, "perpendicular_magnitude_norm", "l1"),
+            "phase_scale": getattr(cfg, "perpendicular_phase_scale", "none"),
+            "r_boundary": getattr(cfg, "perpendicular_r_boundary", None),
+            "branch_multiplier": getattr(cfg, "perpendicular_branch_multiplier", 1.0),
+        }
         if cfg.perpendicular_mag_weighting:
             kwargs.update(
                 magnitude_weighting=True,
