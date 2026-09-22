@@ -360,6 +360,8 @@ class PerpendicularLoss(_ElementwiseComplexLoss):
                     "pred" -> |pred| * branched  (= |Im(pred conj(gt))| for |dphi| < 90 deg): removes the
                               1/|pred| normalisation so a wrong phase costs in proportion to the asserted
                               magnitude, the gradient scales with |gt| (SNR-weighted) and the term -> 0 at pred = 0.
+                    "gt"   -> |gt| * branched  (= |gt|^2 |sin dphi|): SNR-weighted like "pred" but keeps the
+                              1/|pred| gradient behaviour and the published value at pred = 0.
     r_boundary / branch_multiplier: optional radial gating of the phase term on the normalised k-space radius
         (0 = DC, 1 = edge midpoint, sqrt2 = corner): cells with r >= r_boundary have their phase term multiplied
         by branch_multiplier (0 = phase loss off outside the boundary); cells inside keep multiplier 1.
@@ -387,8 +389,8 @@ class PerpendicularLoss(_ElementwiseComplexLoss):
         super().__init__()
         if magnitude_norm not in {"l1", "l2"}:
             raise ValueError(f"magnitude_norm must be 'l1' or 'l2', got '{magnitude_norm}'")
-        if phase_scale not in {"none", "pred"}:
-            raise ValueError(f"phase_scale must be 'none' or 'pred', got '{phase_scale}'")
+        if phase_scale not in {"none", "pred", "gt"}:
+            raise ValueError(f"phase_scale must be 'none', 'pred' or 'gt', got '{phase_scale}'")
         if phase_norm not in {"l1", "l2"}:
             raise ValueError(f"phase_norm must be 'l1' or 'l2', got '{phase_norm}'")
         self.eps = eps
@@ -423,6 +425,8 @@ class PerpendicularLoss(_ElementwiseComplexLoss):
         branched = torch.where(phi_hat.abs() < (math.pi / 2), perp, 2 * target_abs - perp)
         if self.phase_scale == "pred":
             branched = branched * pred.abs()
+        elif self.phase_scale == "gt":
+            branched = branched * target_abs
         if self.phase_norm == "l2":
             branched = branched ** 2
         if self.r_boundary is not None:

@@ -195,7 +195,8 @@ class Config:
     # Norm of the magnitude term inside "perpendicular_loss": "l1" = | |gt|-|pred| | (original), "l2" = (|gt|-|pred|)^2
     perpendicular_magnitude_norm: str = "l1"
     # Scaling of the branched phase term: "none" = as published (|gt||sin dphi|, scale-free in |pred|);
-    # "pred" = multiplied by |pred| (removes the 1/|pred| normalisation: SNR-weighted gradient, -> 0 at pred = 0).
+    # "pred" = multiplied by |pred| (removes the 1/|pred| normalisation: SNR-weighted gradient, -> 0 at pred = 0);
+    # "gt" = multiplied by |gt| (|gt|^2 |sin dphi|: SNR-weighted, keeps the published behaviour at pred = 0).
     perpendicular_phase_scale: str = "none"
     # Norm of the branched phase term: "l1" = as is, "l2" = squared (quadratic in the cell scale, like the L2 magnitude term)
     perpendicular_phase_norm: str = "l1"

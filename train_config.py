@@ -40,18 +40,16 @@ _BASE = {
 
 
 EXPERIMENTS = [
-    # Exp: fully quadratic perpendicular loss  branched^2 + (|gt| - |pred|)^2  =  |gt|^2 sin^2(dphi) + (|gt|-|pred|)^2.
-    # Both terms are quadratic in the cell scale (close to complex L2 but with the phase error measured against |gt|).
     {
         **_BASE,
         "prefix": "perpendicular_loss",
-        "name": "perpendicular_phaseL2_magL2_final_r4",
+        "name": "perpendicular_gtscaled_phaseL2_magL2_final_r4",
         "encoders": ["axial", "axial", "axial"],
         "final_loss_type": "perpendicular_loss",
         "intermediate_loss_type": "perpendicular_loss",
         "perpendicular_magnitude_norm": "l2",
         "perpendicular_phase_norm": "l2",
-        "perpendicular_phase_scale": "none",
+        "perpendicular_phase_scale": "gt",
         "perpendicular_r_boundary": None,
         "perpendicular_branch_multiplier": 1.0,
     },
