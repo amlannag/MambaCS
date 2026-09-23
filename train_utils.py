@@ -6,7 +6,7 @@ import torch
 from fastmri.data.subsample import EquiSpacedMaskFunc, RandomMaskFunc
 from fastmri.data.transforms import apply_mask
 
-from DcTNN.model import TokenVIT, axVIT, CrossAttentionVIT, FNetVIT, FixedAPTVIT, cascadeNet
+from DcTNN.model import TokenVIT, axVIT, CrossAttentionVIT, FNetVIT, FixedAPTVIT, PCAVIT, cascadeNet
 from DcTNN.fixed_apt import resolve_fixed_apt_layout
 from DcTNN.util import _COMPLEX_ATTN_TYPES
 from ReconFormer import ReconFormerBaseline
@@ -118,6 +118,35 @@ _ENCODER_ARGS = {
             fft_norm=getattr(cfg, "fnet_fft_norm", "ortho"),
             token_axis=getattr(cfg, "fnet_token_axis", "vertical"),
             with_embedding=getattr(cfg, "fnet_with_embedding", True),
+        ),
+    ),
+    "pca": lambda cfg: (
+        PCAVIT,
+        dict(
+            layerNo=cfg.layer_no,
+            numCh=cfg.num_channels,
+            d_model=None,
+            nhead=getattr(cfg, "pca_nhead", 8),
+            num_encoder_layers=cfg.num_encoder_layers,
+            layer_norm_eps=getattr(cfg, "layer_norm_eps", 1e-5),
+            dim_feedforward=None,
+            pos_emb_type=cfg.pos_emb_type,
+            rope_theta=cfg.rope_theta,
+            rope_mixed_rotate=cfg.rope_mixed_rotate,
+            attn_type=cfg.attn_type,
+            row_stride=cfg.axial_row_stride,
+            tokenizer=getattr(cfg, "pca_tokenizer", "axial"),
+            n_bins=getattr(cfg, "pca_bins", 3),
+            bin_rule=getattr(cfg, "pca_bin_rule", "equal_variance"),
+            detach_basis=getattr(cfg, "pca_detach_basis", True),
+            center=getattr(cfg, "pca_center", True),
+            layers_per_bin=getattr(cfg, "pca_layers_per_bin", 1),
+            layers_after_merge=getattr(cfg, "pca_layers_after_merge", 1),
+            scope=getattr(cfg, "pca_scope", "volume"),
+            apt_layout=getattr(cfg, "apt_layout", None),
+            apt_embed_dim=getattr(cfg, "apt_embed_dim", 256),
+            apt_rope_ref_grid=getattr(cfg, "apt_rope_ref_grid", None),
+            apt_use_abs_pos_emb=getattr(cfg, "apt_use_abs_pos_emb", False),
         ),
     ),
     "kaleidoscope": lambda cfg: (

@@ -157,3 +157,47 @@ class OASISDataset(Dataset):
             torch.fft.fft2(torch.fft.ifftshift(img_t), norm='ortho')
         )
         return kspace.unsqueeze(0).to(torch.complex64)                  # [1, H, W]
+
+
+class VolumeBatchSampler(torch.utils.data.Sampler):
+    """
+    Batch sampler that yields all slices of `volumes_per_batch` volumes per batch, so that volume-wise
+    operations (e.g. the PCA encoder) see every slice of a volume together. Works with datasets exposing
+    an `index` list of (file_path, slice) pairs (H5MRIDataset). Batch sizes vary with the volumes' slice counts.
+    """
+    def __init__(self, dataset, volumes_per_batch=3, shuffle=True, seed=0, drop_last=False):
+        if not hasattr(dataset, "index"):
+            raise TypeError("VolumeBatchSampler needs a dataset with an `index` of (file, slice) pairs")
+        self.groups = {}
+        for i, (fpath, _) in enumerate(dataset.index):
+            self.groups.setdefault(fpath, []).append(i)
+        self.volumes = list(self.groups)
+        self.volumes_per_batch = int(volumes_per_batch)
+        self.shuffle, self.seed, self.drop_last = shuffle, seed, drop_last
+        self.epoch = 0
+
+    def set_epoch(self, epoch):
+        self.epoch = int(epoch)
+
+    def __iter__(self):
+        order = list(range(len(self.volumes)))
+        if self.shuffle:
+            rng = torch.Generator().manual_seed(self.seed + self.epoch)
+            order = torch.randperm(len(order), generator=rng).tolist()
+            self.epoch += 1
+        for start in range(0, len(order), self.volumes_per_batch):
+            chunk = order[start:start + self.volumes_per_batch]
+            if self.drop_last and len(chunk) < self.volumes_per_batch:
+                break
+            yield [i for v in chunk for i in self.groups[self.volumes[v]]]
+
+    def __len__(self):
+        n = len(self.volumes)
+        return n // self.volumes_per_batch if self.drop_last else -(-n // self.volumes_per_batch)
+
+
+def volume_ids_from_fnames(fnames, device=None):
+    """Map a batch's file names to consecutive integer volume ids (same name -> same id)."""
+    lookup = {}
+    ids = [lookup.setdefault(name, len(lookup)) for name in fnames]
+    return torch.tensor(ids, dtype=torch.long, device=device)

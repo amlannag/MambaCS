@@ -578,3 +578,105 @@ class fnetEncoder(nn.Module):
             x = self._run_branch(x, self.to_vertical_embedding, getattr(self, "vertical_pos_embedding", None),
                                  self.verticalEncoder, self.vertical_mlp_head)
         return x
+
+
+# ---------------------------------------------------------------------------
+# PCA-channel encoder: volume-wise PCA bins -> per-bin branches -> k-space merge -> single-channel encoder
+# ---------------------------------------------------------------------------
+
+PCA_BRANCH_TOKENIZERS = ("axial", "fixed_apt")
+PCA_SCOPES = ("volume", "batch")
+
+
+def make_pca_branch(tokenizer, image_size, num_layers, d_model=None, nhead=8, dim_feedforward=None,
+                    dropout=0.1, activation="relu", layer_norm_eps=1e-5, pos_emb_type="APE", rope_theta=100.0,
+                    attn_type="complex", row_stride=1, flattening_order="row_major",
+                    ffn_sharing="none", shared_ffn=None, apt_layout=None, apt_embed_dim=256,
+                    apt_rope_ref_grid=None, apt_use_abs_pos_emb=False, **tokenizer_kwargs):
+    """
+    Build one single-channel encoder module ([B,1,H,W] -> [B,1,H,W]) for a PCA channel.
+    `tokenizer` selects the tokenisation; every branch owns its embedding, transformer layers and head.
+        "axial"     : axialEncoder; one "layer" = one horizontal + one vertical attention layer
+                      (axialEncoder takes num_layers as the total, split in two).
+        "fixed_apt" : FixedAPTVIT with a single inner encoder of `num_layers` transformer layers on the
+                      fixed adaptive-patch layout (apt_layout / apt_embed_dim / apt_rope_ref_grid / apt_use_abs_pos_emb).
+    """
+    if tokenizer == "axial":
+        _, image_width = pair(image_size)
+        d_model = d_model or image_width
+        dim_feedforward = dim_feedforward or int(d_model * 4)
+        return axialEncoder(image_size, numCh=1, d_model=d_model, nhead=nhead, num_layers=2 * num_layers,
+                            dim_feedforward=dim_feedforward, dropout=dropout, activation=activation,
+                            layer_norm_eps=layer_norm_eps, pos_emb_type=pos_emb_type, rope_theta=rope_theta,
+                            attn_type=attn_type, row_stride=row_stride, ffn_sharing=ffn_sharing,
+                            shared_ffn=shared_ffn, flattening_order=flattening_order)
+    if tokenizer == "fixed_apt":
+        from .fixed_apt import FixedAPTVIT, resolve_fixed_apt_layout
+        d_model = d_model or apt_embed_dim
+        return FixedAPTVIT(image_size, layerNo=1, numCh=1, d_model=d_model, nhead=nhead, num_encoder_layers=num_layers,
+                           dim_feedforward=dim_feedforward, dropout=dropout, activation=activation,
+                           layer_norm_eps=layer_norm_eps, attn_type=attn_type, ffn_sharing=ffn_sharing,
+                           shared_ffn=shared_ffn, layout=resolve_fixed_apt_layout(apt_layout), rope_theta=rope_theta,
+                           rope_ref_grid=apt_rope_ref_grid, use_abs_pos_emb=apt_use_abs_pos_emb)
+    raise ValueError(f"Unknown PCA branch tokenizer '{tokenizer}'. Choose from {PCA_BRANCH_TOKENIZERS}")
+
+
+class pcaEncoder(nn.Module):
+    """
+    Stage that splits its input into principal-component channels and processes them separately.
+
+        x [B,1,H,W] --volume PCA--> channels c_b [B,1,H,W] (b = 1..n_bins), volume mean m
+        c_b' = c_b + branch_b(c_b)                    (separate weights per bin; spatial attention within a bin only)
+        x~   = m + sum_b c_b'                          (k-space merge; == x + sum_b branch_b(c_b))
+        out  = x~ + post(x~) - x                       (single-channel encoder after the merge; returned as a residual
+                                                        so cascadeNet's x + stage(x) gives x~ + post(x~))
+
+    scope="volume": the PCA is computed per volume on the stage input (slices sharing `volume_id`);
+    scope="batch" : the whole batch is treated as one set of slices (volume_id ignored).
+    The basis is detached by default (see DcTNN.pca). Tokenisation of the branches and of the post-merge
+    encoder is selected with `tokenizer` ("axial" | "fixed_apt", see make_pca_branch).
+    """
+    def __init__(self, image_size, numCh=1, d_model=None, nhead=8, num_layers=2, dim_feedforward=None,
+                 dropout=0.1, activation="relu", layer_norm_eps=1e-05, batch_first=True, device=None, dtype=None,
+                 norm=None, pos_emb_type="APE", rope_theta=100.0, attn_type="complex", row_stride=1,
+                 flattening_order="row_major", ffn_sharing="none", shared_ffn=None,
+                 tokenizer="axial", n_bins=3, bin_rule="equal_variance", detach_basis=True, center=True,
+                 layers_per_bin=1, layers_after_merge=1, scope="volume",
+                 apt_layout=None, apt_embed_dim=256, apt_rope_ref_grid=None, apt_use_abs_pos_emb=False):
+        super().__init__()
+        if scope not in PCA_SCOPES:
+            raise ValueError(f"scope must be one of {PCA_SCOPES}, got '{scope}'")
+        self.scope = scope
+        if numCh != 1:
+            raise ValueError("pcaEncoder expects a single-channel complex k-space input (numCh=1)")
+        if attn_type not in _COMPLEX_ATTN_TYPES:
+            raise ValueError("pcaEncoder operates on complex k-space; use a complex attn_type")
+        self.image_size = pair(image_size)
+        self.tokenizer, self.n_bins, self.bin_rule = tokenizer, int(n_bins), bin_rule
+        self.detach_basis, self.center = bool(detach_basis), bool(center)
+        self.last_pca_info = None
+        common = dict(d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward, dropout=dropout,
+                      activation=activation, layer_norm_eps=layer_norm_eps, pos_emb_type=pos_emb_type,
+                      rope_theta=rope_theta, attn_type=attn_type, row_stride=row_stride,
+                      flattening_order=flattening_order, ffn_sharing=ffn_sharing, shared_ffn=shared_ffn,
+                      apt_layout=apt_layout, apt_embed_dim=apt_embed_dim, apt_rope_ref_grid=apt_rope_ref_grid,
+                      apt_use_abs_pos_emb=apt_use_abs_pos_emb)
+        self.branches = nn.ModuleList([
+            make_pca_branch(tokenizer, self.image_size, layers_per_bin, **common) for _ in range(self.n_bins)])
+        self.post = (make_pca_branch(tokenizer, self.image_size, layers_after_merge, **common)
+                     if layers_after_merge > 0 else None)
+
+    def forward(self, img, col_mask=None, volume_id=None):
+        from .pca import volume_pca_channels
+        if self.scope == "batch":
+            volume_id = None
+        channels, mean, info = volume_pca_channels(img, volume_id, n_bins=self.n_bins, rule=self.bin_rule,
+                                                   detach_basis=self.detach_basis, center=self.center,
+                                                   return_info=True)
+        self.last_pca_info = info
+        merged = mean
+        for b, branch in enumerate(self.branches):
+            c = channels[:, b:b + 1]
+            merged = merged + c + branch(c, col_mask=col_mask)
+        out = merged + self.post(merged, col_mask=col_mask) if self.post is not None else merged
+        return out - img

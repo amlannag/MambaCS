@@ -19,7 +19,7 @@ import wandb
 from PIL import Image
 from torch.utils.data import DataLoader
 
-from dataset import H5MRIDataset, OASISDataset, prepare_fastmri_kspace
+from dataset import VolumeBatchSampler, volume_ids_from_fnames, H5MRIDataset, OASISDataset, prepare_fastmri_kspace
 from config import Config
 from progress import phase, progress_iter
 from train_config import EXPERIMENTS
@@ -146,6 +146,22 @@ def _unpack_kspace_batch(batch):
     if isinstance(batch, dict):
         return batch["kspace"], batch.get("fname")
     return batch, None
+
+
+def _uses_pca_encoder(cfg):
+    return any(name == "pca" for name in cfg.encoders)
+
+
+def _uses_volume_batches(cfg):
+    """Volume-grouped batches are needed for volume-scope PCA; batch-scope PCA uses ordinary shuffled batches."""
+    return _uses_pca_encoder(cfg) and getattr(cfg, "pca_scope", "volume") == "volume"
+
+
+def _volume_ids(cfg, fnames, device):
+    """Volume ids for the PCA encoder; None when no PCA stage is used (or no file names are available)."""
+    if not _uses_pca_encoder(cfg) or fnames is None:
+        return None
+    return volume_ids_from_fnames(fnames, device=device)
 
 
 def _update_volume_errors(store, fnames, prediction, target):
@@ -413,10 +429,10 @@ def _probe_batch_candidate(cfg, dataset, batch_size, device, checkpoint=None):
         for step in probe_bar:
             t_step = time.time()
             try:
-                kspace_full = next(probe_iterator)
+                kspace_full, _ = _unpack_kspace_batch(next(probe_iterator))
             except StopIteration:
                 probe_iterator = iter(probe_loader)
-                kspace_full = next(probe_iterator)
+                kspace_full, _ = _unpack_kspace_batch(next(probe_iterator))
             kspace_full = kspace_full.to(device)
             acceleration = cfg.acceleration_factors[step % len(cfg.acceleration_factors)]
             kspace_us, mask, _ = mask_generator.apply(
@@ -514,10 +530,12 @@ def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer
     num_batches = len(loader)
     next_report = 0.1
     epoch_bar = progress_iter(loader, desc=f"Epoch {epoch + 1} train", unit="batch")
-    for batch_idx, kspace_full in enumerate(epoch_bar):
+    for batch_idx, batch in enumerate(epoch_bar):
         data_time = time.perf_counter() - t_wait
         t_compute = time.perf_counter()
+        kspace_full, fnames = _unpack_kspace_batch(batch)
         kspace_full = kspace_full.to(device)
+        volume_id = _volume_ids(cfg, fnames, device)
         R    = accel_factors[int(accel_rng.integers(len(accel_factors)))]
         kspace_us, mask, _ = mask_generator.apply(
             kspace_full,
@@ -542,7 +560,7 @@ def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer
 
         optimizer.zero_grad(set_to_none=True)
         recon, intermediates = model(
-            model_input, DC_input, mask, return_intermediates=True, stats=stats
+            model_input, DC_input, mask, return_intermediates=True, stats=stats, volume_id=volume_id
         )
         total_batch_loss, final_loss, intermediate_loss_sum, stage_losses, stage_psnr_gains = _compute_losses(
             recon, intermediates, target, final_criterion, intermediate_criterion, loss_mode,
@@ -630,6 +648,7 @@ def validate(cfg, model, loader, accel_factors, image_size, final_criterion,
     for batch_idx, batch in enumerate(val_bar):
         kspace_full, fnames = _unpack_kspace_batch(batch)
         kspace_full = kspace_full.to(device)
+        volume_id = _volume_ids(cfg, fnames, device)
         R    = accel_factors[batch_idx % len(accel_factors)]
         kspace_us, mask, _ = mask_generator.apply(kspace_full, R, seed=(cfg.seed, batch_idx, int(R)))
 
@@ -647,7 +666,7 @@ def validate(cfg, model, loader, accel_factors, image_size, final_criterion,
             companding_centering=cfg.companding_centering,
         )
         recon, intermediates = model(
-            model_input, DC_input, mask, return_intermediates=True, stats=stats
+            model_input, DC_input, mask, return_intermediates=True, stats=stats, volume_id=volume_id
         )
         total_batch_loss, final_loss, intermediate_loss_sum, stage_losses, stage_psnr_gains = _compute_losses(
             recon, intermediates, target, final_criterion, intermediate_criterion, loss_mode,
@@ -788,7 +807,7 @@ def _oasis_slice_number(path):
 
 
 @torch.no_grad()
-def _run_validation_slice(cfg, model, kspace_full, kspace_us, mask):
+def _run_validation_slice(cfg, model, kspace_full, kspace_us, mask, volume_id=None):
     model_input, dc_input, _, stats = simulate_undersampling(
         kspace_full,
         mask,
@@ -802,7 +821,7 @@ def _run_validation_slice(cfg, model, kspace_full, kspace_us, mask):
         companding_a=cfg.companding_a,
         companding_centering=cfg.companding_centering,
     )
-    recon = model(model_input, dc_input, mask, stats=stats)
+    recon = model(model_input, dc_input, mask, stats=stats, volume_id=volume_id)
     raw_kspace = model_output_to_raw_kspace(recon, stats, cfg.learning)
     raw_image = ifft_2d(raw_kspace)
     return raw_kspace, raw_image
@@ -853,7 +872,22 @@ def evaluate_validation_set(cfg, model, device):
                 peak = float(handle.attrs["max"])
                 dataset = handle[cfg.kspace_key]
                 slice_count = int(dataset.shape[0])
-                for slice_index in range(slice_count):
+                if _uses_pca_encoder(cfg):
+                    # PCA stages need every slice of the volume in one batch (per-slice masks, same seeds as below)
+                    fulls, uss, masks = [], [], []
+                    for slice_index in range(slice_count):
+                        kf = prepare_fastmri_kspace(torch.as_tensor(dataset[slice_index], dtype=torch.complex64), image_size)
+                        kf = kf.unsqueeze(0).unsqueeze(0).to(device)
+                        ku, m, _ = mask_generator.apply(kf, acceleration, seed=(mask_seed, file_index, slice_index, acceleration))
+                        fulls.append(kf); uss.append(ku); masks.append(m)
+                    kspace_full, kspace_us, mask = torch.cat(fulls), torch.cat(uss), torch.cat(masks)
+                    pred_kspace, pred_image = _run_validation_slice(
+                        cfg, model, kspace_full, kspace_us, mask,
+                        volume_id=torch.zeros(slice_count, dtype=torch.long, device=device),
+                    )
+                    _update_volume_accumulator(accumulator, ifft_2d(kspace_full), pred_image, kspace_full, pred_kspace)
+                else:
+                  for slice_index in range(slice_count):
                     kspace_full = torch.as_tensor(dataset[slice_index], dtype=torch.complex64)
                     kspace_full = prepare_fastmri_kspace(kspace_full, image_size)
                     kspace_full = kspace_full.unsqueeze(0).unsqueeze(0).to(device)
@@ -961,10 +995,11 @@ def main():
         )
 
     phase(f"Loading train dataset from {train_data_dir}")
-    train_ds = _make_dataset(train_data_dir, max_files=cfg.max_train_files)
+    train_ds = _make_dataset(train_data_dir, max_files=cfg.max_train_files,
+                             return_metadata=cfg.dataset == "fastmri" and _uses_pca_encoder(cfg))
     if cfg.dataset == "fastmri":
         phase("Probing one sample to determine image size...")
-        sample_shape = tuple(int(x) for x in train_ds[0].shape[-2:])
+        sample_shape = tuple(int(x) for x in _unpack_kspace_batch(train_ds[0])[0].shape[-2:])
         cfg.image_size = sample_shape
         phase(f"Image size: {cfg.image_size}")
     phase(f"Loading val dataset from {val_data_dir}")
@@ -1000,7 +1035,7 @@ def main():
             f"{cfg.batch_size_probe_steps} full train step(s) per candidate; "
             f"each candidate also rebuilds the model, so this can take a while"
         )
-    cfg.batch_size = _resolve_batch_size(cfg, train_ds, device, checkpoint=checkpoint)
+    cfg.batch_size = cfg.batch_size if _uses_volume_batches(cfg) else _resolve_batch_size(cfg, train_ds, device, checkpoint=checkpoint)
     _seed_everything(cfg.seed)
 
     grouped_config = config_to_dict(cfg)
@@ -1029,19 +1064,31 @@ def main():
     val_generator = torch.Generator().manual_seed(cfg.seed)
 
     phase(f"Creating DataLoaders (num_workers={cfg.num_workers}, pin_memory=True)...")
-    train_loader = DataLoader(train_ds, batch_size=cfg.batch_size,
-                              shuffle=True,  num_workers=cfg.num_workers,
-                              pin_memory=True,
-                              persistent_workers=cfg.num_workers > 0,
-                              worker_init_fn=_seed_worker,
-                              generator=train_generator)
+    if _uses_volume_batches(cfg):
+        if cfg.dataset != "fastmri":
+            raise ValueError("The 'pca' encoder with pca_scope='volume' needs fastMRI H5 volumes")
+        vpb = cfg.pca_volumes_per_batch
+        phase(f"PCA encoder: volume-grouped batches, {vpb} volume(s) per batch (batch_size ignored)")
+        train_loader = DataLoader(train_ds, batch_sampler=VolumeBatchSampler(train_ds, vpb, shuffle=True, seed=cfg.seed),
+                                  num_workers=cfg.num_workers, pin_memory=True,
+                                  persistent_workers=cfg.num_workers > 0, worker_init_fn=_seed_worker)
+        val_loader = DataLoader(val_ds, batch_sampler=VolumeBatchSampler(val_ds, vpb, shuffle=False),
+                                num_workers=cfg.num_workers, pin_memory=True,
+                                persistent_workers=cfg.num_workers > 0, worker_init_fn=_seed_worker)
+    else:
+        train_loader = DataLoader(train_ds, batch_size=cfg.batch_size,
+                                  shuffle=True,  num_workers=cfg.num_workers,
+                                  pin_memory=True,
+                                  persistent_workers=cfg.num_workers > 0,
+                                  worker_init_fn=_seed_worker,
+                                  generator=train_generator)
 
-    val_loader = DataLoader(val_ds, batch_size=cfg.batch_size,
-                            shuffle=False, num_workers=cfg.num_workers,
-                            pin_memory=True,
-                            persistent_workers=cfg.num_workers > 0,
-                            worker_init_fn=_seed_worker,
-                            generator=val_generator)
+        val_loader = DataLoader(val_ds, batch_size=cfg.batch_size,
+                                shuffle=False, num_workers=cfg.num_workers,
+                                pin_memory=True,
+                                persistent_workers=cfg.num_workers > 0,
+                                worker_init_fn=_seed_worker,
+                                generator=val_generator)
 
     file_list = getattr(val_ds, 'h5_files', None) or getattr(val_ds, 'image_files', None)
     print(f"Train dir   : {train_data_dir}")

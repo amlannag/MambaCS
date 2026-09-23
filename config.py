@@ -92,6 +92,22 @@ class Config:
     nhead_axial: int = 8
     layer_no: int = 1
     num_encoder_layers: int = 2
+    # "pca" encoder: volume-wise PCA of the stage input into pca_bins channels (DcTNN/pca.py), one branch per bin
+    # (separate weights, pca_nhead heads, pca_layers_per_bin layers), k-space merge (mean + sum of branches), then
+    # pca_layers_after_merge single-channel layers. pca_tokenizer: "axial" | "fixed_apt" (the fixed_apt branch uses
+    # apt_layout / apt_embed_dim / apt_rope_ref_grid / apt_use_abs_pos_emb). pca_scope: "volume" = PCA per volume,
+    # batches grouped by volume (pca_volumes_per_batch volumes per batch, batch_size ignored); "batch" = PCA over
+    # whatever slices are in the (ordinary shuffled) batch.
+    pca_tokenizer: str = "axial"
+    pca_scope: str = "volume"
+    pca_bins: int = 3
+    pca_bin_rule: str = "equal_variance"      # "equal_variance" | "equal_count"
+    pca_detach_basis: bool = True
+    pca_center: bool = True
+    pca_layers_per_bin: int = 1
+    pca_layers_after_merge: int = 1
+    pca_nhead: int = 8
+    pca_volumes_per_batch: int = 3
     # FNet stage ("fnet" in `encoders`): FFT normalisation of the Fourier token mixing.
     # "ortho" keeps |mix(x)| ~ |x| so the residual stream is preserved (recommended);
     # "backward" is the unnormalised FFT of the original FNet paper.

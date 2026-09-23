@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 from .dc import KSpace_DC
-from .vit import TokenVIT, axVIT, CrossAttentionVIT, FNetVIT
+from .vit import TokenVIT, axVIT, CrossAttentionVIT, FNetVIT, PCAVIT
 from .fixed_apt import FixedAPTVIT
 from .encoders import TokenEncoder, axialEncoder, crossAxialEncoder, pair
 from .util import FeedForward, _COMPLEX_ATTN_TYPES, validate_flattening_order
@@ -12,8 +12,8 @@ __all__ = ['cascadeNet', 'TokenVIT', 'axVIT', 'CrossAttentionVIT', 'FNetVIT', 'F
 def _stage_ffn_spec(N, cls, args):
     """Return (d_model, dim_feedforward, dropout, activation, is_complex) for one cascade stage."""
     num_ch = args.get("numCh", 1)
-    if cls is FixedAPTVIT:
-        d_model = args.get("d_model", 256)
+    if cls is FixedAPTVIT or (cls is PCAVIT and args.get("tokenizer") == "fixed_apt"):
+        d_model = args.get("d_model") or args.get("apt_embed_dim", 256)
     elif cls is TokenVIT:
         patch_h, patch_w = pair(args.get("patch_size", (16, 16)))
         d_model = args.get("d_model") or (patch_h * patch_w * num_ch)
@@ -109,9 +109,10 @@ class cascadeNet(nn.Module):
     def set_scheduled_lamb(self, value):
         self.scheduled_lamb = value
 
-    def forward(self, xPrev, y, sampleMask, return_intermediates=False, stats=None):
+    def forward(self, xPrev, y, sampleMask, return_intermediates=False, stats=None, volume_id=None):
         """
         xPrev      : [B,1,H,W] normalized model-domain input
+        volume_id  : optional [B] ids grouping slices into volumes (used by PCA stages)
         y          : [B,1,H,W] raw measured complex k-space
         sampleMask : [H, W]
         Returns same domain as xPrev. When return_intermediates=True, also returns
@@ -158,7 +159,10 @@ class cascadeNet(nn.Module):
                 lamb_i = self.scheduled_lamb
             else:
                 lamb_i = None
-            candidate = x + transformer(x, col_mask=sampleMask)
+            if isinstance(transformer, PCAVIT):
+                candidate = x + transformer(x, col_mask=sampleMask, volume_id=volume_id)
+            else:
+                candidate = x + transformer(x, col_mask=sampleMask)
             if use_normalized_dc:
                 candidate_kspace = candidate if dc_domain_is_k_space else fft_2d(candidate)
                 if lamb_i is None:

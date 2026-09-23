@@ -2,7 +2,7 @@
 Defines ViT denoising blocks — cascades of encoder instances with a shared forward loop.
 """
 from torch import nn
-from .encoders import TokenEncoder, axialEncoder, crossAxialEncoder, fnetEncoder, pair
+from .encoders import TokenEncoder, axialEncoder, crossAxialEncoder, fnetEncoder, pcaEncoder, pair
 
 
 class BaseVIT(nn.Module):
@@ -186,4 +186,45 @@ class FNetVIT(BaseVIT):
         im = xPrev
         for transformer in self.transformers:
             im = transformer(im, col_mask=col_mask)
+        return im
+
+
+class PCAVIT(BaseVIT):
+    """
+    Cascade of pcaEncoder blocks: volume-wise PCA bins -> per-bin branches -> k-space merge -> post encoder.
+    Args mirror axVIT plus:
+        tokenizer (str)             -       branch/post tokenisation ("axial" | "fixed_apt")
+        scope (str)                 -       "volume" (PCA per volume_id group) | "batch" (whole batch as one set)
+        n_bins (int)                -       number of PC bins / channels
+        bin_rule (str)              -       "equal_variance" | "equal_count"
+        detach_basis (bool)         -       compute the PCA basis under no_grad
+        center (bool)               -       mean-centre the volume before the SVD (mean re-added at the merge)
+        layers_per_bin (int)        -       transformer layers per branch before the merge
+        layers_after_merge (int)    -       transformer layers on the merged single channel
+    """
+    def __init__(self, N, layerNo=1, numCh=1, d_model=None, nhead=8, num_encoder_layers=2,
+                 dim_feedforward=None, dropout=0.1, activation='relu', layer_norm_eps=1e-05, batch_first=True,
+                 device=None, dtype=None, pos_emb_type="APE", rope_theta=100.0, rope_mixed_rotate=True,
+                 attn_type="complex", row_stride=1, ffn_sharing="none", shared_ffn=None, flattening_order="row_major",
+                 tokenizer="axial", n_bins=3, bin_rule="equal_variance", detach_basis=True, center=True,
+                 layers_per_bin=1, layers_after_merge=1, scope="volume",
+                 apt_layout=None, apt_embed_dim=256, apt_rope_ref_grid=None, apt_use_abs_pos_emb=False):
+        if d_model is None:
+            _, image_width = N if isinstance(N, (tuple, list)) else (N, N)
+            d_model = apt_embed_dim if tokenizer == "fixed_apt" else image_width * numCh
+        if dim_feedforward is None:
+            dim_feedforward = int(d_model * 4)
+        transformers = nn.ModuleList([
+            pcaEncoder(N, numCh, d_model, nhead, num_encoder_layers, dim_feedforward, dropout, activation,
+                       layer_norm_eps, batch_first, device, dtype, None, pos_emb_type, rope_theta, attn_type,
+                       row_stride, flattening_order, ffn_sharing, shared_ffn, tokenizer, n_bins, bin_rule,
+                       detach_basis, center, layers_per_bin, layers_after_merge, scope,
+                       apt_layout, apt_embed_dim, apt_rope_ref_grid, apt_use_abs_pos_emb)
+            for _ in range(layerNo)])
+        super().__init__(N, layerNo, numCh, transformers)
+
+    def forward(self, xPrev, col_mask=None, volume_id=None):
+        im = xPrev
+        for transformer in self.transformers:
+            im = transformer(im, col_mask=col_mask, volume_id=volume_id)
         return im
