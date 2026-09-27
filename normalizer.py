@@ -478,14 +478,22 @@ def robust_shifted(
     return model_input, dc_input, target, metric
 
 
-def fastmri_magnitude(kspace_full, mask, learning="k_space", kspace_us=None, **_unused):
-    """Scale each sample by the undersampled magnitude p95 in its learning domain."""
+def fastmri_magnitude(kspace_full, mask, learning="k_space", kspace_us=None, volume_scale=None, sigma_raw=None, **_unused):
+    """
+    Scale each sample by the undersampled magnitude p95 in its learning domain.
+    volume_scale : optional [B] per-sample scale (the volume-wise p95 from tools/volume_stats.py) used instead of the
+                   per-slice p95 (k_space learning only). sigma_raw : optional [B] raw k-space noise std, stored in the
+                   metric as "sigma_raw" and in normalised units as "sigma_norm" for SNR-weighted losses.
+    """
     if kspace_us is None:
         kspace_us = kspace_full * mask
 
     if learning == "k_space":
-        magnitudes = kspace_us.abs().reshape(kspace_us.shape[0], -1)
-        scale_factor = torch.quantile(magnitudes, q=0.95, dim=1).clamp_min(1e-8)
+        if volume_scale is not None:
+            scale_factor = torch.as_tensor(volume_scale, dtype=kspace_us.real.dtype, device=kspace_us.device).reshape(-1).clamp_min(1e-8)
+        else:
+            magnitudes = kspace_us.abs().reshape(kspace_us.shape[0], -1)
+            scale_factor = torch.quantile(magnitudes, q=0.95, dim=1).clamp_min(1e-8)
         scale_factor = scale_factor.reshape(-1, 1, 1, 1)
         kspace_us_norm = kspace_us / scale_factor
         kspace_full_norm = kspace_full / scale_factor
@@ -494,7 +502,12 @@ def fastmri_magnitude(kspace_full, mask, learning="k_space", kspace_us=None, **_
             "normalization_domain": "k_space",
             "prediction_domain": "k_space",
             "p95": scale_factor,
+            "scale_scope": "volume" if volume_scale is not None else "slice",
         }
+        if sigma_raw is not None:
+            sigma_raw = torch.as_tensor(sigma_raw, dtype=kspace_us.real.dtype, device=kspace_us.device).reshape(-1, 1, 1, 1)
+            metric["sigma_raw"] = sigma_raw
+            metric["sigma_norm"] = sigma_raw / scale_factor
         target = {
             "image": ifft_2d(kspace_full).abs(),
             "complex_image": ifft_2d(kspace_full_norm),

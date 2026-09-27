@@ -54,10 +54,12 @@ class H5MRIDataset(Dataset):
     """
 
     def __init__(self, data_dir, image_size=(320, 320), kspace_key='kspace', max_files=None,
-                 return_metadata=False):
+                 return_metadata=False, volume_stats=None):
         self.image_size = image_size
         self.kspace_key = kspace_key
         self.return_metadata = return_metadata
+        # optional {fname: {"sigma_raw", "p95_vol"}} (tools/volume_stats.py); returned in the metadata when present
+        self.volume_stats = volume_stats or {}
         self._file_handles = {}
 
         h5_files = sorted(
@@ -101,12 +103,18 @@ class H5MRIDataset(Dataset):
         kspace = prepare_fastmri_kspace(kspace, self.image_size).unsqueeze(0)
         if not self.return_metadata:
             return kspace
-        return {
+        fname = os.path.basename(fpath)
+        item = {
             "kspace": kspace,
-            "fname": os.path.basename(fpath),
+            "fname": fname,
             "slice_num": s,
             "max_value": float(f.attrs.get("max", float("nan"))),
         }
+        vs = self.volume_stats.get(fname)
+        if vs is not None:
+            item["sigma_raw"] = float(vs["sigma_raw"])
+            item["p95_vol"] = float(vs["p95_vol"])
+        return item
 
     def __del__(self):
         for handle in self._file_handles.values():

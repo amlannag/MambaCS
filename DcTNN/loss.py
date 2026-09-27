@@ -444,6 +444,101 @@ class PerpendicularLoss(_ElementwiseComplexLoss):
         return phase_term + magnitude_term
 
 
+RING_PHASE_DEFAULT_EDGES = (0.05, 0.1, 0.2, 0.3, 0.45, 0.6, 0.8, 1.0, 1.42)
+EDGE_NOISE_ROWS = 20
+
+
+def estimate_kspace_noise_sigma(kspace: torch.Tensor, rows: int = EDGE_NOISE_ROWS) -> torch.Tensor:
+    """
+    Per-sample per-component noise std from the top/bottom `rows` rows of a [B, 1, H, W] complex k-space
+    (zero-padded columns excluded): sqrt(mean |k_edge|^2 / 2). Fallback when no volume sigma is supplied.
+    """
+    B, _, H, W = kspace.shape
+    region = torch.zeros(H, W, dtype=torch.bool, device=kspace.device); region[:rows] = True; region[-rows:] = True
+    nonzero_cols = (kspace[:, 0].abs() > 0).any(1).all(0)            # [W] columns with data in every sample
+    region = region & nonzero_cols[None, :]
+    edge = kspace[:, 0][:, region]                                    # [B, n]
+    return torch.sqrt((edge.abs() ** 2).mean(1) / 2).reshape(B, 1, 1, 1)
+
+
+class RingPhaseMagnitudeLoss(nn.Module):
+    """
+    SNR-weighted, ring-averaged phase loss plus an L2 magnitude term (k-space):
+
+        L_phi(j,l) = 1 - cos(dphi) = 1 - Re(pred conj(gt)) / (|pred||gt| + eps)
+        w(j,l)     = |gt| / (|gt| + sigma)                 sigma = volume noise std in the loss domain
+                                                           (stats["sigma_norm"]; fallback: estimated from gt's edge rows)
+        P_k        = mean over ring k of  w * L_phi        rings = radial bands on the normalised radius
+        L_mag      = mean over all cells of (|gt| - |pred|)^2
+
+        phase_weighting="fixed"     : L = phase_weight * (1/K) sum_k P_k                        + L_mag
+        phase_weighting="learnable" : L = (1/K) sum_k ( exp(-s_k) P_k + s_k )                    + L_mag
+                                      s_k = log sigma_k^2 learnable per ring (init 0, floored at s_floor),
+                                      i.e. homoscedastic-uncertainty weighting: optimum s_k = log P_k.
+
+    Cells excluded by `mask` (loss_function_domain="unsampled_kspace") are left out of the ring means; the
+    magnitude term always runs over all cells. `components()` returns the per-ring P_k, s_k and L_mag for logging.
+    """
+    name = "ring_phase_mag"
+
+    def __init__(self, ring_edges=RING_PHASE_DEFAULT_EDGES, phase_weighting="fixed", phase_weight=1.0, eps=1e-8,
+                 s_floor=math.log(1e-4), sigma_scale=1.0):
+        super().__init__()
+        if phase_weighting not in {"fixed", "learnable"}:
+            raise ValueError(f"phase_weighting must be 'fixed' or 'learnable', got '{phase_weighting}'")
+        edges = [float(e) for e in ring_edges]
+        if len(edges) < 2 or any(b <= a for a, b in zip(edges, edges[1:])):
+            raise ValueError("ring_edges must be >= 2 ascending radii")
+        self.ring_edges = edges
+        self.n_rings = len(edges) - 1
+        self.phase_weighting, self.phase_weight, self.eps = phase_weighting, float(phase_weight), float(eps)
+        self.s_floor, self.sigma_scale = float(s_floor), float(sigma_scale)
+        self.log_var = nn.Parameter(torch.zeros(self.n_rings)) if phase_weighting == "learnable" else None
+        self._ring_cache = {}
+
+    def _rings(self, x):
+        key = (tuple(x.shape[-2:]), x.device)
+        if key not in self._ring_cache:
+            r = _normalized_radius_grid_like(x)[0, 0]
+            self._ring_cache[key] = torch.stack([(r >= a) & (r < b) for a, b in zip(self.ring_edges[:-1], self.ring_edges[1:])])
+        return self._ring_cache[key]                                   # [K, H, W] bool
+
+    def sigma(self, gt_complex, stats):
+        if stats is not None and stats.get("sigma_norm") is not None:
+            sig = torch.as_tensor(stats["sigma_norm"], device=gt_complex.device, dtype=gt_complex.real.dtype).reshape(-1, 1, 1, 1)
+        else:
+            sig = estimate_kspace_noise_sigma(gt_complex)
+        return sig * self.sigma_scale
+
+    def cellwise(self, pred, gt, stats=None, mask=None):
+        """Per-cell (w * L_phi, magnitude term, w, L_phi) before ring aggregation."""
+        gt_complex = _complex_pair(pred, gt, stats, mask, self.name)
+        gt_abs, pred_abs = gt_complex.abs(), pred.abs()
+        l_phi = 1.0 - (pred * gt_complex.conj()).real / (pred_abs * gt_abs + self.eps)
+        w = gt_abs / (gt_abs + self.sigma(gt_complex, stats))
+        mag = (gt_abs - pred_abs) ** 2
+        return w * l_phi, mag, w, l_phi
+
+    def components(self, pred, gt, stats=None, mask=None):
+        """(P [K] ring means of w*L_phi, s [K] or None, L_mag scalar)."""
+        wl, mag, _, _ = self.cellwise(pred, gt, stats, mask)
+        rings = self._rings(pred).to(wl.dtype)                                                  # [K, H, W]
+        keep = torch.ones_like(wl) if mask is None else (1.0 - mask).to(wl.dtype).expand_as(wl)  # [B,1,H,W]
+        num = torch.einsum("bchw,khw->k", wl * keep, rings)
+        den = torch.einsum("bchw,khw->k", keep, rings).clamp_min(1.0)
+        P = num / den
+        s = None if self.log_var is None else self.log_var.clamp_min(self.s_floor)
+        return P, s, mag.mean()
+
+    def forward(self, pred, gt, stats=None, mask=None):
+        P, s, l_mag = self.components(pred, gt, stats, mask)
+        if s is None:
+            phase = self.phase_weight * P.mean()
+        else:
+            phase = (torch.exp(-s) * P + s).mean()
+        return phase + l_mag
+
+
 def _loraks_offsets(radius: int):
     return [(dx, dy) for dx in range(-radius, radius + 1) for dy in range(-radius, radius + 1)
             if dx * dx + dy * dy <= radius * radius]
@@ -535,6 +630,8 @@ def build_loss(loss_type: str, **kwargs) -> nn.Module:
         return PointwiseNormalizedComplexL2Loss(**kwargs)
     if loss_type == "complex_berhu":
         return ComplexBerhuLoss(**kwargs)
+    if loss_type == "ring_phase_mag":
+        return RingPhaseMagnitudeLoss(**kwargs)
     if loss_type == "freq_weighted_complex_l2":
         return FrequencyWeightedComplexL2Loss(**kwargs)
     if loss_type == "reconformer_l1":
@@ -548,7 +645,7 @@ def build_loss(loss_type: str, **kwargs) -> nn.Module:
     raise ValueError(
         "Unknown loss_type "
         f"'{loss_type}'. Choose from: ['l1', 'l2', 'image_domain_l1', 'image_domain_l2', "
-        "'complex_l1', 'complex_l2', 'complex_l2_nmse', 'complex_l2_pointwise_normalized', 'complex_berhu', 'freq_weighted_complex_l2', "
+        "'complex_l1', 'complex_l2', 'complex_l2_nmse', 'complex_l2_pointwise_normalized', 'complex_berhu', 'ring_phase_mag', 'freq_weighted_complex_l2', "
         "'reconformer_l1', 'perpendicular_loss', "
         "'loraks_c', 'complex_l2_loraks']"
     )

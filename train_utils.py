@@ -528,8 +528,13 @@ def simulate_undersampling(
     companding_a: float = 0.5,
     companding_centering: str = "fft",
     kspace_fill: str | None = None,
+    volume_scale=None,
+    sigma_raw=None,
 ):
     """
+    volume_scale : optional [B] volume-wise normalisation scale (fastmri_magnitude, k_space learning): replaces the
+                   per-slice p95. sigma_raw : optional [B] raw k-space noise std per sample, forwarded into stats
+                   ("sigma_raw" / "sigma_norm") for SNR-weighted losses.
     learning="complex_image" : preserve complex image values through the model and FFT data consistency
     norm="zscore" : z-score normalise real/imag separately using undersampled image stats
     norm="robust_shifted" : median/IQR scale, smooth clip, and shift in the learning domain
@@ -562,6 +567,8 @@ def simulate_undersampling(
         companding_p=companding_p,
         companding_a=companding_a,
         companding_centering=companding_centering,
+        volume_scale=volume_scale,
+        sigma_raw=sigma_raw,
     )
     # Data consistency always blends with the raw measured k-space (the interpolated
     # points are only a model-input initialisation and must not be re-imposed by DC).

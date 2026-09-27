@@ -40,84 +40,30 @@ _BASE = {
 
 
 EXPERIMENTS = [
-    # Shared recipe for the PCA-stage experiments: 3 PCA stages, 3 equal-variance bins, separate branch per bin
-    # (8 heads, 1 layer), k-space merge (mean + sum), 1 layer after the merge, DC after every stage, complex L2 final-only.
-    # Exp: three PCA-channel stages. Each stage splits its (volume-grouped) input into 3 equal-variance PC bins,
-    # runs a separate axial branch (8 heads) per bin, merges in k-space (mean + sum) and runs one more axial
-    # layer on the merged k-space; DC after every stage. Volume-scope PCA, 3 volumes per batch.
+    # Ring-phase + magnitude loss: SNR-weighted 1-cos(dphi) averaged per radial ring, rings averaged, plus (|gt|-|pred|)^2.
+    # Volume-wise normalisation (p95 of the whole zero-filled volume) and volume noise sigma (tools/volume_stats.py).
     {
         **_BASE,
-        "prefix": "pca",
-        "name": "pca_3stage_axial_volume_fastmri_mag_learned_lambda_l2_final_r4",
-        "encoders": ["pca", "pca", "pca"],
-        "pca_tokenizer": "axial",
-        "pca_scope": "volume",
-        "pca_bins": 3,
-        "pca_bin_rule": "equal_variance",
-        "pca_detach_basis": True,
-        "pca_center": True,
-        "pca_layers_per_bin": 1,
-        "pca_layers_after_merge": 1,
-        "pca_nhead": 8,
-        "pca_volumes_per_batch": 3,
-        "final_loss_type": "complex_l2",
-        "intermediate_loss_type": "complex_l2",
+        "prefix": "ring_phase",
+        "name": "ring_phase_fixed_magL2_volnorm_final_r4",
+        "encoders": ["axial", "axial", "axial"],
+        "norm_scope": "volume",
+        "final_loss_type": "ring_phase_mag",
+        "intermediate_loss_type": "ring_phase_mag",
+        "ring_phase_weighting": "fixed",
+        "ring_phase_weight": 1.0,
+        "ring_phase_edges": [0.05, 0.1, 0.2, 0.3, 0.45, 0.6, 0.8, 1.0, 1.42],
     },
-
-    # Exp: same, fixed-APT tokenisation in every branch (apt_layout / apt_embed_dim from _BASE or defaults).
+    # Same with the learnable per-ring weighting  (1/K) sum_k ( exp(-s_k) P_k + s_k ),  s_k init 0.
     {
         **_BASE,
-        "prefix": "pca",
-        "name": "pca_3stage_fixed_apt_volume_fastmri_mag_learned_lambda_l2_final_r4",
-        "encoders": ["pca", "pca", "pca"],
-        "pca_tokenizer": "fixed_apt",
-        "pca_scope": "volume",
-        "pca_bins": 3,
-        "pca_bin_rule": "equal_variance",
-        "pca_detach_basis": True,
-        "pca_center": True,
-        "pca_layers_per_bin": 1,
-        "pca_layers_after_merge": 1,
-        "pca_nhead": 8,
-        "pca_volumes_per_batch": 3,
-        "final_loss_type": "complex_l2",
-        "intermediate_loss_type": "complex_l2",
-    },
-
-    # Exp: axial PCA stages with BATCH-scope PCA: ordinary shuffled batches, auto batch-size search fits as many
-    # slices as the GPU allows (auto_batch_size from _BASE); the PCA is taken over the slices in the batch.
-    {
-        **_BASE,
-        "prefix": "pca",
-        "name": "pca_3stage_axial_batchscope_fastmri_mag_learned_lambda_l2_final_r4",
-        "encoders": ["pca", "pca", "pca"],
-        "pca_tokenizer": "axial",
-        "pca_scope": "batch",
-        "pca_bins": 3,
-        "pca_bin_rule": "equal_variance",
-        "pca_detach_basis": True,
-        "pca_center": True,
-        "pca_layers_per_bin": 1,
-        "pca_layers_after_merge": 1,
-        "pca_nhead": 8,
-        "final_loss_type": "complex_l2",
-        "intermediate_loss_type": "complex_l2",
-    },
-    {
-        **_BASE,
-        "prefix": "pca",
-        "name": "pca_3stage_fixed_apt_batchscope_fastmri_mag_learned_lambda_l2_final_r4",
-        "encoders": ["pca", "pca", "pca"],
-        "pca_tokenizer": "fixed_apt",
-        "pca_scope": "batch",
-        "pca_bins": 3,
-        "pca_bin_rule": "equal_variance",
-        "pca_detach_basis": True,
-        "pca_center": True,
-        "pca_layers_per_bin": 1,
-        "pca_layers_after_merge": 1,
-        "pca_nhead": 8,
-        "final_loss_type": "complex_l2",
-        "intermediate_loss_type": "complex_l2",
+        "prefix": "ring_phase",
+        "name": "ring_phase_learnable_magL2_volnorm_final_r4",
+        "encoders": ["axial", "axial", "axial"],
+        "norm_scope": "volume",
+        "final_loss_type": "ring_phase_mag",
+        "intermediate_loss_type": "ring_phase_mag",
+        "ring_phase_weighting": "learnable",
+        "ring_phase_edges": [0.05, 0.1, 0.2, 0.3, 0.45, 0.6, 0.8, 1.0, 1.42],
     },
 ]

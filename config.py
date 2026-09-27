@@ -185,6 +185,19 @@ class Config:
     final_loss_type: str = "l1"
     intermediate_loss_type: str = "l1"
     berhu_delta: float = 1.0
+    # "ring_phase_mag": SNR-weighted (w = |gt|/(|gt|+sigma_vol)) 1-cos(dphi) phase error averaged per radial ring, rings
+    # averaged (fixed weight, or learnable s_k = log sigma_k^2 with exp(-s_k) P_k + s_k), plus mean (|gt|-|pred|)^2.
+    ring_phase_edges: List[float] = field(default_factory=lambda: [0.05, 0.1, 0.2, 0.3, 0.45, 0.6, 0.8, 1.0, 1.42])
+    ring_phase_weighting: str = "fixed"       # "fixed" | "learnable"
+    ring_phase_weight: float = 1.0            # multiplier on the ring-averaged phase term (fixed weighting only)
+    ring_phase_eps: float = 1e-8
+    ring_phase_s_floor: float = -9.21         # log(1e-4): floor on the learnable s_k
+    ring_phase_sigma_scale: float = 1.0       # multiplier on the volume noise sigma used in the SNR weight
+    # fastmri_magnitude normalisation scope: "slice" = per-slice p95 of the zero-filled |k| (default);
+    # "volume" = the volume's p95 over all its slices (tools/volume_stats.py, cached as <data_dir>/volume_stats.json);
+    # the volume noise sigma from the same file is forwarded to SNR-weighted losses in both cases.
+    norm_scope: str = "slice"
+    volume_stats_path: Optional[str] = None   # override the default <data_dir>/volume_stats.json
     # Radial frequency weighting for loss type "freq_weighted_complex_l2" (k-space only).
     # r is the radius on the normalised square [-1, 1]^2 centred at DC (edge = 1, corner = sqrt2);
     # every form is normalised to mean 1 afterwards, so only its shape matters. freq_weight_form:

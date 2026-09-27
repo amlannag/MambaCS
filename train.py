@@ -20,6 +20,7 @@ from PIL import Image
 from torch.utils.data import DataLoader
 
 from dataset import VolumeBatchSampler, volume_ids_from_fnames, H5MRIDataset, OASISDataset, prepare_fastmri_kspace
+from tools.volume_stats import load_or_compute_volume_stats
 from config import Config
 from progress import phase, progress_iter
 from train_config import EXPERIMENTS
@@ -157,6 +158,21 @@ def _uses_volume_batches(cfg):
     return _uses_pca_encoder(cfg) and getattr(cfg, "pca_scope", "volume") == "volume"
 
 
+def _needs_volume_stats(cfg):
+    """Volume statistics (sigma_raw / p95_vol) are needed for volume-wise normalisation or SNR-weighted losses."""
+    return getattr(cfg, "norm_scope", "slice") == "volume" or "ring_phase_mag" in (cfg.final_loss_type, cfg.intermediate_loss_type)
+
+
+def _volume_kwargs(cfg, batch, device):
+    """kwargs for simulate_undersampling from a metadata batch: volume_scale (norm_scope='volume') and sigma_raw."""
+    if not isinstance(batch, dict) or "sigma_raw" not in batch:
+        return {}
+    out = {"sigma_raw": torch.as_tensor(batch["sigma_raw"], dtype=torch.float32, device=device)}
+    if getattr(cfg, "norm_scope", "slice") == "volume":
+        out["volume_scale"] = torch.as_tensor(batch["p95_vol"], dtype=torch.float32, device=device)
+    return out
+
+
 def _volume_ids(cfg, fnames, device):
     """Volume ids for the PCA encoder; None when no PCA stage is used (or no file names are available)."""
     if not _uses_pca_encoder(cfg) or fnames is None:
@@ -285,6 +301,15 @@ def _loss_kwargs_for(cfg, loss_type):
         return kwargs
     if loss_type == "complex_berhu":
         return {"delta": getattr(cfg, "berhu_delta", 1.0)}
+    if loss_type == "ring_phase_mag":
+        return {
+            "ring_edges": list(getattr(cfg, "ring_phase_edges", [0.05, 0.1, 0.2, 0.3, 0.45, 0.6, 0.8, 1.0, 1.42])),
+            "phase_weighting": getattr(cfg, "ring_phase_weighting", "fixed"),
+            "phase_weight": getattr(cfg, "ring_phase_weight", 1.0),
+            "eps": getattr(cfg, "ring_phase_eps", 1e-8),
+            "s_floor": getattr(cfg, "ring_phase_s_floor", -9.21),
+            "sigma_scale": getattr(cfg, "ring_phase_sigma_scale", 1.0),
+        }
     if loss_type == "freq_weighted_complex_l2":
         return {
             "weight_m": cfg.freq_weight_m,
@@ -536,6 +561,7 @@ def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer
         kspace_full, fnames = _unpack_kspace_batch(batch)
         kspace_full = kspace_full.to(device)
         volume_id = _volume_ids(cfg, fnames, device)
+        volume_kwargs = _volume_kwargs(cfg, batch, device)
         R    = accel_factors[int(accel_rng.integers(len(accel_factors)))]
         kspace_us, mask, _ = mask_generator.apply(
             kspace_full,
@@ -556,6 +582,7 @@ def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer
                 companding_p=cfg.companding_p,
                 companding_a=cfg.companding_a,
                 companding_centering=cfg.companding_centering,
+                **volume_kwargs,
             )
 
         optimizer.zero_grad(set_to_none=True)
@@ -649,6 +676,7 @@ def validate(cfg, model, loader, accel_factors, image_size, final_criterion,
         kspace_full, fnames = _unpack_kspace_batch(batch)
         kspace_full = kspace_full.to(device)
         volume_id = _volume_ids(cfg, fnames, device)
+        volume_kwargs = _volume_kwargs(cfg, batch, device)
         R    = accel_factors[batch_idx % len(accel_factors)]
         kspace_us, mask, _ = mask_generator.apply(kspace_full, R, seed=(cfg.seed, batch_idx, int(R)))
 
@@ -664,6 +692,7 @@ def validate(cfg, model, loader, accel_factors, image_size, final_criterion,
             companding_p=cfg.companding_p,
             companding_a=cfg.companding_a,
             companding_centering=cfg.companding_centering,
+            **volume_kwargs,
         )
         recon, intermediates = model(
             model_input, DC_input, mask, return_intermediates=True, stats=stats, volume_id=volume_id
@@ -807,7 +836,13 @@ def _oasis_slice_number(path):
 
 
 @torch.no_grad()
-def _run_validation_slice(cfg, model, kspace_full, kspace_us, mask, volume_id=None):
+def _run_validation_slice(cfg, model, kspace_full, kspace_us, mask, volume_id=None, volume_stats=None):
+    extra = {}
+    if volume_stats is not None:
+        n = kspace_full.shape[0]
+        extra["sigma_raw"] = torch.full((n,), float(volume_stats["sigma_raw"]), device=kspace_full.device)
+        if getattr(cfg, "norm_scope", "slice") == "volume":
+            extra["volume_scale"] = torch.full((n,), float(volume_stats["p95_vol"]), device=kspace_full.device)
     model_input, dc_input, _, stats = simulate_undersampling(
         kspace_full,
         mask,
@@ -820,6 +855,7 @@ def _run_validation_slice(cfg, model, kspace_full, kspace_us, mask, volume_id=No
         companding_p=cfg.companding_p,
         companding_a=cfg.companding_a,
         companding_centering=cfg.companding_centering,
+        **extra,
     )
     recon = model(model_input, dc_input, mask, stats=stats, volume_id=volume_id)
     raw_kspace = model_output_to_raw_kspace(recon, stats, cfg.learning)
@@ -864,8 +900,12 @@ def evaluate_validation_set(cfg, model, device):
         )
         if not h5_files:
             raise ValueError(f"No .h5 files found in validation directory {val_data_dir}")
+        val_volume_stats = (load_or_compute_volume_stats(val_data_dir, image_size, acceleration, cfg.center_fractions[0], cfg.kspace_key,
+                                                         path=getattr(cfg, "volume_stats_path", None), verbose=False)
+                            if _needs_volume_stats(cfg) else {})
         for file_index, path in enumerate(h5_files):
             accumulator = _new_volume_accumulator()
+            vstats = val_volume_stats.get(os.path.basename(path))
             with h5py.File(path, "r") as handle:
                 if "max" not in handle.attrs:
                     raise KeyError(f"Missing 'max' attribute in {path}.")
@@ -883,7 +923,7 @@ def evaluate_validation_set(cfg, model, device):
                     kspace_full, kspace_us, mask = torch.cat(fulls), torch.cat(uss), torch.cat(masks)
                     pred_kspace, pred_image = _run_validation_slice(
                         cfg, model, kspace_full, kspace_us, mask,
-                        volume_id=torch.zeros(slice_count, dtype=torch.long, device=device),
+                        volume_id=torch.zeros(slice_count, dtype=torch.long, device=device), volume_stats=vstats,
                     )
                     _update_volume_accumulator(accumulator, ifft_2d(kspace_full), pred_image, kspace_full, pred_kspace)
                 else:
@@ -895,7 +935,7 @@ def evaluate_validation_set(cfg, model, device):
                         kspace_full, acceleration, seed=(mask_seed, file_index, slice_index, acceleration)
                     )
                     pred_kspace, pred_image = _run_validation_slice(
-                        cfg, model, kspace_full, kspace_us, mask
+                        cfg, model, kspace_full, kspace_us, mask, volume_stats=vstats
                     )
                     _update_volume_accumulator(
                         accumulator, ifft_2d(kspace_full), pred_image, kspace_full, pred_kspace
@@ -985,18 +1025,27 @@ def main():
 
     def _make_dataset(data_dir, max_files=None, return_metadata=False):
         if cfg.dataset == "oasis":
+            if _needs_volume_stats(cfg):
+                raise ValueError("norm_scope='volume' / ring_phase_mag need fastMRI HDF5 volumes")
             return OASISDataset(data_dir, image_size=cfg.image_size, max_files=max_files)
+        volume_stats = None
+        if _needs_volume_stats(cfg):
+            phase(f"Loading volume statistics for {data_dir} (computed and cached on first use)")
+            volume_stats = load_or_compute_volume_stats(data_dir, tuple(cfg.image_size), cfg.acceleration_factors[0],
+                                                        cfg.center_fractions[0], cfg.kspace_key,
+                                                        path=getattr(cfg, "volume_stats_path", None))
         return H5MRIDataset(
             data_dir,
             image_size=cfg.image_size,
             kspace_key=cfg.kspace_key,
             max_files=max_files,
             return_metadata=return_metadata,
+            volume_stats=volume_stats,
         )
 
     phase(f"Loading train dataset from {train_data_dir}")
     train_ds = _make_dataset(train_data_dir, max_files=cfg.max_train_files,
-                             return_metadata=cfg.dataset == "fastmri" and _uses_pca_encoder(cfg))
+                             return_metadata=cfg.dataset == "fastmri" and (_uses_pca_encoder(cfg) or _needs_volume_stats(cfg)))
     if cfg.dataset == "fastmri":
         phase("Probing one sample to determine image size...")
         sample_shape = tuple(int(x) for x in _unpack_kspace_batch(train_ds[0])[0].shape[-2:])
@@ -1111,9 +1160,14 @@ def main():
     )
 
     # ---- Optimiser / scheduler / loss ----
-    optimizer = _build_optimizer(cfg, unique_model_parameters(model))
-    scheduler = _build_scheduler(cfg, optimizer)
     final_criterion, intermediate_criterion = _build_criteria(cfg)
+    final_criterion, intermediate_criterion = final_criterion.to(device), intermediate_criterion.to(device)
+    loss_parameters = [p for crit in {id(final_criterion): final_criterion, id(intermediate_criterion): intermediate_criterion}.values()
+                       for p in crit.parameters()]
+    if loss_parameters:
+        phase(f"Loss has {sum(p.numel() for p in loss_parameters)} learnable parameter(s); added to the optimizer")
+    optimizer = _build_optimizer(cfg, list(unique_model_parameters(model)) + loss_parameters)
+    scheduler = _build_scheduler(cfg, optimizer)
 
     # ---- Resume ----
     if cfg.checkpoint_metric not in {"psnr", "volume_psnr"}:
@@ -1123,6 +1177,10 @@ def main():
 
     if checkpoint is not None:
         model.load_state_dict(checkpoint['model'])
+        if checkpoint.get('final_criterion') is not None:
+            final_criterion.load_state_dict(checkpoint['final_criterion'])
+        if checkpoint.get('intermediate_criterion') is not None:
+            intermediate_criterion.load_state_dict(checkpoint['intermediate_criterion'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         scheduler.load_state_dict(checkpoint['scheduler'])
         start_epoch = checkpoint['epoch'] + 1
@@ -1212,6 +1270,10 @@ def main():
             metrics[f'train_encoder_{i+1}_psnr_gain'] = round(gain, 6)
         for i, gain in enumerate(val_metrics["stage_psnr_gains"]):
             metrics[f'val_encoder_{i+1}_psnr_gain'] = round(gain, 6)
+        if getattr(final_criterion, "log_var", None) is not None:
+            for k, value in enumerate(final_criterion.log_var.detach().cpu().tolist()):
+                metrics[f'ring_s_{k}'] = round(value, 4)
+                metrics[f'ring_phase_weight_{k}'] = round(math.exp(-max(value, final_criterion.s_floor)), 4)
         if model.lamb is not False:
             for i, lv in enumerate(model.lamb):
                 metrics[f'lambda_{i}'] = round(lv.item(), 6)
@@ -1228,6 +1290,8 @@ def main():
             torch.save({
                 'epoch':         epoch,
                 'model':         model.state_dict(),
+                'final_criterion': final_criterion.state_dict(),
+                'intermediate_criterion': intermediate_criterion.state_dict(),
                 'config':        grouped_config,
                 'optimizer':     optimizer.state_dict(),
                 'scheduler':     scheduler.state_dict(),
@@ -1242,6 +1306,8 @@ def main():
         torch.save({
             'epoch':         epoch,
             'model':         model.state_dict(),
+            'final_criterion': final_criterion.state_dict(),
+            'intermediate_criterion': intermediate_criterion.state_dict(),
             'config':        grouped_config,
             'optimizer':     optimizer.state_dict(),
             'scheduler':     scheduler.state_dict(),
