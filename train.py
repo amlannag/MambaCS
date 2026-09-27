@@ -335,11 +335,13 @@ def _loss_kwargs_for(cfg, loss_type):
     return {}
 
 
-def _build_criteria(cfg):
-    return (
-        build_loss(cfg.final_loss_type, **_loss_kwargs_for(cfg, cfg.final_loss_type)),
-        build_loss(cfg.intermediate_loss_type, **_loss_kwargs_for(cfg, cfg.intermediate_loss_type)),
-    )
+def _build_criteria(cfg, device=None):
+    """Final and intermediate loss modules (moved to `device` when given: losses may own parameters, e.g. ring_phase_mag)."""
+    final = build_loss(cfg.final_loss_type, **_loss_kwargs_for(cfg, cfg.final_loss_type))
+    intermediate = build_loss(cfg.intermediate_loss_type, **_loss_kwargs_for(cfg, cfg.intermediate_loss_type))
+    if device is not None:
+        final, intermediate = final.to(device), intermediate.to(device)
+    return final, intermediate
 
 
 def _build_optimizer(cfg, parameters):
@@ -422,8 +424,8 @@ def _probe_batch_candidate(cfg, dataset, batch_size, device, checkpoint=None):
         t_build = time.time()
         model = build_model(cfg).to(device)
         phase(f"  Probe batch {batch_size}: model built in {time.time() - t_build:.1f}s")
-        optimizer = _build_optimizer(cfg, unique_model_parameters(model))
-        final_criterion, intermediate_criterion = _build_criteria(cfg)
+        final_criterion, intermediate_criterion = _build_criteria(cfg, device)
+        optimizer = _build_optimizer(cfg, list(unique_model_parameters(model)) + list(final_criterion.parameters()))
         if checkpoint is not None:
             model.load_state_dict(checkpoint["model"])
             optimizer.load_state_dict(checkpoint["optimizer"])
@@ -1160,8 +1162,7 @@ def main():
     )
 
     # ---- Optimiser / scheduler / loss ----
-    final_criterion, intermediate_criterion = _build_criteria(cfg)
-    final_criterion, intermediate_criterion = final_criterion.to(device), intermediate_criterion.to(device)
+    final_criterion, intermediate_criterion = _build_criteria(cfg, device)
     loss_parameters = [p for crit in {id(final_criterion): final_criterion, id(intermediate_criterion): intermediate_criterion}.values()
                        for p in crit.parameters()]
     if loss_parameters:
