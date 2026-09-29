@@ -4,7 +4,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --job-name=dctnn_baseline
-#SBATCH --time=20:00:00
+#SBATCH --time=24:00:00
 #SBATCH --qos=gpu
 #SBATCH --partition=gpu_cuda
 #SBATCH --gres=gpu:1

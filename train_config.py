@@ -40,19 +40,28 @@ _BASE = {
 
 
 EXPERIMENTS = [
-    # Ring-phase + magnitude loss: SNR-weighted 1-cos(dphi) averaged per radial ring, rings averaged, plus (|gt|-|pred|)^2.
-    # Volume-wise normalisation (p95 of the whole zero-filled volume) and volume noise sigma (tools/volume_stats.py).
-   
-    # Same with the learnable per-ring weighting  (1/K) sum_k ( exp(-s_k) P_k + s_k ),  s_k init 0.
+    # Exp: three PCA-channel stages with axial tokenisation, trained volume-wise: volume-scope PCA (3 volumes per
+    # batch) and volume-wise p95 normalisation (tools/volume_stats.py). Each stage splits its input into 3
+    # equal-variance PC bins, one axial branch (8 heads, 1 layer) per bin, k-space merge + 1 layer, DC after every
+    # stage. Complex L2 on the final output plus unweighted complex L2 on every intermediate stage.
     {
         **_BASE,
-        "prefix": "ring_phase",
-        "name": "ring_phase_learnable_magL2_volnorm_final_r4",
-        "encoders": ["axial", "axial", "axial"],
+        "prefix": "pca",
+        "name": "pca_3stage_axial_volnorm_intermediate_l2_r4",
+        "encoders": ["pca", "pca", "pca"],
+        "pca_tokenizer": "axial",
+        "pca_scope": "volume",
+        "pca_bins": 3,
+        "pca_bin_rule": "equal_variance",
+        "pca_detach_basis": True,
+        "pca_center": True,
+        "pca_layers_per_bin": 1,
+        "pca_layers_after_merge": 1,
+        "pca_nhead": 8,
+        "pca_volumes_per_batch": 3,
         "norm_scope": "volume",
-        "final_loss_type": "ring_phase_mag",
-        "intermediate_loss_type": "ring_phase_mag",
-        "ring_phase_weighting": "learnable",
-        "ring_phase_edges": [0.05, 0.1, 0.2, 0.3, 0.45, 0.6, 0.8, 1.0, 1.42],
+        "loss_mode": "intermediate_unweighted",
+        "final_loss_type": "complex_l2",
+        "intermediate_loss_type": "complex_l2",
     },
 ]
