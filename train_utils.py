@@ -465,6 +465,7 @@ _NORMALIZERS = {
     "zscore":              _norm.zscore,
     "kspace_companding":   _norm.kspace_companding,
     "log_kspace":          _norm.log_kspace,
+    "log_quantile":        _norm.log_quantile,
     "fastmri_magnitude":   _norm.fastmri_magnitude,
     "reconformer":         _norm.reconformer,
     "robust_shifted":      _norm.robust_shifted,
@@ -530,16 +531,19 @@ def simulate_undersampling(
     kspace_fill: str | None = None,
     volume_scale=None,
     sigma_raw=None,
+    norm_quantile: float = 0.95,
 ):
     """
-    volume_scale : optional [B] volume-wise normalisation scale (fastmri_magnitude, k_space learning): replaces the
-                   per-slice p95. sigma_raw : optional [B] raw k-space noise std per sample, forwarded into stats
+    volume_scale : optional [B] volume-wise normalisation scale (fastmri_magnitude / log_quantile, k_space learning):
+                   replaces the per-slice quantile. norm_quantile : quantile of the zero-filled magnitude pinned to 1
+                   by fastmri_magnitude / log_quantile (0.95 default, 1.0 = max). sigma_raw : optional [B] raw k-space noise std per sample, forwarded into stats
                    ("sigma_raw" / "sigma_norm") for SNR-weighted losses.
     learning="complex_image" : preserve complex image values through the model and FFT data consistency
     norm="zscore" : z-score normalise real/imag separately using undersampled image stats
     norm="robust_shifted" : median/IQR scale, smooth clip, and shift in the learning domain
     norm="kspace_companding" : radial magnitude companding in k-space (k_space learning only)
     norm="log_kspace" : log1p magnitude k-space normalization with preserved phase (k_space learning only)
+    norm="log_quantile" : log1p(|k| / q_p) with preserved phase, q_p = norm_quantile of the zero-filled |k| (k_space only)
     norm=None     : no normalisation — tensors left in raw k-space units
     kspace_fill  : pre-fill the unmeasured k-space before normalisation instead of zero-filling.
                    One of "linear", "cartesian_linear", "exponential", "inverse_distance"
@@ -569,6 +573,7 @@ def simulate_undersampling(
         companding_centering=companding_centering,
         volume_scale=volume_scale,
         sigma_raw=sigma_raw,
+        quantile=norm_quantile,
     )
     # Data consistency always blends with the raw measured k-space (the interpolated
     # points are only a model-input initialisation and must not be re-imposed by DC).

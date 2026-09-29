@@ -84,6 +84,22 @@ def invert_log_kspace(kspace: torch.Tensor) -> torch.Tensor:
     return torch.polar(magnitude, phase)
 
 
+def apply_log_quantile(kspace: torch.Tensor, scale) -> torch.Tensor:
+    """log1p(|k| / q_p) while preserving phase; q_p is the per-sample quantile of the zero-filled |k|."""
+    if not kspace.is_complex():
+        raise TypeError("log-quantile normalization requires a complex tensor")
+    magnitude = torch.log1p(kspace.abs() / _batch_stat_like(scale, kspace))
+    return torch.polar(magnitude, torch.angle(kspace))
+
+
+def invert_log_quantile(kspace: torch.Tensor, scale) -> torch.Tensor:
+    """Invert log-quantile normalization: expm1(|y|) * q_p while preserving phase."""
+    if not kspace.is_complex():
+        raise TypeError("log-quantile inversion requires a complex tensor")
+    magnitude = torch.expm1(kspace.abs()) * _batch_stat_like(scale, kspace)
+    return torch.polar(magnitude, torch.angle(kspace))
+
+
 def smooth_clip(values: torch.Tensor, threshold: float) -> torch.Tensor:
     return values / torch.sqrt(1 + (values / threshold).square())
 
@@ -125,6 +141,8 @@ def apply_normalization(tensor: torch.Tensor, metric: dict | None) -> torch.Tens
         )
     if normalization == "log_kspace":
         return apply_log_kspace(tensor, eps=metric.get("log_eps", LOG_KSPACE_EPS))
+    if normalization == "log_quantile":
+        return apply_log_quantile(tensor, metric["scale"])
     if normalization == "zscore":
         if tensor.is_complex():
             return torch.complex(
@@ -162,6 +180,8 @@ def invert_normalization(tensor: torch.Tensor, metric: dict | None) -> torch.Ten
         )
     if normalization == "log_kspace":
         return invert_log_kspace(tensor)
+    if normalization == "log_quantile":
+        return invert_log_quantile(tensor, metric["scale"])
     if normalization == "zscore":
         if tensor.is_complex():
             return torch.complex(
@@ -192,6 +212,7 @@ def restore_original_kspace(kspace: torch.Tensor, metric: dict | None = None) ->
     direct_kspace_normalizations = {
         "kspace_companding",
         "log_kspace",
+        "log_quantile",
         "fastmri_magnitude",
         "robust_shifted",
     }
@@ -231,7 +252,7 @@ def complex_image_to_magnitude(image: torch.Tensor, metric: dict | None = None) 
 def _resolve_normalization_domain(metric: dict | None, learning: str) -> str:
     if metric and "normalization_domain" in metric:
         return metric["normalization_domain"]
-    if metric and metric.get("normalization") in {"kspace_companding", "log_kspace"}:
+    if metric and metric.get("normalization") in {"kspace_companding", "log_kspace", "log_quantile"}:
         return "k_space"
     if metric and metric.get("normalization") == "zscore":
         return "complex_image"
@@ -478,23 +499,29 @@ def robust_shifted(
     return model_input, dc_input, target, metric
 
 
-def fastmri_magnitude(kspace_full, mask, learning="k_space", kspace_us=None, volume_scale=None, sigma_raw=None, **_unused):
+def _quantile_scale(kspace_us, quantile, volume_scale=None):
+    """Per-sample [B,1,1,1] scale: the `quantile` of the zero-filled |k| (or the supplied volume-wise scale)."""
+    if volume_scale is not None:
+        scale_factor = torch.as_tensor(volume_scale, dtype=kspace_us.real.dtype, device=kspace_us.device).reshape(-1)
+    else:
+        magnitudes = kspace_us.abs().reshape(kspace_us.shape[0], -1)
+        scale_factor = torch.quantile(magnitudes, q=float(quantile), dim=1)
+    return scale_factor.clamp_min(1e-8).reshape(-1, 1, 1, 1)
+
+
+def fastmri_magnitude(kspace_full, mask, learning="k_space", kspace_us=None, quantile=0.95, volume_scale=None, sigma_raw=None, **_unused):
     """
-    Scale each sample by the undersampled magnitude p95 in its learning domain.
+    Scale each sample by the `quantile` (default p95) of the undersampled magnitude in its learning domain.
     volume_scale : optional [B] per-sample scale (the volume-wise p95 from tools/volume_stats.py) used instead of the
-                   per-slice p95 (k_space learning only). sigma_raw : optional [B] raw k-space noise std, stored in the
-                   metric as "sigma_raw" and in normalised units as "sigma_norm" for SNR-weighted losses.
+                   per-slice quantile (k_space learning only). sigma_raw : optional [B] raw k-space noise std, stored in
+                   the metric as "sigma_raw" and in normalised units as "sigma_norm" for SNR-weighted losses.
+    The metric key is kept as "p95" for backward compatibility with checkpoints / callers; it holds the chosen quantile.
     """
     if kspace_us is None:
         kspace_us = kspace_full * mask
 
     if learning == "k_space":
-        if volume_scale is not None:
-            scale_factor = torch.as_tensor(volume_scale, dtype=kspace_us.real.dtype, device=kspace_us.device).reshape(-1).clamp_min(1e-8)
-        else:
-            magnitudes = kspace_us.abs().reshape(kspace_us.shape[0], -1)
-            scale_factor = torch.quantile(magnitudes, q=0.95, dim=1).clamp_min(1e-8)
-        scale_factor = scale_factor.reshape(-1, 1, 1, 1)
+        scale_factor = _quantile_scale(kspace_us, quantile, volume_scale)
         kspace_us_norm = kspace_us / scale_factor
         kspace_full_norm = kspace_full / scale_factor
         metric = {
@@ -502,6 +529,7 @@ def fastmri_magnitude(kspace_full, mask, learning="k_space", kspace_us=None, vol
             "normalization_domain": "k_space",
             "prediction_domain": "k_space",
             "p95": scale_factor,
+            "quantile": float(quantile),
             "scale_scope": "volume" if volume_scale is not None else "slice",
         }
         if sigma_raw is not None:
@@ -517,21 +545,55 @@ def fastmri_magnitude(kspace_full, mask, learning="k_space", kspace_us=None, vol
 
     img_us = ifft_2d(kspace_us)
     img_gt = ifft_2d(kspace_full)
-    magnitudes = img_us.abs().reshape(img_us.shape[0], -1)
-    scale_factor = torch.quantile(magnitudes, q=0.95, dim=1).clamp_min(1e-8)
-    scale_factor = scale_factor.reshape(-1, 1, 1, 1)
+    scale_factor = _quantile_scale(img_us, quantile)
     img_us_norm = img_us / scale_factor
     img_gt_norm = img_gt / scale_factor
     metric = {
         "normalization": "fastmri_magnitude",
         "normalization_domain": "complex_image",
         "p95": scale_factor,
+        "quantile": float(quantile),
     }
     model_input, dc_input, target, metric = _build_outputs(
         img_us_norm, img_gt_norm, metric, learning, kspace_us
     )
     target["image"] = img_gt.abs()
     return model_input, dc_input, target, metric
+
+
+def log_quantile(kspace_full, mask, learning="k_space", kspace_us=None, quantile=0.95, volume_scale=None, sigma_raw=None, **_unused):
+    """
+    Log-quantile k-space normalisation: |k| -> log1p(|k| / q_p), phase preserved, where q_p is the `quantile` of the
+    zero-filled |k| per sample (or `volume_scale`). Inverse: expm1(|y|) * q_p. k_space learning only.
+    Zero-filled entries stay exactly 0 (log1p(0) = 0). sigma_norm is sigma_raw / q_p: the noise floor sits well below
+    q_p, where log1p is ~identity, so the linear scaling is the correct first-order noise level in normalised units.
+    """
+    if learning != "k_space":
+        raise ValueError("norm='log_quantile' is only supported when learning='k_space'")
+    if kspace_us is None:
+        kspace_us = kspace_full * mask
+
+    scale_factor = _quantile_scale(kspace_us, quantile, volume_scale)
+    metric = {
+        "normalization": "log_quantile",
+        "normalization_domain": "k_space",
+        "prediction_domain": "k_space",
+        "scale": scale_factor,
+        "quantile": float(quantile),
+        "scale_scope": "volume" if volume_scale is not None else "slice",
+    }
+    if sigma_raw is not None:
+        sigma_raw = torch.as_tensor(sigma_raw, dtype=kspace_us.real.dtype, device=kspace_us.device).reshape(-1, 1, 1, 1)
+        metric["sigma_raw"] = sigma_raw
+        metric["sigma_norm"] = sigma_raw / scale_factor
+    kspace_us_norm = apply_log_quantile(kspace_us, scale_factor)
+    kspace_full_norm = apply_log_quantile(kspace_full, scale_factor)
+    target = {
+        "image": ifft_2d(kspace_full).abs(),
+        "complex_image": ifft_2d(kspace_full_norm),
+        "kspace": kspace_full_norm,
+    }
+    return kspace_us_norm, kspace_us, target, metric
 
 
 def reconformer(kspace_full, mask, learning="complex_image", kspace_us=None, **_unused):

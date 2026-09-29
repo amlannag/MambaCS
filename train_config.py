@@ -33,35 +33,56 @@ _BASE = {
     "epochs": 100,
     "batch_size": 32,
     "auto_batch_size": True,
-    "batch_size_search_start": 128,
+    "batch_size_search_start": 250,
     "lr": 2e-4,
     "ffn_sharing": "global",
 }
 
 
+# Normalisation ablation on the plain 3x axial encoder (complex axial attention, learned-lambda DC after every stage,
+# complex L2 final-only loss). The quantile q_p is taken from the zero-filled |k| of each slice (norm_scope="slice")
+# unless stated otherwise.
+_AXIAL = {
+    **_BASE,
+    "prefix": "norm",
+    "encoders": ["axial", "axial", "axial"],
+    "norm_scope": "slice",
+    "final_loss_type": "complex_l2",
+    "intermediate_loss_type": "complex_l2",
+}
+
 EXPERIMENTS = [
-    # Exp: three PCA-channel stages with axial tokenisation, trained volume-wise: volume-scope PCA (3 volumes per
-    # batch) and volume-wise p95 normalisation (tools/volume_stats.py). Each stage splits its input into 3
-    # equal-variance PC bins, one axial branch (8 heads, 1 layer) per bin, k-space merge + 1 layer, DC after every
-    # stage. Complex L2 on the final output plus unweighted complex L2 on every intermediate stage.
+    # Exp: log-quantile normalisation, |k| -> log1p(|k| / q_95) with phase kept (inverse expm1(.) * q_95), per slice.
     {
-        **_BASE,
-        "prefix": "pca",
-        "name": "pca_3stage_axial_volnorm_intermediate_l2_r4",
-        "encoders": ["pca", "pca", "pca"],
-        "pca_tokenizer": "axial",
-        "pca_scope": "volume",
-        "pca_bins": 3,
-        "pca_bin_rule": "equal_variance",
-        "pca_detach_basis": True,
-        "pca_center": True,
-        "pca_layers_per_bin": 1,
-        "pca_layers_after_merge": 1,
-        "pca_nhead": 8,
-        "pca_volumes_per_batch": 3,
+        **_AXIAL,
+        "name": "axial_logq95_slice_l2_final_r4",
+        "norm": "log_quantile",
+        "norm_quantile": 0.95,
+    },
+    # Exp: linear fastMRI-magnitude normalisation pinned to the max (p100) of the zero-filled |k| per slice.
+    {
+        **_AXIAL,
+        "name": "axial_p100_slice_l2_final_r4",
+        "norm": "fastmri_magnitude",
+        "norm_quantile": 1.0,
+    },
+    # Exp: linear fastMRI-magnitude p95 normalisation, volume-wise (p95 of the whole zero-filled volume from
+    # tools/volume_stats.py, cached as <data_dir>/volume_stats.json).
+    {
+        **_AXIAL,
+        "name": "axial_p95_volume_l2_final_r4",
+        "norm": "fastmri_magnitude",
+        "norm_quantile": 0.95,
         "norm_scope": "volume",
-        "loss_mode": "intermediate_unweighted",
-        "final_loss_type": "complex_l2",
-        "intermediate_loss_type": "complex_l2",
+    },
+    # Exp: standard per-slice p95 normalisation, but the first 4 and last 4 (noisy edge) slices of every volume are
+    # dropped from the TRAINING set (validation still uses every slice).
+    {
+        **_AXIAL,
+        "name": "axial_p95_slice_skip4_4_l2_final_r4",
+        "norm": "fastmri_magnitude",
+        "norm_quantile": 0.95,
+        "skip_starting_slice": 4,
+        "skip_ending_slice": 4,
     },
 ]

@@ -91,8 +91,8 @@ def config_to_dict(cfg):
     data_keys = {
         "dataset", "data_dir", "val_data_dir", "kspace_key", "image_size",
         "num_channels", "acceleration_factors", "center_fractions", "mask_type",
-        "val_fraction", "seed", "max_train_files", "max_val_files", "norm",
-        "robust_clip", "robust_shift", "companding_p", "companding_a", "companding_centering",
+        "val_fraction", "seed", "max_train_files", "max_val_files", "skip_starting_slice", "skip_ending_slice", "norm",
+        "robust_clip", "robust_shift", "companding_p", "companding_a", "companding_centering", "norm_quantile",
     }
     model_keys = {
         "model_type", "encoders", "patch_size", "axial_row_stride", "nhead_patch", "nhead_axial",
@@ -388,9 +388,14 @@ def _clear_cuda_memory():
         torch.cuda.empty_cache()
 
 
-def _find_executable_batch_size(starting_batch_size, probe):
+BATCH_SIZE_BACKOFF = 0.8   # multiply the batch size by this after every OOM (always shrinks by at least 1)
+
+
+def _find_executable_batch_size(starting_batch_size, probe, backoff=BATCH_SIZE_BACKOFF):
     if starting_batch_size < 1:
         raise ValueError("starting_batch_size must be at least 1")
+    if not 0 < backoff < 1:
+        raise ValueError("backoff must be in (0, 1)")
 
     batch_size = starting_batch_size
     while True:
@@ -405,7 +410,7 @@ def _find_executable_batch_size(starting_batch_size, probe):
             _clear_cuda_memory()
             if batch_size == 1:
                 raise RuntimeError("Model cannot fit a batch size of 1") from error
-            next_batch_size = max(1, batch_size // 2)
+            next_batch_size = max(1, min(batch_size - 1, int(batch_size * backoff)))
             phase(f"OOM at batch size {batch_size}: {message.splitlines()[0]}")
             phase(f"Retrying with batch size {next_batch_size}.")
             batch_size = next_batch_size
@@ -480,6 +485,7 @@ def _probe_batch_candidate(cfg, dataset, batch_size, device, checkpoint=None):
                     companding_p=cfg.companding_p,
                     companding_a=cfg.companding_a,
                     companding_centering=cfg.companding_centering,
+                    norm_quantile=cfg.norm_quantile,
                 )
 
             optimizer.zero_grad(set_to_none=True)
@@ -584,6 +590,7 @@ def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer
                 companding_p=cfg.companding_p,
                 companding_a=cfg.companding_a,
                 companding_centering=cfg.companding_centering,
+                norm_quantile=cfg.norm_quantile,
                 **volume_kwargs,
             )
 
@@ -694,6 +701,7 @@ def validate(cfg, model, loader, accel_factors, image_size, final_criterion,
             companding_p=cfg.companding_p,
             companding_a=cfg.companding_a,
             companding_centering=cfg.companding_centering,
+            norm_quantile=cfg.norm_quantile,
             **volume_kwargs,
         )
         recon, intermediates = model(
@@ -857,6 +865,7 @@ def _run_validation_slice(cfg, model, kspace_full, kspace_us, mask, volume_id=No
         companding_p=cfg.companding_p,
         companding_a=cfg.companding_a,
         companding_centering=cfg.companding_centering,
+        norm_quantile=cfg.norm_quantile,
         **extra,
     )
     recon = model(model_input, dc_input, mask, stats=stats, volume_id=volume_id)
@@ -1025,7 +1034,7 @@ def main():
     # ---- Datasets ----
     train_data_dir, val_data_dir = resolve_data_dirs(cfg)
 
-    def _make_dataset(data_dir, max_files=None, return_metadata=False):
+    def _make_dataset(data_dir, max_files=None, return_metadata=False, skip_starting_slice=0, skip_ending_slice=0):
         if cfg.dataset == "oasis":
             if _needs_volume_stats(cfg):
                 raise ValueError("norm_scope='volume' / ring_phase_mag need fastMRI HDF5 volumes")
@@ -1043,11 +1052,15 @@ def main():
             max_files=max_files,
             return_metadata=return_metadata,
             volume_stats=volume_stats,
+            skip_starting_slice=skip_starting_slice,
+            skip_ending_slice=skip_ending_slice,
         )
 
     phase(f"Loading train dataset from {train_data_dir}")
+    # Edge-slice skipping applies to training only; validation / inference see every slice of a volume.
     train_ds = _make_dataset(train_data_dir, max_files=cfg.max_train_files,
-                             return_metadata=cfg.dataset == "fastmri" and (_uses_pca_encoder(cfg) or _needs_volume_stats(cfg)))
+                             return_metadata=cfg.dataset == "fastmri" and (_uses_pca_encoder(cfg) or _needs_volume_stats(cfg)),
+                             skip_starting_slice=cfg.skip_starting_slice, skip_ending_slice=cfg.skip_ending_slice)
     if cfg.dataset == "fastmri":
         phase("Probing one sample to determine image size...")
         sample_shape = tuple(int(x) for x in _unpack_kspace_batch(train_ds[0])[0].shape[-2:])

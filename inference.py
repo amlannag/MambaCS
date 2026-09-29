@@ -27,8 +27,9 @@ from normalizer import invert_normalization, reconstruction_to_image_magnitude
 _DATA_KEYS = {
     "dataset", "data_dir", "val_data_dir", "kspace_key", "image_size",
     "num_channels", "acceleration_factors", "center_fractions", "mask_type",
-    "val_fraction", "seed", "max_train_files", "max_val_files", "norm", "robust_clip", "robust_shift",
-    "companding_p", "companding_a", "companding_centering",
+    "val_fraction", "seed", "max_train_files", "max_val_files", "skip_starting_slice", "skip_ending_slice",
+    "norm", "robust_clip", "robust_shift",
+    "companding_p", "companding_a", "companding_centering", "norm_quantile",
 }
 _MODEL_KEYS = {
     "model_type", "encoders", "patch_size", "axial_row_stride", "nhead_patch", "nhead_axial",
@@ -252,7 +253,7 @@ class BenchmarkImageCache:
             flat.setdefault('companding_centering', 'legacy')
         keys = _MODEL_KEYS | {'image_size', 'num_channels', 'kspace_key', 'norm', 'robust_clip',
                               'robust_shift', 'companding_p', 'companding_a', 'companding_centering',
-                              'a', 'centering'}
+                              'norm_quantile', 'a', 'centering'}
         if flat.get('lambda_schedule') not in (None, False, '', 'none', 'hard', 'constant'):
             keys = keys | {'epochs'}
         return cls._jsonable({key: value for key, value in flat.items() if key in keys})

@@ -56,6 +56,10 @@ class Config:
     seed: int = 42
     max_train_files: Optional[int] = None
     max_val_files: Optional[int] = 15
+    # Drop the first / last N slices of every fastMRI volume from the TRAINING set only (edge slices are often
+    # noisy / low signal). Validation and inference always use every slice. 0 = keep all.
+    skip_starting_slice: int = 0
+    skip_ending_slice: int = 0
 
     # ---------------------------------------------------------------------------
     # Model architecture
@@ -128,8 +132,12 @@ class Config:
     learned_lambda: bool = True
     # Domain the model operates in: "k_space", "image", or "complex_image"
     learning: str = "k_space"
-    # Normalisation: "zscore", "fastmri_magnitude", "robust_shifted", "kspace_companding", "log_kspace", or None
+    # Normalisation: "zscore", "fastmri_magnitude", "robust_shifted", "kspace_companding", "log_kspace",
+    # "log_quantile" (log1p(|k| / q_p), phase kept, k_space learning only), or None
     norm: str = "zscore"
+    # Quantile of the zero-filled magnitude that is pinned to 1 by "fastmri_magnitude" / "log_quantile"
+    # (0.95 = p95 default, 1.0 = max). Ignored when norm_scope="volume" (the cached volume p95 is used instead).
+    norm_quantile: float = 0.95
     # Pre-fill the undersampled (unmeasured) k-space BEFORE normalisation instead of
     # zero-filling: "linear", "cartesian_linear", "exponential", "inverse_distance"
     # (see DcTNN/radial_interpolation.py), or None/"zero_fill" for standard zero-fill.

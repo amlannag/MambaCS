@@ -51,13 +51,19 @@ class H5MRIDataset(Dataset):
         data_dir (str):              Directory containing .h5 files
         image_size (tuple[int,int]): Output image-domain crop shape (crop_H, crop_W)
         kspace_key (str):            HDF5 dataset key for raw k-space (default: 'kspace')
+        skip_starting_slice (int):   Drop the first N slices of every volume from the index (default 0)
+        skip_ending_slice (int):     Drop the last N slices of every volume from the index (default 0)
     """
 
     def __init__(self, data_dir, image_size=(320, 320), kspace_key='kspace', max_files=None,
-                 return_metadata=False, volume_stats=None):
+                 return_metadata=False, volume_stats=None, skip_starting_slice=0, skip_ending_slice=0):
+        if skip_starting_slice < 0 or skip_ending_slice < 0:
+            raise ValueError("skip_starting_slice / skip_ending_slice must be >= 0")
         self.image_size = image_size
         self.kspace_key = kspace_key
         self.return_metadata = return_metadata
+        self.skip_starting_slice = int(skip_starting_slice)
+        self.skip_ending_slice = int(skip_ending_slice)
         # optional {fname: {"sigma_raw", "p95_vol"}} (tools/volume_stats.py); returned in the metadata when present
         self.volume_stats = volume_stats or {}
         self._file_handles = {}
@@ -76,13 +82,23 @@ class H5MRIDataset(Dataset):
         phase(f"Indexing {len(h5_files)} .h5 files in {data_dir}")
         t_index = time.time()
         self.index = []
+        n_skipped = 0
         for fpath in progress_iter(h5_files, desc="  indexing", unit="file"):
             with h5py.File(fpath, 'r') as f:
                 num_slices = f[kspace_key].shape[0]
-            self.index.extend((fpath, s) for s in range(num_slices))
+            first, last = self.skip_starting_slice, num_slices - self.skip_ending_slice
+            if first >= last:
+                raise ValueError(
+                    f"{os.path.basename(fpath)} has {num_slices} slices; skipping {self.skip_starting_slice} at the "
+                    f"start and {self.skip_ending_slice} at the end leaves none"
+                )
+            n_skipped += num_slices - (last - first)
+            self.index.extend((fpath, s) for s in range(first, last))
         phase(
             f"Indexed {len(self.index)} slices from {len(h5_files)} files "
             f"in {time.time() - t_index:.1f}s"
+            + (f" (skipped {n_skipped} edge slices: first {self.skip_starting_slice}, last {self.skip_ending_slice} per volume)"
+               if n_skipped else "")
         )
 
     def _get_file_handle(self, fpath):
