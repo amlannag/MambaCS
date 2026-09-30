@@ -253,7 +253,7 @@ class BenchmarkImageCache:
             flat.setdefault('companding_centering', 'legacy')
         keys = _MODEL_KEYS | {'image_size', 'num_channels', 'kspace_key', 'norm', 'robust_clip',
                               'robust_shift', 'companding_p', 'companding_a', 'companding_centering',
-                              'norm_quantile', 'a', 'centering'}
+                              'norm_quantile', 'norm_scope', 'volume_stats_path', 'a', 'centering'}
         if flat.get('lambda_schedule') not in (None, False, '', 'none', 'hard', 'constant'):
             keys = keys | {'epochs'}
         return cls._jsonable({key: value for key, value in flat.items() if key in keys})

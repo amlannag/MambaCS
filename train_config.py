@@ -33,7 +33,7 @@ _BASE = {
     "epochs": 100,
     "batch_size": 32,
     "auto_batch_size": True,
-    "batch_size_search_start": 250,
+    "batch_size_search_start": 150,
     "lr": 2e-4,
     "ffn_sharing": "global",
 }
@@ -52,37 +52,11 @@ _AXIAL = {
 }
 
 EXPERIMENTS = [
-    # Exp: log-quantile normalisation, |k| -> log1p(|k| / q_95) with phase kept (inverse expm1(.) * q_95), per slice.
+# spectrum above 1 / longer tail than p95; p90 of the zero-fill ~ p60 of the acquired coefficients at R=4).
     {
         **_AXIAL,
-        "name": "axial_logq95_slice_l2_final_r4",
-        "norm": "log_quantile",
-        "norm_quantile": 0.95,
-    },
-    # Exp: linear fastMRI-magnitude normalisation pinned to the max (p100) of the zero-filled |k| per slice.
-    {
-        **_AXIAL,
-        "name": "axial_p100_slice_l2_final_r4",
+        "name": "axial_p90_slice_l2_final_r4",
         "norm": "fastmri_magnitude",
-        "norm_quantile": 1.0,
-    },
-    # Exp: linear fastMRI-magnitude p95 normalisation, volume-wise (p95 of the whole zero-filled volume from
-    # tools/volume_stats.py, cached as <data_dir>/volume_stats.json).
-    {
-        **_AXIAL,
-        "name": "axial_p95_volume_l2_final_r4",
-        "norm": "fastmri_magnitude",
-        "norm_quantile": 0.95,
-        "norm_scope": "volume",
-    },
-    # Exp: standard per-slice p95 normalisation, but the first 4 and last 4 (noisy edge) slices of every volume are
-    # dropped from the TRAINING set (validation still uses every slice).
-    {
-        **_AXIAL,
-        "name": "axial_p95_slice_skip4_4_l2_final_r4",
-        "norm": "fastmri_magnitude",
-        "norm_quantile": 0.95,
-        "skip_starting_slice": 4,
-        "skip_ending_slice": 4,
+        "norm_quantile": 0.90,
     },
 ]
