@@ -52,9 +52,35 @@ _AXIAL = {
 }
 
 EXPERIMENTS = [
-# spectrum above 1 / longer tail than p95; p90 of the zero-fill ~ p60 of the acquired coefficients at R=4).
-    {**_AXIAL, "name": "axial_p95_radial_l2_r0.6_final_r4",
- "norm": "fastmri_magnitude", "norm_quantile": 0.95,
- "final_loss_type": "complex_l2_radial", "intermediate_loss_type": "complex_l2_radial",
- "radial_loss_radius": 0.6}
+    # Exp: complex L2 restricted to the disc r < 0.6 (cells outside contribute nothing), p95 per-slice normalisation.
+    {
+        **_AXIAL,
+        "name": "axial_p95_radial_l2_r0.6_final_r4",
+        "norm": "fastmri_magnitude",
+        "norm_quantile": 0.95,
+        "final_loss_type": "complex_l2_radial",
+        "intermediate_loss_type": "complex_l2_radial",
+        "radial_loss_radius": 0.6,
+    },
+    # Quantile sweep below p95 (linear fastMRI-magnitude, per slice, complex L2). At R=4 ~75% of the zero-filled
+    # entries are exact zeros, so these sit close to the zero fraction: q95/q_p ~ 1.7 (p87.5), 2.0 (p85), 3.6 (p80).
+    # p80 lands on the zeros for ~1.4% of slices; the normaliser then falls back to p80 of the non-zero entries.
+    {
+        **_AXIAL,
+        "name": "axial_p87.5_slice_l2_final_r4",
+        "norm": "fastmri_magnitude",
+        "norm_quantile": 0.875,
+    },
+    {
+        **_AXIAL,
+        "name": "axial_p85_slice_l2_final_r4",
+        "norm": "fastmri_magnitude",
+        "norm_quantile": 0.85,
+    },
+    {
+        **_AXIAL,
+        "name": "axial_p80_slice_l2_final_r4",
+        "norm": "fastmri_magnitude",
+        "norm_quantile": 0.80,
+    },
 ]

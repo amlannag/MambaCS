@@ -500,12 +500,21 @@ def robust_shifted(
 
 
 def _quantile_scale(kspace_us, quantile, volume_scale=None):
-    """Per-sample [B,1,1,1] scale: the `quantile` of the zero-filled |k| (or the supplied volume-wise scale)."""
+    """
+    Per-sample [B,1,1,1] scale: the `quantile` of the zero-filled |k| (or the supplied volume-wise scale).
+    Low quantiles can land on the exact zeros of the unsampled columns (~75% of the entries at R=4); for those
+    samples the scale falls back to the same quantile taken over the NON-ZERO entries only, so the scale never
+    collapses to the 1e-8 clamp.
+    """
     if volume_scale is not None:
         scale_factor = torch.as_tensor(volume_scale, dtype=kspace_us.real.dtype, device=kspace_us.device).reshape(-1)
     else:
         magnitudes = kspace_us.abs().reshape(kspace_us.shape[0], -1)
         scale_factor = torch.quantile(magnitudes, q=float(quantile), dim=1)
+        for index in torch.nonzero(scale_factor <= 0).flatten().tolist():
+            nonzero = magnitudes[index][magnitudes[index] > 0]
+            if nonzero.numel():
+                scale_factor[index] = torch.quantile(nonzero, q=float(quantile))
     return scale_factor.clamp_min(1e-8).reshape(-1, 1, 1, 1)
 
 
