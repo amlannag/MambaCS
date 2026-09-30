@@ -341,6 +341,39 @@ class FrequencyWeightedComplexL2Loss(_ElementwiseComplexLoss):
         return error * weight / _reduce(weight, mask)
 
 
+class RadialComplexL2Loss(nn.Module):
+    """
+    complex_l2 restricted to the k-space disc r < radius (normalised radius: 0 at DC, 1 at the edge midpoints,
+    sqrt2 in the corners). Cells outside the disc contribute nothing — neither to the sum nor to the mean, so
+    the loss is the mean squared complex error over the in-disc cells only (and, with a mask, over the
+    in-disc UNSAMPLED cells only). radius >= sqrt2 recovers plain complex_l2.
+    """
+    name = "complex_l2_radial"
+
+    def __init__(self, radius: float = 0.6):
+        super().__init__()
+        if radius <= 0:
+            raise ValueError("radius must be positive")
+        self.radius = float(radius)
+        self._disc_cache = {}
+
+    def disc(self, x: torch.Tensor) -> torch.Tensor:
+        key = (tuple(x.shape[-2:]), x.device)
+        if key not in self._disc_cache:
+            self._disc_cache[key] = _normalized_radius_grid_like(x) < self.radius       # [1, 1, H, W] bool
+        return self._disc_cache[key]
+
+    def forward(self, pred, gt, stats=None, mask=None):
+        if _complex_target_domain(stats) != "kspace":
+            raise ValueError("complex_l2_radial requires a k-space prediction (learning='k_space')")
+        error = _squared_error(pred, _complex_pair(pred, gt, stats, mask, self.name))
+        keep = self.disc(pred).to(error.dtype)
+        if mask is not None:
+            keep = keep * (1.0 - mask).to(error.dtype)
+        keep = keep.expand_as(error)
+        return (error * keep).sum() / keep.sum().clamp_min(1.0)
+
+
 class ReconFormerMagnitudeL1Loss(nn.Module):
     def forward(self, pred, gt, stats=None, mask=None):
         _check_kspace_mask(mask, False, "reconformer_l1")
@@ -634,6 +667,8 @@ def build_loss(loss_type: str, **kwargs) -> nn.Module:
         return RingPhaseMagnitudeLoss(**kwargs)
     if loss_type == "freq_weighted_complex_l2":
         return FrequencyWeightedComplexL2Loss(**kwargs)
+    if loss_type == "complex_l2_radial":
+        return RadialComplexL2Loss(**kwargs)
     if loss_type == "reconformer_l1":
         return ReconFormerMagnitudeL1Loss()
     if loss_type == "perpendicular_loss":
@@ -645,7 +680,7 @@ def build_loss(loss_type: str, **kwargs) -> nn.Module:
     raise ValueError(
         "Unknown loss_type "
         f"'{loss_type}'. Choose from: ['l1', 'l2', 'image_domain_l1', 'image_domain_l2', "
-        "'complex_l1', 'complex_l2', 'complex_l2_nmse', 'complex_l2_pointwise_normalized', 'complex_berhu', 'ring_phase_mag', 'freq_weighted_complex_l2', "
+        "'complex_l1', 'complex_l2', 'complex_l2_nmse', 'complex_l2_pointwise_normalized', 'complex_berhu', 'ring_phase_mag', 'freq_weighted_complex_l2', 'complex_l2_radial', "
         "'reconformer_l1', 'perpendicular_loss', "
         "'loraks_c', 'complex_l2_loraks']"
     )

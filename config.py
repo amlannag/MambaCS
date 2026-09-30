@@ -229,6 +229,9 @@ class Config:
     # multiplied into any form. The Cartesian mask varies along kx, so this targets the unmeasured columns.
     freq_weight_kx_ring_edges: Optional[List[float]] = None
     freq_weight_kx_ring_weights: Optional[List[float]] = None
+    # Loss type "complex_l2_radial" (k-space only): complex L2 averaged over the disc r < radial_loss_radius only
+    # (normalised radius, 0 = DC, 1 = edge midpoints, sqrt2 = corners); cells outside the disc do not contribute.
+    radial_loss_radius: float = 0.6
     # Norm of the magnitude term inside "perpendicular_loss": "l1" = | |gt|-|pred| | (original), "l2" = (|gt|-|pred|)^2
     perpendicular_magnitude_norm: str = "l1"
     # Scaling of the branched phase term: "none" = as published (|gt||sin dphi|, scale-free in |pred|);

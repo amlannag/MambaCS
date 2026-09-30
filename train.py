@@ -323,6 +323,8 @@ def _loss_kwargs_for(cfg, loss_type):
             "weight_kx_ring_edges": getattr(cfg, "freq_weight_kx_ring_edges", None),
             "weight_kx_ring_weights": getattr(cfg, "freq_weight_kx_ring_weights", None),
         }
+    if loss_type == "complex_l2_radial":
+        return {"radius": getattr(cfg, "radial_loss_radius", 0.6)}
     if loss_type in {"loraks_c", "complex_l2_loraks"}:
         kwargs = {
             "radius": cfg.loraks_radius,

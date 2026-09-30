@@ -53,10 +53,8 @@ _AXIAL = {
 
 EXPERIMENTS = [
 # spectrum above 1 / longer tail than p95; p90 of the zero-fill ~ p60 of the acquired coefficients at R=4).
-    {
-        **_AXIAL,
-        "name": "axial_p90_slice_l2_final_r4",
-        "norm": "fastmri_magnitude",
-        "norm_quantile": 0.90,
-    },
+    {**_AXIAL, "name": "axial_p95_radial_l2_r0.6_final_r4",
+ "norm": "fastmri_magnitude", "norm_quantile": 0.95,
+ "final_loss_type": "complex_l2_radial", "intermediate_loss_type": "complex_l2_radial",
+ "radial_loss_radius": 0.6}
 ]
