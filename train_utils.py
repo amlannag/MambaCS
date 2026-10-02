@@ -81,6 +81,7 @@ _ENCODER_ARGS = {
             attn_type=cfg.attn_type,
             row_stride=cfg.axial_row_stride,
             mask_vertical_attn=cfg.mask_vertical_attn,
+            attn_scales=tuple(getattr(cfg, "attn_scales", (1, 3))),
         ),
     ),
     "cross_axial": lambda cfg: (
@@ -183,6 +184,7 @@ _ENCODER_ARGS = {
             rope_theta=cfg.rope_theta,
             rope_mixed_rotate=cfg.rope_mixed_rotate,
             attn_type=cfg.attn_type,
+            attn_scales=tuple(getattr(cfg, "attn_scales", (1, 3))),
         ),
     ),
 }
@@ -397,6 +399,7 @@ def build_model_from_config_dict(cfg_dict):
     cfg.lambda_schedule = model_cfg.get("lambda_schedule", "none")
     cfg.pos_emb_type = model_cfg.get("pos_emb_type", "APE")
     cfg.attn_type = model_cfg.get("attn_type", "standard")
+    cfg.attn_scales = tuple(model_cfg.get("attn_scales", (1, 3)))
     cfg.rope_theta = model_cfg.get("rope_theta", 100.0)
     cfg.rope_mixed_rotate = model_cfg.get("rope_mixed_rotate", True)
     cfg.axial_row_stride = model_cfg.get("axial_row_stride", 1)

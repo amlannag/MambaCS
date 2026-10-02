@@ -2,8 +2,9 @@
 Experiment definitions for DcTNN training.
 """
 
-# Shared recipe: k-space learning, fastMRI R=4, complex axial encoders, learned lambda DC after every
-# stage, final-only loss over the whole k-space. FNet stages keep their own FFNs (excluded from sharing).
+# Shared recipe: k-space learning, fastMRI R=4, complex encoders, learned lambda DC after every
+# stage, final-only complex-L2 loss over the whole k-space, per-slice p95 magnitude normalisation.
+# FNet stages keep their own FFNs (excluded from sharing).
 _BASE = {
     "hpc_backend": "amd",
     "model_type": "dctnn",
@@ -13,6 +14,8 @@ _BASE = {
     "image_size": (320, 320),
     "learning": "k_space",
     "norm": "fastmri_magnitude",
+    "norm_scope": "slice",
+    "norm_quantile": 0.95,
     "kspace_fill": None,
     "acceleration_factors": [4],
     "center_fractions": [0.08],
@@ -22,14 +25,16 @@ _BASE = {
     "layer_no": 1,
     "num_encoder_layers": 2,
     "nhead_axial": 8,
+    "nhead_patch": 8,
     "layer_norm_eps": 1e-5,
-    "attn_type": "complex",
     "pos_emb_type": "Rope-Axial",
     "rope_theta": 100.0,
     "lambda_schedule": "none",
     "learned_lambda": True,
     "loss_mode": "final_only",
     "loss_function_domain": "all_kspace",
+    "final_loss_type": "complex_l2",
+    "intermediate_loss_type": "complex_l2",
     "epochs": 100,
     "batch_size": 32,
     "auto_batch_size": True,
@@ -39,38 +44,27 @@ _BASE = {
 }
 
 
-# Normalisation ablation on the plain 3x axial encoder (complex axial attention, learned-lambda DC after every stage,
-# complex L2 final-only loss). The quantile q_p is taken from the zero-filled |k| of each slice (norm_scope="slice")
-# unless stated otherwise.
-_AXIAL = {
+# ReconFormer-style multi-scale attention (attn_type="complex_ms"): the 8 heads are split into
+# 4 pointwise heads (kernel 1) and 4 heads whose Q/K are a complex conv over the 3-token
+# neighbourhood (adjacent k-space rows/columns for axial tokens, 3x3 patch neighbourhood for
+# patch tokens). V and the output projection stay pointwise; RoPE is applied after the conv.
+_MULTISCALE = {
     **_BASE,
-    "prefix": "norm",
-    "encoders": ["axial", "axial", "axial"],
-    "norm_scope": "slice",
-    "final_loss_type": "complex_l2",
-    "intermediate_loss_type": "complex_l2",
+    "prefix": "multiscale",
+    "attn_type": "complex_ms",
+    "attn_scales": (1, 3),
 }
 
 EXPERIMENTS = [
-    # Quantile sweep below p95 (linear fastMRI-magnitude, per slice, complex L2). At R=4 ~75% of the zero-filled
-    # entries are exact zeros, so these sit close to the zero fraction: q95/q_p ~ 1.7 (p87.5), 2.0 (p85), 3.6 (p80).
-    # p80 lands on the zeros for ~1.4% of slices; the normaliser then falls back to p80 of the non-zero entries.
     {
-        **_AXIAL,
-        "name": "axial_p87.5_slice_l2_final_r4",
-        "norm": "fastmri_magnitude",
-        "norm_quantile": 0.875,
+        **_MULTISCALE,
+        "name": "axial_ms13_p95_slice_l2_final_r4",
+        "encoders": ["axial", "axial", "axial"],
     },
     {
-        **_AXIAL,
-        "name": "axial_p85_slice_l2_final_r4",
-        "norm": "fastmri_magnitude",
-        "norm_quantile": 0.85,
-    },
-    {
-        **_AXIAL,
-        "name": "axial_p80_slice_l2_final_r4",
-        "norm": "fastmri_magnitude",
-        "norm_quantile": 0.80,
+        **_MULTISCALE,
+        "name": "patch16_ms13_p95_slice_l2_final_r4",
+        "encoders": ["patch", "patch", "patch"],
+        "patch_size": (16, 16),
     },
 ]

@@ -162,7 +162,7 @@ class BaseTokenEncoder(nn.Module):
                        d_model, nhead, dim_feedforward, dropout, activation,
                        layer_norm_eps, batch_first, device, dtype, norm,
                        rope_theta, rope_mixed_rotate, attn_type,
-                       ffn_sharing="none", shared_ffn=None):
+                       ffn_sharing="none", shared_ffn=None, attn_scales=None):
 
         if self.pos_emb_type == "APE":
             dtype = torch.cfloat if self.is_complex else None
@@ -185,7 +185,7 @@ class BaseTokenEncoder(nn.Module):
 
         layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation,
                                         layer_norm_eps, freqs_cis=freqs_cis, attn_type=attn_type,
-                                        ff=shared_ffn)
+                                        ff=shared_ffn, attn_scales=attn_scales, token_grid=(grid_h, grid_w))
         self.encoder = TransformerEncoder(layer, num_layers, tie_ffn=shared_ffn is not None)
 
     def forward(self, img):
@@ -212,13 +212,17 @@ class TokenEncoder(BaseTokenEncoder):
                 num_layers=6, dim_feedforward=2048, dropout=0.1, activation='relu', layer_norm_eps=1e-05,
                 batch_first=True, device=None, dtype=None, norm=None,
                 pos_emb_type="APE", rope_theta=100.0, rope_mixed_rotate=True,
-                attn_type="standard", ffn_sharing="none", shared_ffn=None, flattening_order="row_major"):
+                attn_type="standard", ffn_sharing="none", shared_ffn=None, flattening_order="row_major",
+                attn_scales=(1, 3)):
         super().__init__()
 
         self.pos_emb_type = pos_emb_type
         self.d_model = d_model
         self.nhead = nhead
         self.is_complex = attn_type in _COMPLEX_ATTN_TYPES
+        if attn_type == "complex_ms" and (tokenizer_type != "patch" or flattening_order != "row_major"):
+            raise ValueError("attn_type='complex_ms' needs spatially adjacent tokens: use tokenizer_type='patch' "
+                             "with flattening_order='row_major'")
 
         image_height, image_width = pair(image_size)
         patch_height, patch_width = pair(patch_size)
@@ -244,7 +248,8 @@ class TokenEncoder(BaseTokenEncoder):
         self._setup_pos_emb(grid_h, grid_w, num_patches, num_layers, d_model, nhead,
                             dim_feedforward, dropout, activation, layer_norm_eps,
                             batch_first, device, dtype, norm, rope_theta, rope_mixed_rotate,
-                            attn_type, ffn_sharing=ffn_sharing, shared_ffn=shared_ffn)
+                            attn_type, ffn_sharing=ffn_sharing, shared_ffn=shared_ffn,
+                            attn_scales=attn_scales if attn_type == "complex_ms" else None)
 
 
 class axialEncoder(nn.Module):
@@ -256,13 +261,16 @@ class axialEncoder(nn.Module):
                     device=None, dtype=None, norm=None,
                     pos_emb_type="APE", rope_theta=100.0, attn_type="standard", row_stride=1,
                     mask_vertical_attn="none", ffn_sharing="none", shared_ffn=None,
-                    flattening_order="row_major"):
+                    flattening_order="row_major", attn_scales=(1, 3)):
         super().__init__()
 
         self.pos_emb_type = pos_emb_type
         self.d_model = d_model
         self.is_complex = attn_type in _COMPLEX_ATTN_TYPES
         self.mask_vertical_attn = mask_vertical_attn
+        if attn_type == "complex_ms" and flattening_order != "row_major":
+            raise ValueError("attn_type='complex_ms' needs adjacent row/column tokens: use flattening_order='row_major'")
+        attn_scales = attn_scales if attn_type == "complex_ms" else None
         if mask_vertical_attn == "cross":
             raise ValueError(
                 "mask_vertical_attn='cross' is no longer supported on axialEncoder. "
@@ -303,10 +311,10 @@ class axialEncoder(nn.Module):
 
         h_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation,
                                           layer_norm_eps, freqs_cis=freqs_h, attn_type=attn_type,
-                                          ff=shared_ffn)
+                                          ff=shared_ffn, attn_scales=attn_scales)
         v_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation,
                                           layer_norm_eps, freqs_cis=freqs_v, attn_type=attn_type,
-                                          ff=shared_ffn)
+                                          ff=shared_ffn, attn_scales=attn_scales)
         self.horizontalEncoder = TransformerEncoder(h_layer, numLayers, tie_ffn=shared_ffn is not None)
         self.verticalEncoder = TransformerEncoder(v_layer, numLayers, tie_ffn=shared_ffn is not None)
 

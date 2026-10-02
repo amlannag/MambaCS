@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .rope_vit import apply_rotary_emb, apply_rotary_emb_complex, reshape_for_broadcast
 from .util import FeedForward, ComplexLayerNorm, ComplexDropout, get_attention, _COMPLEX_ATTN_TYPES
-from .complex_init import apply_trabelsi_
+from .complex_init import apply_trabelsi_, trabelsi_init_
 # ---------------------------------------------------------------------------
 # Attention classes
 # ---------------------------------------------------------------------------
@@ -113,6 +113,68 @@ class ComplexMultiHeadAttention(BaseAttention):
             attn_i = F.softmax(attn.imag, dim=-1)
         attn = self.attn_drop(torch.complex(attn_r, attn_i))
         return torch.matmul(attn, v)
+
+
+class ComplexMultiScaleAttention(ComplexMultiHeadAttention):
+    """
+    ReconFormer-style multi-scale attention (Guo et al., "ReconFormer") on complex tokens.
+    Heads are split evenly across `scales`; each group's Q and K come from a complex convolution
+    over the token neighbourhood with that kernel size (1 = pointwise, i.e. the usual projection),
+    so different heads match tokens on differently-sized local contexts. V and the output
+    projection stay pointwise and scoring is the Hermitian complex softmax of the parent class.
+
+    token_grid=None       - tokens form a 1-D sequence (axial row/column tokens): Conv1d over tokens
+    token_grid=(gh, gw)   - tokens form a row-major 2-D grid (patch tokens): Conv2d over the grid
+    """
+    def __init__(self, d_model, nhead, dropout=0.0, freqs_cis=None, scales=(1, 3), token_grid=None):
+        super().__init__(d_model, nhead, dropout, freqs_cis)
+        scales = tuple(int(s) for s in scales)
+        if not scales or any(s < 1 or s % 2 == 0 for s in scales):
+            raise ValueError(f"attn_scales must be odd positive kernel sizes, got {scales}")
+        if nhead % len(scales):
+            raise ValueError(f"nhead ({nhead}) must be divisible by the number of attention scales ({len(scales)})")
+        self.scales = scales
+        self.token_grid = None if token_grid is None else tuple(int(g) for g in token_grid)
+        self.heads_per_scale = nhead // len(scales)
+        branch_dim = self.head_dim * self.heads_per_scale
+        del self.qkv  # replaced by per-scale Q/K convolutions and a pointwise V
+        conv, ndim = (nn.Conv1d, 1) if self.token_grid is None else (nn.Conv2d, 2)
+        self.qk = nn.ModuleList()
+        for s in scales:
+            layer = conv(d_model, 2 * branch_dim, s, padding=s // 2, dtype=torch.cfloat)
+            trabelsi_init_(layer.weight, fan_in=d_model * s ** ndim, fan_out=2 * branch_dim, criterion="glorot")
+            nn.init.zeros_(layer.bias)
+            self.qk.append(layer)
+        self.v = nn.Linear(d_model, d_model, dtype=torch.cfloat)
+        apply_trabelsi_(self.v, criterion="glorot")
+
+    def _project_qk(self, x):
+        B, N, C = x.shape
+        feat = x.transpose(1, 2)                                   # (B, C, N)
+        if self.token_grid is not None:
+            gh, gw = self.token_grid
+            if N != gh * gw:
+                raise ValueError(f"Expected {gh * gw} grid tokens for token_grid={self.token_grid}, got {N}")
+            feat = feat.reshape(B, C, gh, gw)
+        q_parts, k_parts = [], []
+        for layer in self.qk:
+            q_i, k_i = layer(feat).flatten(2).transpose(1, 2).chunk(2, dim=-1)   # each (B, N, branch_dim)
+            q_parts.append(q_i)
+            k_parts.append(k_i)
+        return torch.cat(q_parts, dim=-1), torch.cat(k_parts, dim=-1)           # heads ordered by scale
+
+    def forward(self, x, attn_mask=None, positions=None):
+        if positions is not None:
+            raise ValueError("ComplexMultiScaleAttention needs the full token sequence; token subsets are not supported")
+        B, N, C = x.shape
+        q, k = self._project_qk(x)
+        v = self.v(x)
+        split = lambda t: t.reshape(B, N, self.nhead, self.head_dim).transpose(1, 2)
+        q, k, v = split(q), split(k), split(v)
+        if self.use_rope:
+            q, k = self._apply_rope(q, k)
+        x = self._attend(q, k, v, attn_mask=attn_mask).transpose(1, 2).reshape(B, N, C)
+        return self.proj(x)
 
 
 class RealValuedAttention(BaseAttention):
@@ -238,10 +300,11 @@ class ComplexCrossAttention(nn.Module):
 
 class TransformerEncoderLayer(nn.Module):
     def __init__(self, d_model, nhead, dim_feedforward, dropout, activation, layer_norm_eps,
-                 freqs_cis=None, attn_type="standard", ff=None):
+                 freqs_cis=None, attn_type="standard", ff=None, attn_scales=None, token_grid=None):
         super().__init__()
         is_complex = attn_type in _COMPLEX_ATTN_TYPES
-        self.attn = get_attention(attn_type, d_model, nhead, dropout, freqs_cis)
+        self.attn = get_attention(attn_type, d_model, nhead, dropout, freqs_cis,
+                                  attn_scales=attn_scales, token_grid=token_grid)
         self.ff = ff if ff is not None else FeedForward(d_model, dim_feedforward, dropout, activation, is_complex)
         if is_complex:
             self.norm1 = ComplexLayerNorm(d_model, eps=layer_norm_eps)

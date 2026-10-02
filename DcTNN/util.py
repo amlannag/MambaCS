@@ -165,7 +165,7 @@ class ComplexLayerNorm(nn.Module):
         return torch.complex(real_out, imag_out)
 
 
-_COMPLEX_ATTN_TYPES = {"complex", "real_valued", "phase_aware"}
+_COMPLEX_ATTN_TYPES = {"complex", "complex_ms", "real_valued", "phase_aware"}
 
 
 def get_activation(activation, is_complex=False):
@@ -174,19 +174,24 @@ def get_activation(activation, is_complex=False):
     return nn.ReLU() if activation == 'relu' else nn.GELU()
 
 
-def get_attention(attn_type, d_model, nhead, dropout=0.0, freqs_cis=None):
-    from .attention_layer import (MultiHeadAttention, ComplexMultiHeadAttention,
+def get_attention(attn_type, d_model, nhead, dropout=0.0, freqs_cis=None, attn_scales=None, token_grid=None):
+    from .attention_layer import (MultiHeadAttention, ComplexMultiHeadAttention, ComplexMultiScaleAttention,
                                    RealValuedAttention, PhaseAwareAttention)
     if attn_type == "standard":
         return MultiHeadAttention(d_model, nhead, dropout, freqs_cis)
     elif attn_type == "complex":
         return ComplexMultiHeadAttention(d_model, nhead, dropout, freqs_cis)
+    elif attn_type == "complex_ms":
+        if attn_scales is None:
+            raise ValueError("attn_type='complex_ms' is only supported by the 'patch' and 'axial' encoders "
+                             "(the encoder must supply attn_scales)")
+        return ComplexMultiScaleAttention(d_model, nhead, dropout, freqs_cis, scales=attn_scales, token_grid=token_grid)
     elif attn_type == "real_valued":
         return RealValuedAttention(d_model, nhead, dropout, freqs_cis)
     elif attn_type == "phase_aware":
         return PhaseAwareAttention(d_model, nhead, dropout, freqs_cis=freqs_cis)
     else:
-        raise ValueError(f"Unknown attn_type '{attn_type}'. Choose from: standard, complex, real_valued, phase_aware")
+        raise ValueError(f"Unknown attn_type '{attn_type}'. Choose from: standard, complex, complex_ms, real_valued, phase_aware")
 
 
 class FeedForward(nn.Module):

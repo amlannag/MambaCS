@@ -38,7 +38,7 @@ _MODEL_KEYS = {
     "reconformer_num_heads", "reconformer_depths", "reconformer_window_sizes",
     "reconformer_mlp_ratio", "reconformer_resi_connection", "reconformer_use_checkpoint",
     "lambda_schedule", "lambda_start", "lambda_end",
-    "pos_emb_type", "attn_type", "rope_theta", "rope_mixed_rotate",
+    "pos_emb_type", "attn_type", "attn_scales", "rope_theta", "rope_mixed_rotate",
     "mask_vertical_attn", "ffn_sharing", "flattening_order",
     "apt_layout", "apt_embed_dim", "apt_rope_ref_grid", "apt_use_abs_pos_emb",
 }
@@ -91,7 +91,7 @@ def _flat_to_cfg(flat: dict) -> Config:
         if k in {
             "image_size", "patch_size", "reconformer_num_ch", "reconformer_down_scales",
             "reconformer_num_heads", "reconformer_depths", "reconformer_window_sizes",
-            "reconformer_use_checkpoint", "apt_rope_ref_grid",
+            "reconformer_use_checkpoint", "apt_rope_ref_grid", "attn_scales",
         } and isinstance(v, list):
             v = tuple(v)
         setattr(cfg, k, v)

@@ -154,9 +154,13 @@ class Config:
     lambda_end: float = 0.1
     pos_emb_type: str = "APE"
     # Attention implementation used inside transformer blocks.
-    # Options for self-attention: "standard", "complex", "real_valued", "phase_aware"
+    # Options for self-attention: "standard", "complex", "complex_ms", "real_valued", "phase_aware"
     # The "cross_axial" encoder family is complex-only.
     attn_type: str = "standard"
+    # ReconFormer-style multi-scale Q/K (attn_type="complex_ms", patch/axial encoders only): heads are split
+    # evenly across these odd conv kernel sizes over the token neighbourhood (1 = pointwise). nhead must be
+    # divisible by len(attn_scales).
+    attn_scales: Tuple[int, ...] = (1, 3)
     # Base frequency for RoPE (ignored when pos_emb_type == "APE")
     rope_theta: float = 100.0
     # Randomly rotate initial 2D frequencies in Rope-Mixed (ignored otherwise)
