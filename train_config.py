@@ -56,15 +56,20 @@ _MULTISCALE = {
 }
 
 EXPERIMENTS = [
+    # Scale sweep on the axial encoder, keeping 4 heads per scale. d_model=320 so head_dim shrinks:
+    # 16 heads -> head_dim 20 (10 RoPE freqs/axis), 20 heads -> head_dim 16 (8 RoPE freqs/axis).
     {
         **_MULTISCALE,
-        "name": "axial_ms13_p95_slice_l2_final_r4",
+        "name": "axial_ms1357_h16_p95_slice_l2_final_r4",
         "encoders": ["axial", "axial", "axial"],
+        "nhead_axial": 16,
+        "attn_scales": (1, 3, 5, 7),
     },
     {
         **_MULTISCALE,
-        "name": "patch16_ms13_p95_slice_l2_final_r4",
-        "encoders": ["patch", "patch", "patch"],
-        "patch_size": (16, 16),
+        "name": "axial_ms13579_h20_p95_slice_l2_final_r4",
+        "encoders": ["axial", "axial", "axial"],
+        "nhead_axial": 20,
+        "attn_scales": (1, 3, 5, 7, 9),
     },
 ]
