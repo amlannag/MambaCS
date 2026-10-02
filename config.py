@@ -161,6 +161,15 @@ class Config:
     # evenly across these odd conv kernel sizes over the token neighbourhood (1 = pointwise). nhead must be
     # divisible by len(attn_scales).
     attn_scales: Tuple[int, ...] = (1, 3)
+    # Learnable k-space stems applied to each encoder's input before tokenisation (patch/axial encoders),
+    # in the order GlobalFilter -> KSpaceConvStem. Both are exact identities at initialisation.
+    # global_filter: per-cell complex Hadamard mask over the full k-space grid (= image-domain convolution).
+    global_filter: bool = False
+    # kspace_conv: residual complex conv 1 -> kspace_conv_channels -> 1 with kspace_conv_kernel x kspace_conv_kernel
+    # taps over neighbouring k-space samples (= learned GRAPPA-style kernel / image-domain modulation).
+    kspace_conv: bool = False
+    kspace_conv_channels: int = 8
+    kspace_conv_kernel: int = 3
     # Base frequency for RoPE (ignored when pos_emb_type == "APE")
     rope_theta: float = 100.0
     # Randomly rotate initial 2D frequencies in Rope-Mixed (ignored otherwise)

@@ -47,6 +47,16 @@ def psnr(pred, target, max_val=None):
     return 20.0 * torch.log10(mv.to(pred.device) / torch.sqrt(mse))
 
 
+def _kspace_stem_args(cfg):
+    """Options for the optional k-space stems (GlobalFilter / KSpaceConvStem) on patch and axial encoders."""
+    return dict(
+        global_filter=getattr(cfg, "global_filter", False),
+        kspace_conv=getattr(cfg, "kspace_conv", False),
+        kspace_conv_channels=getattr(cfg, "kspace_conv_channels", 8),
+        kspace_conv_kernel=getattr(cfg, "kspace_conv_kernel", 3),
+    )
+
+
 _ENCODER_ARGS = {
     "fixed_apt": lambda cfg: (
         FixedAPTVIT,
@@ -82,6 +92,7 @@ _ENCODER_ARGS = {
             row_stride=cfg.axial_row_stride,
             mask_vertical_attn=cfg.mask_vertical_attn,
             attn_scales=tuple(getattr(cfg, "attn_scales", (1, 3))),
+            kspace_stem=_kspace_stem_args(cfg),
         ),
     ),
     "cross_axial": lambda cfg: (
@@ -185,6 +196,7 @@ _ENCODER_ARGS = {
             rope_mixed_rotate=cfg.rope_mixed_rotate,
             attn_type=cfg.attn_type,
             attn_scales=tuple(getattr(cfg, "attn_scales", (1, 3))),
+            kspace_stem=_kspace_stem_args(cfg),
         ),
     ),
 }
@@ -400,6 +412,10 @@ def build_model_from_config_dict(cfg_dict):
     cfg.pos_emb_type = model_cfg.get("pos_emb_type", "APE")
     cfg.attn_type = model_cfg.get("attn_type", "standard")
     cfg.attn_scales = tuple(model_cfg.get("attn_scales", (1, 3)))
+    cfg.global_filter = model_cfg.get("global_filter", False)
+    cfg.kspace_conv = model_cfg.get("kspace_conv", False)
+    cfg.kspace_conv_channels = model_cfg.get("kspace_conv_channels", 8)
+    cfg.kspace_conv_kernel = model_cfg.get("kspace_conv_kernel", 3)
     cfg.rope_theta = model_cfg.get("rope_theta", 100.0)
     cfg.rope_mixed_rotate = model_cfg.get("rope_mixed_rotate", True)
     cfg.axial_row_stride = model_cfg.get("axial_row_stride", 1)

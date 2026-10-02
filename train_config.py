@@ -43,33 +43,37 @@ _BASE = {
     "ffn_sharing": "global",
 }
 
-
-# ReconFormer-style multi-scale attention (attn_type="complex_ms"): the 8 heads are split into
-# 4 pointwise heads (kernel 1) and 4 heads whose Q/K are a complex conv over the 3-token
-# neighbourhood (adjacent k-space rows/columns for axial tokens, 3x3 patch neighbourhood for
-# patch tokens). V and the output projection stay pointwise; RoPE is applied after the conv.
-_MULTISCALE = {
+# Plain complex axial attention with optional learnable k-space stems (see Config.global_filter / kspace_conv).
+_KSPACE_STEM = {
     **_BASE,
-    "prefix": "multiscale",
-    "attn_type": "complex_ms",
-    "attn_scales": (1, 3),
+    "prefix": "kspace_stem",
+    "attn_type": "complex",
+    "encoders": ["axial", "axial", "axial"],
+    "kspace_conv_channels": 8,
+    "kspace_conv_kernel": 3,
 }
 
 EXPERIMENTS = [
     # Scale sweep on the axial encoder, keeping 4 heads per scale. d_model=320 so head_dim shrinks:
     # 16 heads -> head_dim 20 (10 RoPE freqs/axis), 20 heads -> head_dim 16 (8 RoPE freqs/axis).
+   
+    # k-space stem ablation on the plain complex axial encoder (RoPE, learned lambda, p95). Both stems are
+    # identities at init and sit on each encoder's input before tokenisation (GlobalFilter -> KSpaceConvStem).
+    # idx 4 is the matching control with neither stem.
     {
-        **_MULTISCALE,
-        "name": "axial_ms1357_h16_p95_slice_l2_final_r4",
-        "encoders": ["axial", "axial", "axial"],
-        "nhead_axial": 16,
-        "attn_scales": (1, 3, 5, 7),
+        **_KSPACE_STEM,
+        "name": "axial_complex_kconv_p95_slice_l2_final_r4",
+        "kspace_conv": True,
     },
     {
-        **_MULTISCALE,
-        "name": "axial_ms13579_h20_p95_slice_l2_final_r4",
-        "encoders": ["axial", "axial", "axial"],
-        "nhead_axial": 20,
-        "attn_scales": (1, 3, 5, 7, 9),
+        **_KSPACE_STEM,
+        "name": "axial_complex_gfilt_p95_slice_l2_final_r4",
+        "global_filter": True,
+    },
+    {
+        **_KSPACE_STEM,
+        "name": "axial_complex_kconv_gfilt_p95_slice_l2_final_r4",
+        "kspace_conv": True,
+        "global_filter": True,
     },
 ]

@@ -101,6 +101,7 @@ def config_to_dict(cfg):
         "reconformer_num_heads", "reconformer_depths", "reconformer_window_sizes",
         "reconformer_mlp_ratio", "reconformer_resi_connection", "reconformer_use_checkpoint",
         "lambda_schedule", "lambda_start", "lambda_end", "pos_emb_type", "attn_type", "attn_scales",
+        "global_filter", "kspace_conv", "kspace_conv_channels", "kspace_conv_kernel",
         "rope_theta", "rope_mixed_rotate", "mask_vertical_attn", "ffn_sharing", "flattening_order",
         "apt_layout", "apt_embed_dim", "apt_rope_ref_grid", "apt_use_abs_pos_emb",
     }

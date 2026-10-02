@@ -39,6 +39,7 @@ _MODEL_KEYS = {
     "reconformer_mlp_ratio", "reconformer_resi_connection", "reconformer_use_checkpoint",
     "lambda_schedule", "lambda_start", "lambda_end",
     "pos_emb_type", "attn_type", "attn_scales", "rope_theta", "rope_mixed_rotate",
+    "global_filter", "kspace_conv", "kspace_conv_channels", "kspace_conv_kernel",
     "mask_vertical_attn", "ffn_sharing", "flattening_order",
     "apt_layout", "apt_embed_dim", "apt_rope_ref_grid", "apt_use_abs_pos_emb",
 }

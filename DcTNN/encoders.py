@@ -20,6 +20,7 @@ from .util import (
     _COMPLEX_ATTN_TYPES,
 )
 from .complex_init import apply_trabelsi_
+from .kspace_ops import build_kspace_stem
 
 def _build_vertical_attn_mask(sampled: torch.Tensor, mode: str) -> torch.Tensor:
     """
@@ -189,6 +190,8 @@ class BaseTokenEncoder(nn.Module):
         self.encoder = TransformerEncoder(layer, num_layers, tie_ffn=shared_ffn is not None)
 
     def forward(self, img):
+        if self.kspace_stem is not None:
+            img = self.kspace_stem(img)
         x = self.to_embedding(img)
         if self.pos_emb_type == "APE":
             x = x + self.pos_embedding
@@ -213,13 +216,14 @@ class TokenEncoder(BaseTokenEncoder):
                 batch_first=True, device=None, dtype=None, norm=None,
                 pos_emb_type="APE", rope_theta=100.0, rope_mixed_rotate=True,
                 attn_type="standard", ffn_sharing="none", shared_ffn=None, flattening_order="row_major",
-                attn_scales=(1, 3)):
+                attn_scales=(1, 3), kspace_stem=None):
         super().__init__()
 
         self.pos_emb_type = pos_emb_type
         self.d_model = d_model
         self.nhead = nhead
         self.is_complex = attn_type in _COMPLEX_ATTN_TYPES
+        self.kspace_stem = build_kspace_stem(image_size, numCh, **(kspace_stem or {}))
         if attn_type == "complex_ms" and (tokenizer_type != "patch" or flattening_order != "row_major"):
             raise ValueError("attn_type='complex_ms' needs spatially adjacent tokens: use tokenizer_type='patch' "
                              "with flattening_order='row_major'")
@@ -261,13 +265,14 @@ class axialEncoder(nn.Module):
                     device=None, dtype=None, norm=None,
                     pos_emb_type="APE", rope_theta=100.0, attn_type="standard", row_stride=1,
                     mask_vertical_attn="none", ffn_sharing="none", shared_ffn=None,
-                    flattening_order="row_major", attn_scales=(1, 3)):
+                    flattening_order="row_major", attn_scales=(1, 3), kspace_stem=None):
         super().__init__()
 
         self.pos_emb_type = pos_emb_type
         self.d_model = d_model
         self.is_complex = attn_type in _COMPLEX_ATTN_TYPES
         self.mask_vertical_attn = mask_vertical_attn
+        self.kspace_stem = build_kspace_stem(image_size, numCh, **(kspace_stem or {}))
         if attn_type == "complex_ms" and flattening_order != "row_major":
             raise ValueError("attn_type='complex_ms' needs adjacent row/column tokens: use flattening_order='row_major'")
         attn_scales = attn_scales if attn_type == "complex_ms" else None
@@ -319,6 +324,8 @@ class axialEncoder(nn.Module):
         self.verticalEncoder = TransformerEncoder(v_layer, numLayers, tie_ffn=shared_ffn is not None)
 
     def forward(self, img, col_mask=None):
+        if self.kspace_stem is not None:
+            img = self.kspace_stem(img)
         x = self.to_horizontal_embedding(img)
         if self.pos_emb_type == "APE":
             x = x + self.horizontal_pos_embedding
