@@ -54,19 +54,24 @@ _KSPACE_STEM = {
 }
 
 EXPERIMENTS = [
-    # Scale sweep on the axial encoder, keeping 4 heads per scale. d_model=320 so head_dim shrinks:
-    # 16 heads -> head_dim 20 (10 RoPE freqs/axis), 20 heads -> head_dim 16 (8 RoPE freqs/axis).
-   
-    # k-space stem ablation on the plain complex axial encoder (RoPE, learned lambda, p95). Both stems are
-    # identities at init and sit on each encoder's input before tokenisation (GlobalFilter -> KSpaceConvStem).
-    # Completed: axial_complex_kconv / axial_complex_gfilt / axial_complex_kconv_gfilt (Experiments/FASTMRI/convolutional layer).
-
-    # Two global filters per axial encoder: the usual input filter plus a second, independent GlobalFilter on the
-    # k-space grid between the horizontal and vertical transformer halves. Compare against axial_complex_gfilt.
+  
     {
-        **_KSPACE_STEM,
-        "name": "axial_complex_gfilt_input_mid_p95_slice_l2_final_r4",
+        **_BASE,
+        "prefix": "combined",
+        "name": "fnet_both_cross_axial_ms13_gfilt_freqw_m3_g0.5_cap0.6_p95_slice_400ep_r4",
+        "encoders": ["fnet", "cross_axial", "axial", "axial", "axial"],
+        "fnet_token_axis": "both",
+        "fnet_with_embedding": True,
+        "fnet_share_ffn": True,
+        "fnet_fft_norm": "ortho",
+        "attn_type": "complex_ms",
+        "attn_scales": (1, 3),
         "global_filter": True,
-        "global_filter_mid": True,
+        "final_loss_type": "freq_weighted_complex_l2",
+        "intermediate_loss_type": "freq_weighted_complex_l2",
+        "freq_weight_m": 3.0,
+        "freq_weight_gamma": 0.5,
+        "freq_weight_r_cap": 0.6,
+        "epochs": 400,
     },
 ]

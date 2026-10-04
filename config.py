@@ -125,6 +125,9 @@ class Config:
     #       LayerNorm -> Linear -> Rearrange, exactly like the axial encoders.
     # False: raw k-space rows / columns are the tokens (hidden width = token length); no linear layers in or out.
     fnet_with_embedding: bool = True
+    # True: FNet stages join ffn_sharing ("per_stage"/"global") like the attention stages (needs
+    # fnet_with_embedding=True so the hidden width matches). False: FNet stages always keep their own FFNs.
+    fnet_share_ffn: bool = False
     # Optional per-stage override of num_encoder_layers (one int per entry of `encoders`),
     # e.g. [1, 2, 1, 2] for a cross_axial/axial cascade with 1 layer per cross stage and 2 per axial.
     stage_encoder_layers: Optional[List[int]] = None

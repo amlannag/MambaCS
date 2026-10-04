@@ -363,7 +363,7 @@ class crossAxialEncoder(nn.Module):
                     dropout=0.1, activation='relu', layer_norm_eps=1e-05, batch_first=True,
                     device=None, dtype=None, norm=None,
                     pos_emb_type="APE", rope_theta=100.0, attn_type="complex", row_stride=1,
-                    ffn_sharing="none", shared_ffn=None, flattening_order="row_major"):
+                    ffn_sharing="none", shared_ffn=None, flattening_order="row_major", kspace_stem=None):
         super().__init__()
         if row_stride != 1:
             raise ValueError("crossAxialEncoder supports vertical tokens only and requires row_stride=1")
@@ -376,6 +376,7 @@ class crossAxialEncoder(nn.Module):
         self.pos_emb_type = pos_emb_type
         self.d_model = d_model
         self.is_complex = attn_type in _COMPLEX_ATTN_TYPES
+        self.kspace_stem = build_kspace_stem(image_size, numCh, **(kspace_stem or {}))
 
         image_height, image_width = pair(image_size)
         head_dim = d_model // nhead
@@ -423,6 +424,8 @@ class crossAxialEncoder(nn.Module):
         if col_mask is None:
             raise ValueError("crossAxialEncoder requires col_mask for sampled/unsampled routing")
 
+        if self.kspace_stem is not None:
+            img = self.kspace_stem(img)
         x = self.to_vertical_embedding(img)
         if self.pos_emb_type == "APE":
             x = x + self.vertical_pos_embedding
@@ -517,13 +520,14 @@ class fnetEncoder(nn.Module):
                     device=None, dtype=None, norm=None,
                     pos_emb_type="APE", rope_theta=100.0, attn_type="complex", row_stride=1,
                     ffn_sharing="none", shared_ffn=None, flattening_order="row_major", fft_norm="ortho",
-                    token_axis="vertical", with_embedding=True):
+                    token_axis="vertical", with_embedding=True, kspace_stem=None):
         super().__init__()
         if token_axis not in _FNET_TOKEN_AXES:
             raise ValueError(f"token_axis must be one of {_FNET_TOKEN_AXES}, got '{token_axis}'")
         if token_axis == "vertical" and row_stride != 1:
             raise ValueError("row_stride only applies to horizontal tokens; use row_stride=1 with token_axis='vertical'")
 
+        self.kspace_stem = build_kspace_stem(image_size, numCh, **(kspace_stem or {}))
         self.token_axis = token_axis
         self.pos_emb_type = pos_emb_type
         self.d_model = d_model
@@ -587,7 +591,7 @@ class fnetEncoder(nn.Module):
         return head(encoder(x))
 
     def forward(self, img, col_mask=None):
-        x = img
+        x = self.kspace_stem(img) if self.kspace_stem is not None else img
         if self.token_axis in ("horizontal", "both"):
             x = self._run_branch(x, self.to_horizontal_embedding, getattr(self, "horizontal_pos_embedding", None),
                                  self.horizontalEncoder, self.horizontal_mlp_head)

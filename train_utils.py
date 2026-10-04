@@ -109,8 +109,10 @@ _ENCODER_ARGS = {
             pos_emb_type=cfg.pos_emb_type,
             rope_theta=cfg.rope_theta,
             rope_mixed_rotate=cfg.rope_mixed_rotate,
-            attn_type=cfg.attn_type,
+            # Cross stages only implement plain complex attention; multi-scale Q/K applies to the axial stages.
+            attn_type="complex" if cfg.attn_type == "complex_ms" else cfg.attn_type,
             row_stride=cfg.axial_row_stride,
+            kspace_stem=_kspace_stem_args(cfg),
         ),
     ),
     "fnet": lambda cfg: (
@@ -131,6 +133,8 @@ _ENCODER_ARGS = {
             fft_norm=getattr(cfg, "fnet_fft_norm", "ortho"),
             token_axis=getattr(cfg, "fnet_token_axis", "vertical"),
             with_embedding=getattr(cfg, "fnet_with_embedding", True),
+            share_ffn=getattr(cfg, "fnet_share_ffn", False),
+            kspace_stem=_kspace_stem_args(cfg),
         ),
     ),
     "pca": lambda cfg: (
@@ -413,6 +417,7 @@ def build_model_from_config_dict(cfg_dict):
     cfg.pos_emb_type = model_cfg.get("pos_emb_type", "APE")
     cfg.attn_type = model_cfg.get("attn_type", "standard")
     cfg.attn_scales = tuple(model_cfg.get("attn_scales", (1, 3)))
+    cfg.fnet_share_ffn = model_cfg.get("fnet_share_ffn", False)
     cfg.global_filter = model_cfg.get("global_filter", False)
     cfg.global_filter_mid = model_cfg.get("global_filter_mid", False)
     cfg.kspace_conv = model_cfg.get("kspace_conv", False)

@@ -31,12 +31,15 @@ def _stage_ffn_spec(N, cls, args):
 def _apply_ffn_sharing(N, encList, encArgs, ffn_sharing):
     """
     Return a copy of stage args with the FFN sharing mode applied.
-    FNet stages are never part of FFN sharing: their per-token FFN is all they learn, and their hidden
-    width may differ from the attention stages (un-embedded tokens), so they always keep their own FFNs.
+    FNet stages are excluded from FFN sharing by default: their per-token FFN is all they learn, and their hidden
+    width may differ from the attention stages (un-embedded tokens), so they keep their own FFNs unless the stage
+    args set `share_ffn=True` (requires embedded tokens so the width matches the attention stages).
     """
+    encArgs = [dict(args) for args in encArgs]
+    share_flags = [args.pop("share_ffn", False) for args in encArgs]
     if ffn_sharing == "none":
-        return list(encArgs)
-    shared = [cls is not FNetVIT for cls in encList]
+        return encArgs
+    shared = [cls is not FNetVIT or flag for cls, flag in zip(encList, share_flags)]
     if ffn_sharing == "per_stage":
         return [dict(args, ffn_sharing="per_stage") if share else dict(args, ffn_sharing="none")
                 for args, share in zip(encArgs, shared)]
