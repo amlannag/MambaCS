@@ -59,21 +59,14 @@ EXPERIMENTS = [
    
     # k-space stem ablation on the plain complex axial encoder (RoPE, learned lambda, p95). Both stems are
     # identities at init and sit on each encoder's input before tokenisation (GlobalFilter -> KSpaceConvStem).
-    # idx 4 is the matching control with neither stem.
+    # Completed: axial_complex_kconv / axial_complex_gfilt / axial_complex_kconv_gfilt (Experiments/FASTMRI/convolutional layer).
+
+    # Two global filters per axial encoder: the usual input filter plus a second, independent GlobalFilter on the
+    # k-space grid between the horizontal and vertical transformer halves. Compare against axial_complex_gfilt.
     {
         **_KSPACE_STEM,
-        "name": "axial_complex_kconv_p95_slice_l2_final_r4",
-        "kspace_conv": True,
-    },
-    {
-        **_KSPACE_STEM,
-        "name": "axial_complex_gfilt_p95_slice_l2_final_r4",
+        "name": "axial_complex_gfilt_input_mid_p95_slice_l2_final_r4",
         "global_filter": True,
-    },
-    {
-        **_KSPACE_STEM,
-        "name": "axial_complex_kconv_gfilt_p95_slice_l2_final_r4",
-        "kspace_conv": True,
-        "global_filter": True,
+        "global_filter_mid": True,
     },
 ]

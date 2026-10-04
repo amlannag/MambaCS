@@ -52,14 +52,28 @@ class KSpaceConvStem(nn.Module):
 
 
 def build_kspace_stem(image_size, num_channels=1, global_filter=False, kspace_conv=False,
-                      kspace_conv_channels=8, kspace_conv_kernel=3):
+                      kspace_conv_channels=8, kspace_conv_kernel=3, global_filter_mid=False):
     """
-    Compose the enabled stems in the order GlobalFilter -> KSpaceConvStem. Returns None when neither is enabled
-    so callers can skip the call entirely.
+    Compose the enabled input stems in the order GlobalFilter -> KSpaceConvStem. Returns None when neither is
+    enabled so callers can skip the call entirely. `global_filter_mid` is not an input stem: it is accepted here
+    only so that encoders without a mid-point can reject it (see `build_mid_global_filter`).
     """
+    if global_filter_mid:
+        raise ValueError("global_filter_mid is only supported by the axial encoder (it sits between the "
+                         "horizontal and vertical halves); disable it for patch/kaleidoscope encoders")
     stages = []
     if global_filter:
         stages.append(GlobalFilter(image_size))
     if kspace_conv:
         stages.append(KSpaceConvStem(num_channels, kspace_conv_channels, kspace_conv_kernel))
     return nn.Sequential(*stages) if stages else None
+
+
+def build_axial_kspace_stems(image_size, num_channels=1, **stem_args):
+    """
+    Axial encoder stems: (input_stem, mid_filter). The input stem is `build_kspace_stem` over the remaining args;
+    the mid filter is a second GlobalFilter applied to the full k-space grid between the horizontal and vertical
+    transformer halves (after `horizontal_mlp_head`, before `to_vertical_embedding`) when `global_filter_mid`.
+    """
+    mid = GlobalFilter(image_size) if stem_args.pop("global_filter_mid", False) else None
+    return build_kspace_stem(image_size, num_channels, **stem_args), mid

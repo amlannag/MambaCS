@@ -51,6 +51,7 @@ def _kspace_stem_args(cfg):
     """Options for the optional k-space stems (GlobalFilter / KSpaceConvStem) on patch and axial encoders."""
     return dict(
         global_filter=getattr(cfg, "global_filter", False),
+        global_filter_mid=getattr(cfg, "global_filter_mid", False),
         kspace_conv=getattr(cfg, "kspace_conv", False),
         kspace_conv_channels=getattr(cfg, "kspace_conv_channels", 8),
         kspace_conv_kernel=getattr(cfg, "kspace_conv_kernel", 3),
@@ -413,6 +414,7 @@ def build_model_from_config_dict(cfg_dict):
     cfg.attn_type = model_cfg.get("attn_type", "standard")
     cfg.attn_scales = tuple(model_cfg.get("attn_scales", (1, 3)))
     cfg.global_filter = model_cfg.get("global_filter", False)
+    cfg.global_filter_mid = model_cfg.get("global_filter_mid", False)
     cfg.kspace_conv = model_cfg.get("kspace_conv", False)
     cfg.kspace_conv_channels = model_cfg.get("kspace_conv_channels", 8)
     cfg.kspace_conv_kernel = model_cfg.get("kspace_conv_kernel", 3)

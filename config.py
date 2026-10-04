@@ -165,6 +165,9 @@ class Config:
     # in the order GlobalFilter -> KSpaceConvStem. Both are exact identities at initialisation.
     # global_filter: per-cell complex Hadamard mask over the full k-space grid (= image-domain convolution).
     global_filter: bool = False
+    # global_filter_mid (axial encoders only): a second, independent GlobalFilter on the full k-space grid between
+    # the horizontal and vertical transformer halves (after horizontal_mlp_head, before the vertical tokeniser).
+    global_filter_mid: bool = False
     # kspace_conv: residual complex conv 1 -> kspace_conv_channels -> 1 with kspace_conv_kernel x kspace_conv_kernel
     # taps over neighbouring k-space samples (= learned GRAPPA-style kernel / image-domain modulation).
     kspace_conv: bool = False
