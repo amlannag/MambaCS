@@ -76,7 +76,7 @@ _IMAGE_MAGNITUDE_NORM_IMAGE_CONV = {
     "name": "axial_image_p95_slice_imgconv32x3_l2_final_r4",
     "image_conv": True,
     "image_conv_channels": 32,
-    "image_conv_layers": 3,
+    "image_conv_layers": 5,
     "image_conv_kernel": 3,
 }
 
