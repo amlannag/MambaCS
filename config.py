@@ -135,6 +135,12 @@ class Config:
     learned_lambda: bool = True
     # Domain the model operates in: "k_space", "image", or "complex_image"
     learning: str = "k_space"
+    # k_space learning only: treat the complex k-space as 2 real channels (re, im) instead of one complex
+    # channel. Encoders get numCh = 2 * num_channels, must use a real attn_type ("standard"), and the whole
+    # cascade including data consistency runs on the real 2-channel tensor; the complex k-space is only rebuilt
+    # at the model output so losses / validation are unchanged. Complex-only encoders (fixed_apt, cross_axial,
+    # pca) are not supported.
+    kspace_real_channels: bool = False
     # Normalisation: "zscore", "fastmri_magnitude", "image_magnitude" (image-domain p95 of |IFFT(k_zf)| applied to the
     # complex image and FFT'd back for k_space learning; GT shares the scale), "robust_shifted", "kspace_companding",
     # "log_kspace", "log_quantile" (log1p(|k| / q_p), phase kept, k_space learning only), or None
@@ -177,6 +183,14 @@ class Config:
     kspace_conv: bool = False
     kspace_conv_channels: int = 8
     kspace_conv_kernel: int = 3
+    # image_conv (k_space learning, patch/axial/fnet encoders): DcCNN-style residual COMPLEX CNN in the image domain at
+    # the start of every encoder stage: IFFT(k) -> conv(1 -> image_conv_channels) + CReLU -> ... -> conv(-> 1), residual
+    # add, FFT back to k-space. image_conv_layers is the total number of convolutions (>= 2; the last one is
+    # zero-initialised so the stem starts as an identity). Also works with kspace_real_channels (converted at the boundary).
+    image_conv: bool = False
+    image_conv_channels: int = 32
+    image_conv_layers: int = 3
+    image_conv_kernel: int = 3
     # Base frequency for RoPE (ignored when pos_emb_type == "APE")
     rope_theta: float = 100.0
     # Randomly rotate initial 2D frequencies in Rope-Mixed (ignored otherwise)
@@ -212,6 +226,8 @@ class Config:
     # "complex_berhu": plain reverse Huber on |pred-gt|: linear below berhu_delta, quadratic above (delta=1 ~ max(|e|, e^2)).
     # "l1" / "l2": magnitude image loss in RAW scanner units (normalisation undone first; ~1e-4 scale on fastMRI).
     # "image_l2": MSE of |IFFT(pred)| vs |IFFT(gt)| in the model's NORMALISED units (linear norms only).
+    # "complex_image_l2": complex MSE (Re^2 + Im^2 diff) of IFFT(pred) vs the normalised GT complex image (linear norms
+    #                     only; k_space learning with the error measured in the image domain, all_kspace only).
     final_loss_type: str = "l1"
     intermediate_loss_type: str = "l1"
     berhu_delta: float = 1.0

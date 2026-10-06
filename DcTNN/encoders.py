@@ -223,7 +223,7 @@ class TokenEncoder(BaseTokenEncoder):
         self.d_model = d_model
         self.nhead = nhead
         self.is_complex = attn_type in _COMPLEX_ATTN_TYPES
-        self.kspace_stem = build_kspace_stem(image_size, numCh, **(kspace_stem or {}))
+        self.kspace_stem = build_kspace_stem(image_size, numCh, is_complex=self.is_complex, **(kspace_stem or {}))
         if attn_type == "complex_ms" and (tokenizer_type != "patch" or flattening_order != "row_major"):
             raise ValueError("attn_type='complex_ms' needs spatially adjacent tokens: use tokenizer_type='patch' "
                              "with flattening_order='row_major'")
@@ -272,7 +272,8 @@ class axialEncoder(nn.Module):
         self.d_model = d_model
         self.is_complex = attn_type in _COMPLEX_ATTN_TYPES
         self.mask_vertical_attn = mask_vertical_attn
-        self.kspace_stem, self.global_filter_mid = build_axial_kspace_stems(image_size, numCh, **(kspace_stem or {}))
+        self.kspace_stem, self.global_filter_mid = build_axial_kspace_stems(
+            image_size, numCh, is_complex=self.is_complex, **(kspace_stem or {}))
         if attn_type == "complex_ms" and flattening_order != "row_major":
             raise ValueError("attn_type='complex_ms' needs adjacent row/column tokens: use flattening_order='row_major'")
         attn_scales = attn_scales if attn_type == "complex_ms" else None
@@ -376,7 +377,7 @@ class crossAxialEncoder(nn.Module):
         self.pos_emb_type = pos_emb_type
         self.d_model = d_model
         self.is_complex = attn_type in _COMPLEX_ATTN_TYPES
-        self.kspace_stem = build_kspace_stem(image_size, numCh, **(kspace_stem or {}))
+        self.kspace_stem = build_kspace_stem(image_size, numCh, is_complex=self.is_complex, **(kspace_stem or {}))
 
         image_height, image_width = pair(image_size)
         head_dim = d_model // nhead
@@ -527,12 +528,12 @@ class fnetEncoder(nn.Module):
         if token_axis == "vertical" and row_stride != 1:
             raise ValueError("row_stride only applies to horizontal tokens; use row_stride=1 with token_axis='vertical'")
 
-        self.kspace_stem = build_kspace_stem(image_size, numCh, **(kspace_stem or {}))
         self.token_axis = token_axis
         self.pos_emb_type = pos_emb_type
         self.d_model = d_model
         self.with_embedding = with_embedding
         self.is_complex = attn_type in _COMPLEX_ATTN_TYPES
+        self.kspace_stem = build_kspace_stem(image_size, numCh, is_complex=self.is_complex, **(kspace_stem or {}))
 
         image_height, image_width = pair(image_size)
         h_tokens = image_height // row_stride

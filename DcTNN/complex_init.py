@@ -1,5 +1,4 @@
 import math
-import numpy as np
 import torch
 import torch.nn as nn
 
@@ -25,20 +24,18 @@ def trabelsi_init_(weight: torch.Tensor, fan_in: int, fan_out: int = None, crite
     else:
         raise ValueError(f"Unknown criterion: {criterion!r}")
 
-    shape = tuple(weight.shape)
-    rho = np.random.rayleigh(scale=sigma, size=shape)
-    theta = np.random.uniform(-np.pi, np.pi, size=shape)
-
+    if not torch.is_complex(weight):
+        raise TypeError(
+            "weight must be a complex tensor; if using separate real/imag Parameters, "
+            "apply to each component's combined (real, imag) pair manually."
+        )
+    # Drawn with torch's global RNG (not NumPy's) so complex weights follow torch.manual_seed like real ones.
+    real_dtype = weight.real.dtype
+    u = torch.rand(weight.shape, dtype=real_dtype, device=weight.device).clamp_min(1e-12)
+    rho = sigma * torch.sqrt(-2.0 * torch.log(u))           # Rayleigh(sigma) via inverse CDF
+    theta = (torch.rand(weight.shape, dtype=real_dtype, device=weight.device) * 2 - 1) * math.pi
     with torch.no_grad():
-        if torch.is_complex(weight):
-            weight.copy_(
-                torch.from_numpy(rho * np.cos(theta) + 1j * rho * np.sin(theta)).to(weight.dtype)
-            )
-        else:
-            raise TypeError(
-                "weight must be a complex tensor; if using separate real/imag Parameters, "
-                "apply to each component's combined (real, imag) pair manually."
-            )
+        weight.copy_(torch.polar(rho, theta))
     return weight
 
 

@@ -33,13 +33,14 @@ _DATA_KEYS = {
 }
 _MODEL_KEYS = {
     "model_type", "encoders", "patch_size", "axial_row_stride", "nhead_patch", "nhead_axial",
-    "layer_no", "num_encoder_layers", "layer_norm_eps", "learned_lambda", "learning",
+    "layer_no", "num_encoder_layers", "layer_norm_eps", "learned_lambda", "learning", "kspace_real_channels",
     "reconformer_num_ch", "reconformer_num_iter", "reconformer_down_scales",
     "reconformer_num_heads", "reconformer_depths", "reconformer_window_sizes",
     "reconformer_mlp_ratio", "reconformer_resi_connection", "reconformer_use_checkpoint",
     "lambda_schedule", "lambda_start", "lambda_end",
     "pos_emb_type", "attn_type", "attn_scales", "rope_theta", "rope_mixed_rotate",
     "fnet_share_ffn", "global_filter", "global_filter_mid", "kspace_conv", "kspace_conv_channels", "kspace_conv_kernel",
+    "image_conv", "image_conv_channels", "image_conv_layers", "image_conv_kernel",
     "mask_vertical_attn", "ffn_sharing", "flattening_order",
     "apt_layout", "apt_embed_dim", "apt_rope_ref_grid", "apt_use_abs_pos_emb",
 }

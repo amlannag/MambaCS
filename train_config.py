@@ -58,16 +58,38 @@ _IMAGE_MAGNITUDE_NORM = {
     "kspace_conv": False,
 }
 
-# Same model / norm, but the loss is taken in the image domain: IFFT the k-space prediction and GT, then MSE of the
-# magnitudes in the normalised units ("image_l2"; the legacy "l2" undoes the normalisation and compares at ~1e-4 scale).
-_IMAGE_MAGNITUDE_NORM_IMAGE_L2 = {
+# k-space learning with the loss taken on the COMPLEX image: IFFT the k-space prediction and compare Re/Im against the
+# normalised GT complex image ("complex_image_l2"). Phase-sensitive, unlike "image_l2" which only compares magnitudes.
+# (With the ortho FFT this equals complex_l2 over all of k-space by Parseval; kept as an explicit image-domain control.)
+_IMAGE_MAGNITUDE_NORM_COMPLEX_IMAGE_L2 = {
     **_IMAGE_MAGNITUDE_NORM,
-    "name": "axial_image_p95_slice_image_mag_l2_final_r4",
-    "final_loss_type": "image_l2",
-    "intermediate_loss_type": "image_l2",
+    "name": "axial_image_p95_slice_complex_image_l2_final_r4",
+    "final_loss_type": "complex_image_l2",
+    "intermediate_loss_type": "complex_image_l2",
+}
+
+# k-space learning with a DcCNN-style residual COMPLEX CNN in the image domain at the start of every encoder stage:
+# IFFT(k) -> conv(1->32)+CReLU -> conv(32->32)+CReLU -> conv(32->1) (zero-init, identity at start) -> residual -> FFT.
+# Loss stays the baseline complex L2 in k-space, so the only variable vs _IMAGE_MAGNITUDE_NORM is the stem.
+_IMAGE_MAGNITUDE_NORM_IMAGE_CONV = {
+    **_IMAGE_MAGNITUDE_NORM,
+    "name": "axial_image_p95_slice_imgconv32x3_l2_final_r4",
+    "image_conv": True,
+    "image_conv_channels": 32,
+    "image_conv_layers": 3,
+    "image_conv_kernel": 3,
+}
+
+# Both together: image-domain CNN stem per stage AND the complex-image L2 loss.
+_IMAGE_MAGNITUDE_NORM_IMAGE_CONV_COMPLEX_IMAGE_L2 = {
+    **_IMAGE_MAGNITUDE_NORM_IMAGE_CONV,
+    "name": "axial_image_p95_slice_imgconv32x3_complex_image_l2_final_r4",
+    "final_loss_type": "complex_image_l2",
+    "intermediate_loss_type": "complex_image_l2",
 }
 
 EXPERIMENTS = [
-    _IMAGE_MAGNITUDE_NORM,
-    _IMAGE_MAGNITUDE_NORM_IMAGE_L2,
+    _IMAGE_MAGNITUDE_NORM_COMPLEX_IMAGE_L2,
+    _IMAGE_MAGNITUDE_NORM_IMAGE_CONV,
+    _IMAGE_MAGNITUDE_NORM_IMAGE_CONV_COMPLEX_IMAGE_L2,
 ]

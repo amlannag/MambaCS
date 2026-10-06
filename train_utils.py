@@ -55,6 +55,10 @@ def _kspace_stem_args(cfg):
         kspace_conv=getattr(cfg, "kspace_conv", False),
         kspace_conv_channels=getattr(cfg, "kspace_conv_channels", 8),
         kspace_conv_kernel=getattr(cfg, "kspace_conv_kernel", 3),
+        image_conv=getattr(cfg, "image_conv", False),
+        image_conv_channels=getattr(cfg, "image_conv_channels", 32),
+        image_conv_layers=getattr(cfg, "image_conv_layers", 3),
+        image_conv_kernel=getattr(cfg, "image_conv_kernel", 3),
     )
 
 
@@ -326,6 +330,19 @@ def _build_model_impl(cfg):
     num_ch = cfg.num_channels
     if cfg.learning == "complex_image" and cfg.attn_type == "standard":
         raise ValueError("learning='complex_image' requires a complex-valued attention type")
+    if getattr(cfg, "image_conv", False) and cfg.learning != "k_space":
+        raise ValueError("image_conv (image-domain CNN stem) requires learning='k_space'")
+    real_channels = getattr(cfg, "kspace_real_channels", False)
+    if real_channels:
+        if cfg.learning != "k_space":
+            raise ValueError("kspace_real_channels requires learning='k_space'")
+        if cfg.attn_type in _COMPLEX_ATTN_TYPES:
+            raise ValueError("kspace_real_channels needs a real-valued attn_type ('standard'); "
+                             f"got {cfg.attn_type!r}")
+        unsupported = {"fixed_apt", "cross_axial", "pca"} & set(cfg.encoders)
+        if unsupported:
+            raise ValueError(f"kspace_real_channels does not support complex-only encoders: {sorted(unsupported)}")
+        num_ch = 2 * num_ch
 
     stage_layers = getattr(cfg, "stage_encoder_layers", None)
     if stage_layers is not None and len(stage_layers) != len(cfg.encoders):
@@ -354,6 +371,7 @@ def _build_model_impl(cfg):
         use_learned_lamb,
         learning=cfg.learning,
         ffn_sharing=cfg.ffn_sharing,
+        real_channels=real_channels,
     )
 
 
@@ -413,6 +431,7 @@ def build_model_from_config_dict(cfg_dict):
     cfg.num_encoder_layers = model_cfg["num_encoder_layers"]
     cfg.layer_norm_eps = model_cfg.get("layer_norm_eps", 1e-5)
     cfg.learning = model_cfg.get("learning", "k_space")
+    cfg.kspace_real_channels = model_cfg.get("kspace_real_channels", False)
     cfg.lambda_schedule = model_cfg.get("lambda_schedule", "none")
     cfg.pos_emb_type = model_cfg.get("pos_emb_type", "APE")
     cfg.attn_type = model_cfg.get("attn_type", "standard")
@@ -423,6 +442,10 @@ def build_model_from_config_dict(cfg_dict):
     cfg.kspace_conv = model_cfg.get("kspace_conv", False)
     cfg.kspace_conv_channels = model_cfg.get("kspace_conv_channels", 8)
     cfg.kspace_conv_kernel = model_cfg.get("kspace_conv_kernel", 3)
+    cfg.image_conv = model_cfg.get("image_conv", False)
+    cfg.image_conv_channels = model_cfg.get("image_conv_channels", 32)
+    cfg.image_conv_layers = model_cfg.get("image_conv_layers", 3)
+    cfg.image_conv_kernel = model_cfg.get("image_conv_kernel", 3)
     cfg.rope_theta = model_cfg.get("rope_theta", 100.0)
     cfg.rope_mixed_rotate = model_cfg.get("rope_mixed_rotate", True)
     cfg.axial_row_stride = model_cfg.get("axial_row_stride", 1)

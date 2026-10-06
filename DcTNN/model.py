@@ -75,9 +75,25 @@ class cascadeNet(nn.Module):
         encArgs (list)          Dicts of kwargs for each encoder
         lamb (bool)             Whether to use a learned per-stage lambda
         learning (str)          "k_space", "image", or "complex_image"
+        real_channels (bool)    k_space only: run the whole cascade (encoders and data consistency) on a
+                                real [B, 2, H, W] tensor whose channels are the real and imaginary parts
+                                of the complex k-space, instead of a complex [B, 1, H, W] tensor. Encoders
+                                must then be real-valued with numCh doubled. The complex k-space is only
+                                recovered at the cascade output so the loss/validation path is unchanged.
     """
-    def __init__(self, N, encList, encArgs, lamb=True, learning="k_space", ffn_sharing="none"):
+    def __init__(self, N, encList, encArgs, lamb=True, learning="k_space", ffn_sharing="none", real_channels=False):
         super().__init__()
+        self.real_channels = bool(real_channels)
+        if self.real_channels:
+            if learning != "k_space":
+                raise ValueError("real_channels requires learning='k_space'")
+            for cls, args in zip(encList, encArgs):
+                if cls in (FixedAPTVIT, CrossAttentionVIT, PCAVIT):
+                    raise ValueError(f"{cls.__name__} is complex-only and cannot be used with real_channels")
+                if args.get("attn_type", "standard") in _COMPLEX_ATTN_TYPES:
+                    raise ValueError("real_channels requires a real-valued attn_type ('standard') on every stage")
+                if args.get("numCh", 1) % 2:
+                    raise ValueError("real_channels needs an even numCh (2 real channels per complex channel)")
         if lamb:
             self.lamb = nn.Parameter(torch.ones(len(encList)) * 0.5)
         else:
@@ -133,6 +149,9 @@ class cascadeNet(nn.Module):
         """
         from normalizer import apply_normalization, model_output_to_raw_kspace, raw_kspace_to_model_output
         from DcTNN.dc import fft_2d, ifft_2d
+
+        if self.real_channels:
+            return self._forward_real_channels(xPrev, y, sampleMask, return_intermediates, stats)
 
         use_normalized_dc = stats is not None and self.learning in ("k_space", "complex_image")
         normalization_domain = stats.get("normalization_domain", self.learning) if stats else self.learning
@@ -190,3 +209,41 @@ class cascadeNet(nn.Module):
         if return_intermediates:
             return x, intermediates
         return x
+
+    def _lamb_for_stage(self, i):
+        if self.lamb is not False:
+            return self.lamb[i]
+        return self.scheduled_lamb
+
+    def _forward_real_channels(self, xPrev, y, sampleMask, return_intermediates, stats):
+        """
+        k_space cascade on a real [B, 2C, H, W] (re, im) tensor. The complex input and measured k-space are
+        split once on entry; every stage and every DC blend then works on real channels, and the complex
+        k-space is rebuilt only for the outputs. DC is per-element and linear, so blending the two real
+        channels separately is exactly the complex blend.
+        """
+        from normalizer import apply_normalization
+        from DcTNN.dc import fft_2d, ifft_2d, complex_to_pair, pair_to_complex
+
+        normalization_domain = stats.get("normalization_domain", "k_space") if stats else "k_space"
+        if stats is None or normalization_domain == "k_space":
+            y_model = apply_normalization(y, stats)
+        else:
+            y_model = fft_2d(apply_normalization(ifft_2d(y), stats))
+        y_pair = complex_to_pair(y_model)
+
+        x = complex_to_pair(xPrev)
+        intermediates = []
+        for i, transformer in enumerate(self.transformers):
+            lamb_i = self._lamb_for_stage(i)
+            candidate = x + transformer(x, col_mask=sampleMask)
+            if lamb_i is None:
+                x = (1 - sampleMask) * candidate + sampleMask * y_pair
+            else:
+                x = (1 - sampleMask) * candidate + sampleMask * (candidate + lamb_i * y_pair) / (1 + lamb_i)
+            if return_intermediates:
+                intermediates.append(pair_to_complex(x))
+        out = pair_to_complex(x)
+        if return_intermediates:
+            return out, intermediates
+        return out
