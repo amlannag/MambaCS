@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from normalizer import reconstruction_to_image_magnitude
+from DcTNN.dc import ifft_2d
 
 
 _NORMALIZED_KSPACE_LOSS_NORMS = {"kspace_companding", "log_kspace"}
@@ -101,6 +102,35 @@ class MagnitudeL1Loss(nn.Module):
         _check_kspace_mask(mask, in_kspace, "l1")
         gt_tensor = _resolve_target(gt, "kspace" if in_kspace else "image")
         return _reduce(torch.abs(_to_magnitude(pred, stats) - _to_magnitude(gt_tensor, stats)), mask)
+
+
+def _to_normalized_magnitude(x, stats=None):
+    """
+    Magnitude image in the model's NORMALISED units (no inversion of the normalisation):
+    - k-space prediction : |IFFT(x)|
+    - complex image      : |x|
+    - real image         : pass through
+    """
+    if not x.is_complex():
+        return x
+    domain = stats.get("prediction_domain", "k_space") if stats else "k_space"
+    return (ifft_2d(x) if domain == "k_space" else x).abs()
+
+
+class NormalizedMagnitudeL2Loss(nn.Module):
+    """
+    MSE between |IFFT(pred)| and |IFFT(gt)| in the normalised image domain, i.e. without undoing the
+    normalisation first (unlike `l2`, which compares in raw scanner units). Requires a linear normalisation
+    (fastmri_magnitude, image_magnitude, zscore, reconformer, none) so that `target["complex_image"]` is the
+    normalised GT image; log/companding k-space norms have no meaningful normalised image and are rejected.
+    """
+    def forward(self, pred, gt, stats=None, mask=None):
+        if _use_normalized_kspace_loss(stats):
+            raise ValueError("image_l2 requires a linear normalisation; use l2 / complex_l2 with kspace_companding / log_kspace")
+        _check_kspace_mask(mask, False, "image_l2")
+        gt_image = _resolve_target(gt, "complex_image")   # already an image: only the prediction may need the IFFT
+        gt_mag = gt_image.abs() if gt_image.is_complex() else gt_image
+        return ((_to_normalized_magnitude(pred, stats) - gt_mag) ** 2).mean()
 
 
 class ComplexL1Loss(nn.Module):
@@ -653,6 +683,8 @@ def build_loss(loss_type: str, **kwargs) -> nn.Module:
         return MagnitudeL1Loss()
     if loss_type in {"l2", "image_domain_l2"}:
         return MagnitudeImageLoss()
+    if loss_type == "image_l2":
+        return NormalizedMagnitudeL2Loss()
     if loss_type == "complex_l1":
         return ComplexL1Loss()
     if loss_type == "complex_l2":
@@ -679,7 +711,7 @@ def build_loss(loss_type: str, **kwargs) -> nn.Module:
         return ComplexL2LoraksLoss(**kwargs)
     raise ValueError(
         "Unknown loss_type "
-        f"'{loss_type}'. Choose from: ['l1', 'l2', 'image_domain_l1', 'image_domain_l2', "
+        f"'{loss_type}'. Choose from: ['l1', 'l2', 'image_domain_l1', 'image_domain_l2', 'image_l2', "
         "'complex_l1', 'complex_l2', 'complex_l2_nmse', 'complex_l2_pointwise_normalized', 'complex_berhu', 'ring_phase_mag', 'freq_weighted_complex_l2', 'complex_l2_radial', "
         "'reconformer_l1', 'perpendicular_loss', "
         "'loraks_c', 'complex_l2_loraks']"

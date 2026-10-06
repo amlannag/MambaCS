@@ -135,10 +135,11 @@ class Config:
     learned_lambda: bool = True
     # Domain the model operates in: "k_space", "image", or "complex_image"
     learning: str = "k_space"
-    # Normalisation: "zscore", "fastmri_magnitude", "robust_shifted", "kspace_companding", "log_kspace",
-    # "log_quantile" (log1p(|k| / q_p), phase kept, k_space learning only), or None
+    # Normalisation: "zscore", "fastmri_magnitude", "image_magnitude" (image-domain p95 of |IFFT(k_zf)| applied to the
+    # complex image and FFT'd back for k_space learning; GT shares the scale), "robust_shifted", "kspace_companding",
+    # "log_kspace", "log_quantile" (log1p(|k| / q_p), phase kept, k_space learning only), or None
     norm: str = "zscore"
-    # Quantile of the zero-filled magnitude that is pinned to 1 by "fastmri_magnitude" / "log_quantile"
+    # Quantile of the zero-filled magnitude that is pinned to 1 by "fastmri_magnitude" / "image_magnitude" / "log_quantile"
     # (0.95 = p95 default, 1.0 = max). Ignored when norm_scope="volume" (the cached volume p95 is used instead).
     norm_quantile: float = 0.95
     # Pre-fill the undersampled (unmeasured) k-space BEFORE normalisation instead of
@@ -209,6 +210,8 @@ class Config:
     # "complex_l2_nmse": per-sample sum|pred-gt|^2 / sum|gt|^2 over the loss region (scale-free complex L2).
     # "complex_l2_pointwise_normalized": mean |pred-gt|^2 / (|gt| + eps), each cell normalised by its own target.
     # "complex_berhu": plain reverse Huber on |pred-gt|: linear below berhu_delta, quadratic above (delta=1 ~ max(|e|, e^2)).
+    # "l1" / "l2": magnitude image loss in RAW scanner units (normalisation undone first; ~1e-4 scale on fastMRI).
+    # "image_l2": MSE of |IFFT(pred)| vs |IFFT(gt)| in the model's NORMALISED units (linear norms only).
     final_loss_type: str = "l1"
     intermediate_loss_type: str = "l1"
     berhu_delta: float = 1.0

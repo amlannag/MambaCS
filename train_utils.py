@@ -493,6 +493,7 @@ _NORMALIZERS = {
     "log_kspace":          _norm.log_kspace,
     "log_quantile":        _norm.log_quantile,
     "fastmri_magnitude":   _norm.fastmri_magnitude,
+    "image_magnitude":     _norm.image_magnitude,
     "reconformer":         _norm.reconformer,
     "robust_shifted":      _norm.robust_shifted,
     None:                  _norm.none,
@@ -566,6 +567,8 @@ def simulate_undersampling(
                    ("sigma_raw" / "sigma_norm") for SNR-weighted losses.
     learning="complex_image" : preserve complex image values through the model and FFT data consistency
     norm="zscore" : z-score normalise real/imag separately using undersampled image stats
+    norm="image_magnitude" : divide the complex zero-filled and GT images by the norm_quantile of |IFFT(k_zf)|, then
+                   map back to the learning domain (k_space input = k / q_img); GT shares the same scale
     norm="robust_shifted" : median/IQR scale, smooth clip, and shift in the learning domain
     norm="kspace_companding" : radial magnitude companding in k-space (k_space learning only)
     norm="log_kspace" : log1p magnitude k-space normalization with preserved phase (k_space learning only)

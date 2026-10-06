@@ -43,35 +43,31 @@ _BASE = {
     "ffn_sharing": "global",
 }
 
-# Plain complex axial attention with optional learnable k-space stems (see Config.global_filter / kspace_conv).
-_KSPACE_STEM = {
+# Image-domain magnitude normalisation: q = p95 of |IFFT(k_zf)|, complex ZF and GT images divided by the same q, FFT'd
+# back to k-space for the model. Same axial baseline as Experiments/FASTMRI/Normalisation/Quantile Norm/
+# norm_axial_p95_slice_l2_final_r4 (k-space learning, learned lambda, 3x complex axial, no global filter) so the only
+# variable is the domain the p95 is taken in. Final-only complex L2 in k-space.
+_IMAGE_MAGNITUDE_NORM = {
     **_BASE,
-    "prefix": "kspace_stem",
+    "prefix": "norm",
+    "name": "axial_image_p95_slice_l2_final_r4",
     "attn_type": "complex",
     "encoders": ["axial", "axial", "axial"],
-    "kspace_conv_channels": 8,
-    "kspace_conv_kernel": 3,
+    "norm": "image_magnitude",
+    "global_filter": False,
+    "kspace_conv": False,
+}
+
+# Same model / norm, but the loss is taken in the image domain: IFFT the k-space prediction and GT, then MSE of the
+# magnitudes in the normalised units ("image_l2"; the legacy "l2" undoes the normalisation and compares at ~1e-4 scale).
+_IMAGE_MAGNITUDE_NORM_IMAGE_L2 = {
+    **_IMAGE_MAGNITUDE_NORM,
+    "name": "axial_image_p95_slice_image_mag_l2_final_r4",
+    "final_loss_type": "image_l2",
+    "intermediate_loss_type": "image_l2",
 }
 
 EXPERIMENTS = [
-  
-    {
-        **_BASE,
-        "prefix": "combined",
-        "name": "fnet_both_cross_axial_ms13_gfilt_freqw_m3_g0.5_cap0.6_p95_slice_400ep_r4",
-        "encoders": ["fnet", "cross_axial", "axial", "axial", "axial"],
-        "fnet_token_axis": "both",
-        "fnet_with_embedding": True,
-        "fnet_share_ffn": True,
-        "fnet_fft_norm": "ortho",
-        "attn_type": "complex_ms",
-        "attn_scales": (1, 3),
-        "global_filter": True,
-        "final_loss_type": "freq_weighted_complex_l2",
-        "intermediate_loss_type": "freq_weighted_complex_l2",
-        "freq_weight_m": 3.0,
-        "freq_weight_gamma": 0.5,
-        "freq_weight_r_cap": 0.6,
-        "epochs": 400,
-    },
+    _IMAGE_MAGNITUDE_NORM,
+    _IMAGE_MAGNITUDE_NORM_IMAGE_L2,
 ]

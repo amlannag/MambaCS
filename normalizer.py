@@ -127,7 +127,7 @@ def apply_normalization(tensor: torch.Tensor, metric: dict | None) -> torch.Tens
     normalization = metric.get("normalization", "none")
     if normalization == "none":
         return tensor
-    if normalization == "fastmri_magnitude":
+    if normalization in {"fastmri_magnitude", "image_magnitude"}:
         return tensor / _batch_stat_like(metric["p95"], tensor)
     if normalization == "reconformer":
         return tensor / _batch_stat_like(metric["scale"], tensor)
@@ -166,7 +166,7 @@ def invert_normalization(tensor: torch.Tensor, metric: dict | None) -> torch.Ten
     normalization = metric.get("normalization", "none")
     if normalization == "none":
         return tensor
-    if normalization == "fastmri_magnitude":
+    if normalization in {"fastmri_magnitude", "image_magnitude"}:
         return tensor * _batch_stat_like(metric["p95"], tensor)
     if normalization == "reconformer":
         return tensor * _batch_stat_like(metric["scale"], tensor)
@@ -242,7 +242,7 @@ def complex_image_to_magnitude(image: torch.Tensor, metric: dict | None = None) 
         return image
     if metric and (
         metric.get("normalization_domain") == "complex_image"
-        or metric.get("normalization") == "fastmri_magnitude"
+        or metric.get("normalization") in {"fastmri_magnitude", "image_magnitude"}
         and "normalization_domain" not in metric
     ):
         image = invert_normalization(image, metric)
@@ -565,6 +565,40 @@ def fastmri_magnitude(kspace_full, mask, learning="k_space", kspace_us=None, qua
     }
     model_input, dc_input, target, metric = _build_outputs(
         img_us_norm, img_gt_norm, metric, learning, kspace_us
+    )
+    target["image"] = img_gt.abs()
+    return model_input, dc_input, target, metric
+
+
+def image_magnitude(kspace_full, mask, learning="k_space", kspace_us=None, quantile=0.95, volume_scale=None, sigma_raw=None, **_unused):
+    """
+    Image-domain magnitude normalisation for any learning domain: q_img is the `quantile` (default p95) of the
+    zero-filled IMAGE magnitude |IFFT(k_zf)| per sample. The complex zero-filled image and the complex GT image are both
+    divided by the same q_img, and the result is mapped back into the learning domain (k_space: FFT of the normalised
+    image, i.e. k / q_img; the model input, target["kspace"] and target["complex_image"] all share this scale).
+    Unlike `fastmri_magnitude` with learning="k_space" (which pins the k-space p95), this pins the image p95 to 1.
+    The metric key "p95" is kept so the shared apply/invert paths are reused.
+    """
+    if volume_scale is not None:
+        raise ValueError("norm='image_magnitude' has no volume-wise scale; use norm_scope='slice'")
+    if kspace_us is None:
+        kspace_us = kspace_full * mask
+    img_us = ifft_2d(kspace_us)
+    img_gt = ifft_2d(kspace_full)
+    scale_factor = _quantile_scale(img_us, quantile)
+    metric = {
+        "normalization": "image_magnitude",
+        "normalization_domain": "complex_image",
+        "p95": scale_factor,
+        "quantile": float(quantile),
+        "scale_scope": "slice",
+    }
+    if sigma_raw is not None:
+        sigma_raw = torch.as_tensor(sigma_raw, dtype=img_us.real.dtype, device=img_us.device).reshape(-1, 1, 1, 1)
+        metric["sigma_raw"] = sigma_raw
+        metric["sigma_norm"] = sigma_raw / scale_factor
+    model_input, dc_input, target, metric = _build_outputs(
+        img_us / scale_factor, img_gt / scale_factor, metric, learning, kspace_us
     )
     target["image"] = img_gt.abs()
     return model_input, dc_input, target, metric

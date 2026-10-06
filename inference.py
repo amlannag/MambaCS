@@ -189,6 +189,7 @@ def _denormalize_image(recon: torch.Tensor, stats: dict) -> torch.Tensor:
         "kspace_companding",
         "log_kspace",
         "fastmri_magnitude",
+        "image_magnitude",
         "reconformer",
         "robust_shifted",
     }:
