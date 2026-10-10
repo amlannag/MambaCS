@@ -25,7 +25,7 @@ class Config:
     prefix: str = "MambaCS"
     name: str = "8x_acceleration"
     output_dir: str = "../Experiments"
-    hpc_backend: str = "nvidia"
+    hpc_backend: str = "amd"
 
     # Set to a checkpoint path (e.g. "../Experiments/dctnn_baseline/latest.pth")
     # to resume a stopped run; leave as None to start fresh
@@ -48,8 +48,8 @@ class Config:
 
     num_channels: int = 1
 
-    acceleration_factors: List[int] = field(default_factory=lambda: [8])
-    center_fractions: Optional[List[float]] = None
+    acceleration_factors: List[int] = field(default_factory=lambda: [4])
+    center_fractions: Optional[List[float]] = field(default_factory=lambda: [0.08])
     mask_type: str = "random"
 
     val_fraction: float = 0.1
@@ -73,7 +73,7 @@ class Config:
     #   ["patch", "patch", "patch"]               — patch-only ablation
     #   ["axial", "kaleidoscope", "patch", "patch"] — 4-stage deeper model
     model_type: str = "dctnn"
-    encoders: List[str] = field(default_factory=lambda: ["patch", "patch", "patch"])
+    encoders: List[str] = field(default_factory=lambda: ["axial", "axial", "axial"])
     reconformer_num_ch: Tuple[int, int, int] = (96, 48, 24)
     reconformer_num_iter: int = 5
     reconformer_down_scales: Tuple[float, float, float] = (2.0, 1.0, 1.5)
@@ -144,7 +144,7 @@ class Config:
     # Normalisation: "zscore", "fastmri_magnitude", "image_magnitude" (image-domain p95 of |IFFT(k_zf)| applied to the
     # complex image and FFT'd back for k_space learning; GT shares the scale), "robust_shifted", "kspace_companding",
     # "log_kspace", "log_quantile" (log1p(|k| / q_p), phase kept, k_space learning only), or None
-    norm: str = "zscore"
+    norm: str = "fastmri_magnitude"
     # Quantile of the zero-filled magnitude that is pinned to 1 by "fastmri_magnitude" / "image_magnitude" / "log_quantile"
     # (0.95 = p95 default, 1.0 = max). Ignored when norm_scope="volume" (the cached volume p95 is used instead).
     norm_quantile: float = 0.95
@@ -162,11 +162,11 @@ class Config:
     lambda_schedule: str = "none"
     lambda_start: float = 1.0
     lambda_end: float = 0.1
-    pos_emb_type: str = "APE"
+    pos_emb_type: str = "Rope-Axial"
     # Attention implementation used inside transformer blocks.
     # Options for self-attention: "standard", "complex", "complex_ms", "real_valued", "phase_aware"
     # The "cross_axial" encoder family is complex-only.
-    attn_type: str = "standard"
+    attn_type: str = "complex"
     # ReconFormer-style multi-scale Q/K (attn_type="complex_ms", patch/axial encoders only): heads are split
     # evenly across these odd conv kernel sizes over the token neighbourhood (1 = pointwise). nhead must be
     # divisible by len(attn_scales).
@@ -185,8 +185,9 @@ class Config:
     kspace_conv_kernel: int = 3
     # image_conv (k_space learning, patch/axial/fnet encoders): DcCNN-style residual COMPLEX CNN in the image domain at
     # the start of every encoder stage: IFFT(k) -> conv(1 -> image_conv_channels) + CReLU -> ... -> conv(-> 1), residual
-    # add, FFT back to k-space. image_conv_layers is the total number of convolutions (>= 2; the last one is
-    # zero-initialised so the stem starts as an identity). Also works with kspace_real_channels (converted at the boundary).
+    # add, FFT back to k-space. image_conv_layers is the total number of convolutions (>= 2). The residual branch is
+    # gated by a scalar alpha = 0 so the stem starts as an identity while every conv still receives gradient; stem
+    # params are excluded from weight decay. Also works with kspace_real_channels (converted at the boundary).
     image_conv: bool = False
     image_conv_channels: int = 32
     image_conv_layers: int = 3
@@ -207,7 +208,7 @@ class Config:
     #   "per_stage" — one shared FFN per cascade stage (all layers in that stage)
     #   "global"    — one shared FFN across the whole model (all stages; requires
     #                 every stage to use the same d_model / FFN width / dtype)
-    ffn_sharing: str = "none"
+    ffn_sharing: str = "global"
     flattening_order: str = "row_major"
     # ---------------------------------------------------------------------------
     # Training hyperparameters
@@ -228,8 +229,8 @@ class Config:
     # "image_l2": MSE of |IFFT(pred)| vs |IFFT(gt)| in the model's NORMALISED units (linear norms only).
     # "complex_image_l2": complex MSE (Re^2 + Im^2 diff) of IFFT(pred) vs the normalised GT complex image (linear norms
     #                     only; k_space learning with the error measured in the image domain, all_kspace only).
-    final_loss_type: str = "l1"
-    intermediate_loss_type: str = "l1"
+    final_loss_type: str = "complex_l2"
+    intermediate_loss_type: str = "complex_l2"
     berhu_delta: float = 1.0
     # "ring_phase_mag": SNR-weighted (w = |gt|/(|gt|+sigma_vol)) 1-cos(dphi) phase error averaged per radial ring, rings
     # averaged (fixed weight, or learnable s_k = log sigma_k^2 with exp(-s_k) P_k + s_k), plus mean (|gt|-|pred|)^2.
@@ -299,14 +300,14 @@ class Config:
     loraks_radius: int = 3
     loraks_rank: Optional[int] = None
     loraks_normalize: str = "ratio"
-    epochs: int = 400
+    epochs: int = 100
     batch_size: int = 32
     auto_batch_size: bool = True
     batch_size_search_start: int = 128
     batch_size_probe_steps: int = 3
-    optimizer_type: str = "adam"
+    optimizer_type: str = "adam"   # "adam" (coupled L2) or "adamw" (decoupled); stem params always get weight_decay=0
     scheduler_type: str = "cosine"
-    lr: float = 1e-4
+    lr: float = 2e-4
     lr_step_size: int = 40
     lr_gamma: float = 0.1
     weight_decay: float = 1e-5

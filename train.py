@@ -348,10 +348,37 @@ def _build_criteria(cfg, device=None):
     return final, intermediate
 
 
-def _build_optimizer(cfg, parameters):
+_NO_WEIGHT_DECAY_PARAM_NAMES = ("kspace_stem", "global_filter_mid")
+
+
+def _optimizer_param_groups(cfg, model, extra_parameters=()):
+    """
+    Parameter groups for the optimiser: k-space / image-domain stem parameters get weight_decay=0.
+    Under Adam's coupled L2, a parameter whose data gradient is ~0 (zero-initialised residual branches,
+    high-frequency GlobalFilter cells) is stepped by lr*sign(w) regardless of the decay coefficient and
+    collapses to zero within a few epochs; the stems are the only modules in this regime. Shared/tied
+    tensors are included once (see `unique_model_parameters`).
+    """
+    seen, decay, no_decay = set(), [], []
+    for name, param in model.named_parameters():
+        if not param.requires_grad or id(param) in seen:
+            continue
+        seen.add(id(param))
+        (no_decay if any(tag in name for tag in _NO_WEIGHT_DECAY_PARAM_NAMES) else decay).append(param)
+    decay.extend(p for p in extra_parameters if id(p) not in seen)
+    groups = [{"params": decay, "weight_decay": cfg.weight_decay}]
+    if no_decay:
+        groups.append({"params": no_decay, "weight_decay": 0.0})
+    return groups
+
+
+def _build_optimizer(cfg, model, extra_parameters=()):
     optimizer_type = getattr(cfg, "optimizer_type", "adam")
+    groups = _optimizer_param_groups(cfg, model, extra_parameters)
     if optimizer_type == "adam":
-        return torch.optim.Adam(parameters, lr=cfg.lr, weight_decay=cfg.weight_decay)
+        return torch.optim.Adam(groups, lr=cfg.lr, weight_decay=cfg.weight_decay)
+    if optimizer_type == "adamw":
+        return torch.optim.AdamW(groups, lr=cfg.lr, weight_decay=cfg.weight_decay)
     raise ValueError(f"Unknown optimizer_type {optimizer_type!r}")
 
 
@@ -434,7 +461,7 @@ def _probe_batch_candidate(cfg, dataset, batch_size, device, checkpoint=None):
         model = build_model(cfg).to(device)
         phase(f"  Probe batch {batch_size}: model built in {time.time() - t_build:.1f}s")
         final_criterion, intermediate_criterion = _build_criteria(cfg, device)
-        optimizer = _build_optimizer(cfg, list(unique_model_parameters(model)) + list(final_criterion.parameters()))
+        optimizer = _build_optimizer(cfg, model, list(final_criterion.parameters()))
         if checkpoint is not None:
             model.load_state_dict(checkpoint["model"])
             optimizer.load_state_dict(checkpoint["optimizer"])
@@ -1184,7 +1211,7 @@ def main():
                        for p in crit.parameters()]
     if loss_parameters:
         phase(f"Loss has {sum(p.numel() for p in loss_parameters)} learnable parameter(s); added to the optimizer")
-    optimizer = _build_optimizer(cfg, list(unique_model_parameters(model)) + loss_parameters)
+    optimizer = _build_optimizer(cfg, model, loss_parameters)
     scheduler = _build_scheduler(cfg, optimizer)
 
     # ---- Resume ----

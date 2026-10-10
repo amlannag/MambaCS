@@ -1,6 +1,9 @@
 """
 Learnable k-space pre-processing stems applied to the encoder input before tokenisation.
-Both are exact identities at initialisation so an existing recipe is unchanged until they learn.
+All are exact identities at initialisation so an existing recipe is unchanged until they learn: GlobalFilter
+starts at W = 1, the residual conv stems through a scalar gate alpha = 0 (not a zero output conv, which would
+leave the branch without gradient and let Adam's coupled weight decay collapse it). Stem parameters must be
+excluded from weight decay (train._optimizer_param_groups).
 """
 import math
 
@@ -31,12 +34,46 @@ class GlobalFilter(nn.Module):
         return x * self.weight
 
 
-class KSpaceConvStem(nn.Module):
+def _init_conv_(conv, kernel_size, criterion):
+    """He (before a rectifier) or glorot (output layer) init of a real or complex conv; zero bias."""
+    fan_in = conv.in_channels * kernel_size ** 2
+    fan_out = conv.out_channels * kernel_size ** 2
+    if conv.weight.is_complex():
+        trabelsi_init_(conv.weight, fan_in=fan_in, fan_out=fan_out, criterion=criterion)
+    elif criterion == "he":
+        nn.init.kaiming_normal_(conv.weight, nonlinearity="relu")
+    else:
+        nn.init.xavier_normal_(conv.weight)
+    nn.init.zeros_(conv.bias)
+
+
+class _GatedResidualStem(nn.Module):
+    """
+    Residual stem  x -> x + alpha * branch(x)  with a single learnable real scalar `alpha` initialised to 0.
+
+    The stem is an exact identity at initialisation, but unlike zero-initialising the branch's output conv,
+    every branch weight receives a data gradient as soon as alpha moves off zero (alpha itself gets
+    d alpha = <dL/dout, branch(x)> from step 0). With a zero output conv the whole branch upstream of it gets
+    exactly zero gradient; under Adam's coupled L2 that branch is then stepped by lr*sign(w) and collapses.
+    Checkpoints saved before the gate existed load with alpha = 1 (their branch output was ungated).
+    """
+    def __init__(self):
+        super().__init__()
+        self.alpha = nn.Parameter(torch.zeros(1))
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        if prefix + "alpha" not in state_dict:
+            state_dict[prefix + "alpha"] = torch.ones_like(self.alpha)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
+
+class KSpaceConvStem(_GatedResidualStem):
     """
     Residual complex convolution over neighbouring k-space samples:
-        x -> x + conv(c -> 1)(gelu(conv(1 -> c)(x)))
+        x -> x + alpha * conv(c -> 1)(gelu(conv(1 -> c)(x)))
     Local mixing of adjacent k-space lines (a learned GRAPPA/LORAKS-style kernel), which in the image
-    domain is a multiplicative modulation. The output conv is zero-initialised so the stem starts as identity.
+    domain is a multiplicative modulation. Both convs are properly initialised (he / glorot); the scalar
+    gate alpha = 0 makes the stem an identity at the start (see `_GatedResidualStem`).
     With is_complex=False the convolutions are real over the (re, im) channels.
     """
     def __init__(self, num_channels=1, hidden_channels=8, kernel_size=3, is_complex=True):
@@ -48,28 +85,23 @@ class KSpaceConvStem(nn.Module):
         self.conv_in = nn.Conv2d(num_channels, hidden_channels, kernel_size, padding=pad, dtype=dtype)
         self.act = ComplexGELU() if is_complex else nn.GELU()
         self.conv_out = nn.Conv2d(hidden_channels, num_channels, kernel_size, padding=pad, dtype=dtype)
-        if is_complex:
-            trabelsi_init_(self.conv_in.weight, fan_in=num_channels * kernel_size ** 2,
-                           fan_out=hidden_channels * kernel_size ** 2, criterion="he")
-        else:
-            nn.init.kaiming_normal_(self.conv_in.weight, nonlinearity="relu")
-        nn.init.zeros_(self.conv_in.bias)
-        nn.init.zeros_(self.conv_out.weight)
-        nn.init.zeros_(self.conv_out.bias)
+        _init_conv_(self.conv_in, kernel_size, "he")
+        _init_conv_(self.conv_out, kernel_size, "glorot")
 
     def forward(self, x):
-        return x + self.conv_out(self.act(self.conv_in(x)))
+        return x + self.alpha * self.conv_out(self.act(self.conv_in(x)))
 
 
-class ImageDomainConvStem(nn.Module):
+class ImageDomainConvStem(_GatedResidualStem):
     """
     DcCNN-style residual complex CNN applied in the IMAGE domain to a k-space input:
-        k -> FFT( img + conv_L(... CReLU(conv_2(CReLU(conv_1(img)))) ...) ),   img = IFFT(k)
+        k -> FFT( img + alpha * conv_L(... CReLU(conv_2(CReLU(conv_1(img)))) ...) ),   img = IFFT(k)
     conv_1 maps the complex channels to `hidden_channels` filters, the middle layers keep that width, and the
     last conv maps back to the input channel count. Every layer is complex-valued (Trabelsi he-init before the
-    CReLUs); the last conv is zero-initialised so the stem is an exact identity at initialisation. `num_layers`
-    is the total number of convolutions (>= 2). A real (re, im)-pair input (kspace_real_channels mode) is
-    converted to complex for the IFFT/CNN and split back into channels for the FFT output.
+    CReLUs, glorot for the output conv); the scalar gate alpha = 0 makes the stem an exact identity at
+    initialisation while every conv still receives a gradient (see `_GatedResidualStem`). `num_layers` is the
+    total number of convolutions (>= 2). A real (re, im)-pair input (kspace_real_channels mode) is converted
+    to complex for the IFFT/CNN and split back into channels for the FFT output.
     """
     def __init__(self, num_channels=1, hidden_channels=32, num_layers=3, kernel_size=3, is_complex=True):
         super().__init__()
@@ -86,18 +118,16 @@ class ImageDomainConvStem(nn.Module):
         layers = []
         for c_in, c_out in zip(widths[:-2], widths[1:-1]):
             conv = nn.Conv2d(c_in, c_out, kernel_size, padding=pad, dtype=torch.cfloat)
-            trabelsi_init_(conv.weight, fan_in=c_in * kernel_size ** 2, fan_out=c_out * kernel_size ** 2, criterion="he")
-            nn.init.zeros_(conv.bias)
+            _init_conv_(conv, kernel_size, "he")
             layers += [conv, ComplexReLU()]
         out_conv = nn.Conv2d(widths[-2], widths[-1], kernel_size, padding=pad, dtype=torch.cfloat)
-        nn.init.zeros_(out_conv.weight)
-        nn.init.zeros_(out_conv.bias)
+        _init_conv_(out_conv, kernel_size, "glorot")
         self.net = nn.Sequential(*layers, out_conv)
 
     def forward(self, k):
         k_complex = pair_to_complex(k) if self.pair_input else k
         img = ifft_2d(k_complex)
-        out = fft_2d(img + self.net(img))
+        out = fft_2d(img + self.alpha * self.net(img))
         return complex_to_pair(out) if self.pair_input else out
 
 
