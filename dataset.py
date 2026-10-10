@@ -35,32 +35,79 @@ def center_crop_complex(arr: torch.Tensor, out_h: int, out_w: int) -> torch.Tens
 
 
 def prepare_fastmri_kspace(kspace: torch.Tensor, image_size: tuple[int, int]) -> torch.Tensor:
+    """Centred IFFT -> image-domain centre crop -> centred FFT. Acts on the last two dims, so a (coils, H, W) slice is cropped per coil."""
     image = centered_ifft2(kspace)
     image = center_crop_complex(image, *image_size)
     return centered_fft2(image)
 
 
+def coil_compress(kspace: torch.Tensor, num_virtual: int) -> torch.Tensor:
+    """
+    SVD coil compression of one multi-coil k-space slice (C, H, W) -> (num_virtual, H, W).
+
+    Stacks the coils as X (C x HW), takes the eigenvectors of the C x C Gram matrix X X^H (= left singular
+    vectors of X) and projects onto the `num_virtual` with the largest eigenvalues. Linear in k-space, so it
+    commutes with the FFT / crop and the compressed coils are still valid k-space data (data consistency applies
+    per virtual coil). Virtual coil 0 carries the most energy. If C < num_virtual the missing coils are zero.
+    """
+    coils = kspace.shape[0]
+    x = kspace.reshape(coils, -1)
+    gram = x @ x.conj().transpose(0, 1)
+    evals, evecs = torch.linalg.eigh(gram)                      # ascending eigenvalues
+    order = torch.argsort(evals, descending=True)[:num_virtual]
+    basis = evecs[:, order]                                     # (C, n) orthonormal
+    virtual = (basis.conj().transpose(0, 1) @ x).reshape(-1, *kspace.shape[1:])
+    if virtual.shape[0] < num_virtual:
+        pad = torch.zeros(num_virtual - virtual.shape[0], *kspace.shape[1:], dtype=kspace.dtype)
+        virtual = torch.cat([virtual, pad], dim=0)
+    return virtual
+
+
+def prepare_kspace_slice(kspace: torch.Tensor, image_size: tuple[int, int], num_coils=None) -> torch.Tensor:
+    """
+    Raw HDF5 slice -> model-layout k-space [channels, crop_H, crop_W].
+      (H, W)        single coil : crop, add the channel axis                       -> [1, crop_H, crop_W]
+      (coils, H, W) multi-coil  : crop per coil, SVD-compress to `num_coils` coils -> [num_coils, crop_H, crop_W]
+    """
+    if kspace.ndim == 2:
+        return prepare_fastmri_kspace(kspace, image_size).unsqueeze(0)
+    if kspace.ndim != 3:
+        raise ValueError(f"Expected a (H, W) or (coils, H, W) k-space slice, got shape {tuple(kspace.shape)}")
+    if num_coils is None:
+        raise ValueError(
+            f"Multi-coil slice {tuple(kspace.shape)} but num_coils is None; set num_channels for a multi-coil dataset"
+        )
+    return coil_compress(prepare_fastmri_kspace(kspace, image_size), num_coils)
+
+
 class H5MRIDataset(Dataset):
     """
     Loads k-space slices from .h5 MRI files (fastMRI format).
-    Each file contains kspace of shape (num_slices, H, W) complex64.
-    Returns one slice after centered IFFT -> image-domain center crop -> centered FFT,
-    as [1, crop_H, crop_W] complex64.
+    Single-coil files hold kspace of shape (num_slices, H, W); multi-coil files (num_slices, coils, H, W).
+    Returns one slice after centered IFFT -> image-domain center crop -> centered FFT, as
+    [1, crop_H, crop_W] complex64 (single coil) or [num_coils, crop_H, crop_W] after SVD coil compression
+    to `num_coils` virtual coils (multi-coil, see `coil_compress`).
 
     Args:
         data_dir (str):              Directory containing .h5 files
         image_size (tuple[int,int]): Output image-domain crop shape (crop_H, crop_W)
         kspace_key (str):            HDF5 dataset key for raw k-space (default: 'kspace')
+        num_coils (int | None):      Multi-coil files only: number of virtual coils to compress to. None = expect
+                                     single-coil files (a 3-D slice then raises).
         skip_starting_slice (int):   Drop the first N slices of every volume from the index (default 0)
         skip_ending_slice (int):     Drop the last N slices of every volume from the index (default 0)
     """
 
     def __init__(self, data_dir, image_size=(320, 320), kspace_key='kspace', max_files=None,
-                 return_metadata=False, volume_stats=None, skip_starting_slice=0, skip_ending_slice=0):
+                 return_metadata=False, volume_stats=None, skip_starting_slice=0, skip_ending_slice=0,
+                 num_coils=None):
         if skip_starting_slice < 0 or skip_ending_slice < 0:
             raise ValueError("skip_starting_slice / skip_ending_slice must be >= 0")
+        if num_coils is not None and num_coils < 1:
+            raise ValueError("num_coils must be >= 1")
         self.image_size = image_size
         self.kspace_key = kspace_key
+        self.num_coils = num_coils
         self.return_metadata = return_metadata
         self.skip_starting_slice = int(skip_starting_slice)
         self.skip_ending_slice = int(skip_ending_slice)
@@ -116,7 +163,7 @@ class H5MRIDataset(Dataset):
         fpath, s = self.index[idx]
         f = self._get_file_handle(fpath)
         kspace = torch.tensor(f[self.kspace_key][s], dtype=torch.complex64)
-        kspace = prepare_fastmri_kspace(kspace, self.image_size).unsqueeze(0)
+        kspace = prepare_kspace_slice(kspace, self.image_size, self.num_coils)
         if not self.return_metadata:
             return kspace
         fname = os.path.basename(fpath)

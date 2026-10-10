@@ -35,8 +35,10 @@ class Config:
     # Data
     # ---------------------------------------------------------------------------
 
-    # "fastmri" — .h5 k-space files (centered IFFT, image-domain crop, centered FFT)
-    # "oasis"   — PNG brain slices (converted to centered k-space via FFT)
+    # "fastmri"       — .h5 single-coil k-space files (centered IFFT, image-domain crop, centered FFT)
+    # "fastmri_brain" — .h5 multi-coil k-space files (slices, coils, H, W): same crop per coil, then SVD coil
+    #                   compression to num_channels virtual coils; GT / PSNR use the RSS over the virtual coils
+    # "oasis"         — PNG brain slices (converted to centered k-space via FFT)
     dataset: str = "fastmri"
 
     # Data directories — if None, auto-selected from DATASET_DIRS in train_utils.py
@@ -46,6 +48,8 @@ class Config:
     kspace_key: str = "kspace"
     image_size: Tuple[int, int] = (320, 320)
 
+    # Complex channels the model sees: 1 for single-coil data; for multi-coil datasets the number of virtual
+    # coils after SVD coil compression (dataset.coil_compress).
     num_channels: int = 1
 
     acceleration_factors: List[int] = field(default_factory=lambda: [4])
@@ -92,6 +96,10 @@ class Config:
     apt_rope_ref_grid: Optional[Tuple[int, int]] = None
     apt_use_abs_pos_emb: bool = False
     axial_row_stride: int = 1
+    # Axial encoder token width. None = image_width * num_channels (no projection for single-coil 320 data).
+    # With several virtual coils a row token is width * num_channels wide; set e.g. 320 to project it down so the
+    # transformer / FFN stay the single-coil size.
+    axial_d_model: Optional[int] = None
     nhead_patch: int = 8
     nhead_axial: int = 8
     layer_no: int = 1

@@ -1,31 +1,41 @@
 #!/bin/bash
-# Pull MRI_NYU k-space file(s) from Bunya HPC to the local MambaCS Data directory.
+# Pull files OR folders from Bunya (QRISdata) into the local MambaCS Data directory.
 # Uses SSH ControlMaster so you only authenticate (Okta MFA) once per run.
 
 REMOTE_HOST="uqanag@bunya.rcc.uq.edu.au"
-# Source folder on Bunya (pulled directly from QRISdata)
-REMOTE_BASE="/QRISdata/Q9618/knee"
-LOCAL_BASE="$HOME/Desktop/MambaCS/Data/knee_multicoil"
+REMOTE_BASE="/scratch/user/uqanag"          # was .../prostate; your knee files live under knee
+LOCAL_BASE="$HOME/Desktop/MambaCS/Data"
 CONTROL_PATH="$HOME/.ssh/controlmasters/%r@%h:%p"
 
 mkdir -p "$LOCAL_BASE" "$HOME/.ssh/controlmasters"
 
-# Open one master connection (this is the only Okta/DUO prompt you'll get)
+# Open one master connection (the only Okta/DUO prompt you'll get)
 ssh -MNf -o ControlMaster=yes -o ControlPath="$CONTROL_PATH" -o ControlPersist=10m "$REMOTE_HOST"
 
-# Edit this list to change which files get pulled
-FILES=(
-  knee_multicoil_test.tar.xz
+# Always close the master connection, even if something fails or you hit Ctrl+C
+cleanup() { ssh -O exit -o ControlPath="$CONTROL_PATH" "$REMOTE_HOST" 2>/dev/null; }
+trap cleanup EXIT
+
+# Paths are relative to REMOTE_BASE. Each entry can be a file or a folder.
+ITEMS=(
+  fastmri_knee      # a file
+  fastmri_prostate                   # a folder (copied INTO LOCAL_BASE as LOCAL_BASE/some_folder)
 )
 
-for f in "${FILES[@]}"; do
-    echo "Syncing $f..."
-    # --partial keeps interrupted transfers so re-running resumes them.
-    # No -z: the .nii.gz files are already compressed.
-    rsync -avP --partial -e "ssh -o ControlPath=$CONTROL_PATH" "$REMOTE_HOST:$REMOTE_BASE/$f" "$LOCAL_BASE/"
+failed=()
+for item in "${ITEMS[@]}"; do
+    item="${item%/}"              # strip any trailing slash so folders land inside LOCAL_BASE
+    echo "Syncing $item..."
+    # -a recurses into folders; --partial keeps interrupted transfers so re-running resumes them.
+    # No -z: .xz / .gz / .nii.gz files are already compressed.
+    if ! rsync -avP --partial -e "ssh -o ControlPath=$CONTROL_PATH" \
+            "$REMOTE_HOST:$REMOTE_BASE/$item" "$LOCAL_BASE/"; then
+        failed+=("$item")
+    fi
 done
 
-# Close the master connection
-ssh -O exit -o ControlPath="$CONTROL_PATH" "$REMOTE_HOST"
-
+if [ ${#failed[@]} -gt 0 ]; then
+    echo "FAILED: ${failed[*]}"
+    exit 1
+fi
 echo "Done. Synced to $LOCAL_BASE"

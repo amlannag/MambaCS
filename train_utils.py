@@ -22,7 +22,23 @@ DATASET_DIRS = {
         "/scratch/user/uqanag/OASIS/keras_png_slices_train",
         "/scratch/user/uqanag/OASIS/keras_png_slices_validate",
     ),
+    "fastmri_brain": (
+        "/QRISdata/Q9618/brain/multicoil_train",
+        "/QRISdata/Q9618/brain/multicoil_val",
+    ),
 }
+
+# Datasets stored as fastMRI-style HDF5 volumes (one .h5 per volume, `kspace` dataset); everything else is PNG slices.
+H5_DATASETS = ("fastmri", "fastmri_brain")
+MULTICOIL_DATASETS = ("fastmri_brain",)
+
+
+def is_h5_dataset(cfg) -> bool:
+    return cfg.dataset in H5_DATASETS
+
+
+def is_multicoil_dataset(cfg) -> bool:
+    return cfg.dataset in MULTICOIL_DATASETS
 
 
 def resolve_data_dirs(cfg):
@@ -85,7 +101,7 @@ _ENCODER_ARGS = {
         dict(
             layerNo=cfg.layer_no,
             numCh=cfg.num_channels,
-            d_model=None,
+            d_model=getattr(cfg, "axial_d_model", None),
             nhead=cfg.nhead_axial,
             num_encoder_layers=cfg.num_encoder_layers,
             layer_norm_eps=getattr(cfg, "layer_norm_eps", 1e-5),

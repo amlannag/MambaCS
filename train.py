@@ -19,13 +19,13 @@ import wandb
 from PIL import Image
 from torch.utils.data import DataLoader
 
-from dataset import VolumeBatchSampler, volume_ids_from_fnames, H5MRIDataset, OASISDataset, prepare_fastmri_kspace
+from dataset import VolumeBatchSampler, volume_ids_from_fnames, H5MRIDataset, OASISDataset, prepare_kspace_slice
 from tools.volume_stats import load_or_compute_volume_stats
 from config import Config
 from progress import phase, progress_iter
 from train_config import EXPERIMENTS
 from DcTNN.lambda_scheduler import LambdaScheduler
-from train_utils import (FastMRIMaskGenerator, build_model, resolve_data_dirs,
+from train_utils import (FastMRIMaskGenerator, build_model, resolve_data_dirs, is_h5_dataset, is_multicoil_dataset,
                          simulate_undersampling, unique_model_parameters,
                          validate_resume_flattening_order, validate_resume_fixed_apt_config)
 from DcTNN.fixed_apt import resolve_fixed_apt_layout
@@ -141,8 +141,24 @@ def _seed_worker(worker_id):
     np.random.seed(worker_seed)
     random.seed(worker_seed)
 
+def _coil_combine(magnitude):
+    """
+    Root-sum-of-squares over the channel (coil) axis of a [B, C, H, W] magnitude image -> [B, 1, H, W].
+    Identity for single-channel data, so every PSNR path below works for both single- and multi-coil datasets.
+    """
+    if magnitude.ndim < 4 or magnitude.shape[1] == 1:
+        return magnitude
+    return magnitude.square().sum(dim=1, keepdim=True).sqrt()
+
+
 def _to_image_tensor(x, stats=None):
-    return reconstruction_to_image_magnitude(x, stats)
+    """Model-domain output -> RAW-unit magnitude image, RSS-combined over coils for multi-coil data."""
+    return _coil_combine(reconstruction_to_image_magnitude(x, stats))
+
+
+def _gt_image_tensor(target):
+    """Ground-truth magnitude image from the normaliser target, RSS-combined over coils for multi-coil data."""
+    return _coil_combine(target["image"] if isinstance(target, dict) else target)
 
 
 def _unpack_kspace_batch(batch):
@@ -238,7 +254,7 @@ def _compute_losses(recon, intermediates, target, final_criterion, intermediate_
     stage_psnr_gains = []
     if zf_recon is not None and stage_losses:
         with torch.no_grad():
-            gt_image = target["image"] if isinstance(target, dict) else target
+            gt_image = _gt_image_tensor(target)
             prev_img = _to_image_tensor(zf_recon, stats)
             prev_psnr = _psnr_per_sample(prev_img, gt_image)
             for stage_out in intermediates:
@@ -638,7 +654,7 @@ def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer
         optimizer.step()
 
         with torch.no_grad():
-            gt_image = target["image"] if isinstance(target, dict) else target
+            gt_image = _gt_image_tensor(target)
             recon_mag = _to_image_tensor(recon, stats)
             batch_size = gt_image.shape[0]
             total_loss += total_batch_loss.item() * batch_size
@@ -743,7 +759,7 @@ def validate(cfg, model, loader, accel_factors, image_size, final_criterion,
             stats=stats, zf_recon=model_input, mask=_loss_mask_for(cfg, mask),
         )
 
-        gt_image = target["image"] if isinstance(target, dict) else target
+        gt_image = _gt_image_tensor(target)
         recon_mag = _to_image_tensor(recon, stats)
         zf_source = model_input
         zf_mag    = _to_image_tensor(zf_source, stats)
@@ -823,7 +839,9 @@ def _new_volume_accumulator():
     return {
         "image_magnitude_sse": 0.0,
         "image_count": 0,
+        "image_peak": 0.0,
         "image_phase_sse": 0.0,
+        "phase_count": 0,
         "kspace_l1_sum": 0.0,
         "kspace_phase_sse": 0.0,
         "kspace_count": 0,
@@ -831,25 +849,34 @@ def _new_volume_accumulator():
 
 
 def _update_volume_accumulator(acc, gt_image, pred_image, gt_kspace, pred_kspace):
+    """
+    gt_image / pred_image: complex coil images [B, C, H, W]. The magnitude metrics use the RSS over the coil axis
+    (identity for C = 1), so Image Mag PSNR is RSS-vs-RSS for multi-coil data; the volume peak is the maximum of
+    the GT RSS image over the volume (computed here, not read from the file). Phase and k-space metrics are per coil.
+    """
     gt_image = gt_image.to(torch.complex128)
     pred_image = pred_image.to(torch.complex128)
     gt_kspace = gt_kspace.to(torch.complex128)
     pred_kspace = pred_kspace.to(torch.complex128)
 
-    magnitude_difference = pred_image.abs() - gt_image.abs()
+    gt_magnitude = _coil_combine(gt_image.abs())
+    magnitude_difference = _coil_combine(pred_image.abs()) - gt_magnitude
     image_phase_difference = _wrapped_phase_difference(gt_image, pred_image)
     kspace_phase_difference = _wrapped_phase_difference(gt_kspace, pred_kspace)
 
     acc["image_magnitude_sse"] += float(magnitude_difference.square().sum().item())
     acc["image_count"] += magnitude_difference.numel()
+    acc["image_peak"] = max(acc["image_peak"], float(gt_magnitude.max().item()))
     acc["image_phase_sse"] += float(image_phase_difference.square().sum().item())
+    acc["phase_count"] += image_phase_difference.numel()
     acc["kspace_l1_sum"] += float((pred_kspace - gt_kspace).abs().sum().item())
     acc["kspace_phase_sse"] += float(kspace_phase_difference.square().sum().item())
     acc["kspace_count"] += gt_kspace.numel()
 
 
-def _finalize_volume_metrics(acc, peak):
-    peak = float(peak)
+def _finalize_volume_metrics(acc, peak=None):
+    """Volume metrics; `peak` defaults to the GT (RSS) image maximum accumulated over the volume."""
+    peak = float(acc["image_peak"] if peak is None else peak)
     if not math.isfinite(peak) or peak <= 0:
         raise ValueError(f"Volume peak must be positive and finite, got {peak}.")
     if acc["image_count"] == 0 or acc["kspace_count"] == 0:
@@ -862,7 +889,7 @@ def _finalize_volume_metrics(acc, peak):
     )
     return {
         "Image Mag PSNR": image_psnr,
-        "Image Phase Loss": acc["image_phase_sse"] / acc["image_count"],
+        "Image Phase Loss": acc["image_phase_sse"] / acc["phase_count"],
         "K-space L1": acc["kspace_l1_sum"] / acc["kspace_count"],
         "K-space Phase Loss": acc["kspace_phase_sse"] / acc["kspace_count"],
     }
@@ -912,9 +939,11 @@ def evaluate_validation_set(cfg, model, device):
     max_val_files cap used by the per-epoch val loader — and compute the
     notebook-style volume metrics on unnormalized GT and unnormalized preds:
       Image Mag PSNR / Image Phase Loss / K-space L1 / K-space Phase Loss
-    (PSNR is volume-wise, peaked at the HDF5 'max' attribute for fastMRI).
+    PSNR is volume-wise. Single-coil fastMRI keeps the HDF5 'max' attribute as the peak (comparable with earlier
+    runs); multi-coil datasets use the maximum of the RSS ground-truth image computed here from the (coil-compressed)
+    k-space, so nothing but `kspace` is read from the file.
 
-    Volumes: for fastMRI each .h5 file is a volume; for OASIS the PNGs are
+    Volumes: for HDF5 datasets each .h5 file is a volume; for OASIS the PNGs are
     slices and a volume is every slice sharing a case_<id> filename prefix
     (e.g. case_441_slice_0.nii.png ... case_441_slice_26.nii.png).
 
@@ -934,7 +963,7 @@ def evaluate_validation_set(cfg, model, device):
     phase(f"Final validation-set inference on {val_data_dir}")
     volumes = []
 
-    if cfg.dataset == "fastmri":
+    if is_h5_dataset(cfg):
         h5_files = sorted(
             os.path.join(val_data_dir, f)
             for f in os.listdir(val_data_dir)
@@ -945,21 +974,21 @@ def evaluate_validation_set(cfg, model, device):
         val_volume_stats = (load_or_compute_volume_stats(val_data_dir, image_size, acceleration, cfg.center_fractions[0], cfg.kspace_key,
                                                          path=getattr(cfg, "volume_stats_path", None), verbose=False)
                             if _needs_volume_stats(cfg) else {})
+        multicoil = is_multicoil_dataset(cfg)
+        num_coils = cfg.num_channels if multicoil else None      # same crop / coil compression as the training dataset
         for file_index, path in enumerate(h5_files):
             accumulator = _new_volume_accumulator()
             vstats = val_volume_stats.get(os.path.basename(path))
             with h5py.File(path, "r") as handle:
-                if "max" not in handle.attrs:
-                    raise KeyError(f"Missing 'max' attribute in {path}.")
-                peak = float(handle.attrs["max"])
+                peak = None if multicoil else float(handle.attrs["max"]) if "max" in handle.attrs else None
                 dataset = handle[cfg.kspace_key]
                 slice_count = int(dataset.shape[0])
                 if _uses_pca_encoder(cfg):
                     # PCA stages need every slice of the volume in one batch (per-slice masks, same seeds as below)
                     fulls, uss, masks = [], [], []
                     for slice_index in range(slice_count):
-                        kf = prepare_fastmri_kspace(torch.as_tensor(dataset[slice_index], dtype=torch.complex64), image_size)
-                        kf = kf.unsqueeze(0).unsqueeze(0).to(device)
+                        kf = prepare_kspace_slice(torch.as_tensor(dataset[slice_index], dtype=torch.complex64), image_size, num_coils)
+                        kf = kf.unsqueeze(0).to(device)
                         ku, m, _ = mask_generator.apply(kf, acceleration, seed=(mask_seed, file_index, slice_index, acceleration))
                         fulls.append(kf); uss.append(ku); masks.append(m)
                     kspace_full, kspace_us, mask = torch.cat(fulls), torch.cat(uss), torch.cat(masks)
@@ -970,9 +999,8 @@ def evaluate_validation_set(cfg, model, device):
                     _update_volume_accumulator(accumulator, ifft_2d(kspace_full), pred_image, kspace_full, pred_kspace)
                 else:
                   for slice_index in range(slice_count):
-                    kspace_full = torch.as_tensor(dataset[slice_index], dtype=torch.complex64)
-                    kspace_full = prepare_fastmri_kspace(kspace_full, image_size)
-                    kspace_full = kspace_full.unsqueeze(0).unsqueeze(0).to(device)
+                    kspace_full = prepare_kspace_slice(torch.as_tensor(dataset[slice_index], dtype=torch.complex64), image_size, num_coils)
+                    kspace_full = kspace_full.unsqueeze(0).to(device)
                     kspace_us, mask, _ = mask_generator.apply(
                         kspace_full, acceleration, seed=(mask_seed, file_index, slice_index, acceleration)
                     )
@@ -1002,7 +1030,6 @@ def evaluate_validation_set(cfg, model, device):
             volume_files.setdefault(volume_id, []).append(path)
         for file_index, volume_id in enumerate(sorted(volume_files)):
             accumulator = _new_volume_accumulator()
-            peak = 0.0
             slice_count = 0
             for path in sorted(volume_files[volume_id]):
                 img = Image.open(path).convert("L")
@@ -1015,13 +1042,11 @@ def evaluate_validation_set(cfg, model, device):
                     kspace_full, acceleration, seed=(mask_seed, file_index, slice_index, acceleration)
                 )
                 pred_kspace, pred_image = _run_validation_slice(cfg, model, kspace_full, kspace_us, mask)
-                gt_image = ifft_2d(kspace_full)
-                _update_volume_accumulator(accumulator, gt_image, pred_image, kspace_full, pred_kspace)
-                peak = max(peak, float(gt_image.abs().max().item()))
+                _update_volume_accumulator(accumulator, ifft_2d(kspace_full), pred_image, kspace_full, pred_kspace)
                 slice_count += 1
             volumes.append({
                 "HDF5 volume": volume_id,
-                **_finalize_volume_metrics(accumulator, peak),
+                **_finalize_volume_metrics(accumulator),      # peak = GT image maximum over the volume
             })
             phase(f"  {volume_id} ({slice_count} slices)")
 
@@ -1070,8 +1095,12 @@ def main():
             if _needs_volume_stats(cfg):
                 raise ValueError("norm_scope='volume' / ring_phase_mag need fastMRI HDF5 volumes")
             return OASISDataset(data_dir, image_size=cfg.image_size, max_files=max_files)
+        if not is_h5_dataset(cfg):
+            raise ValueError(f"Unknown dataset {cfg.dataset!r}; choose from 'fastmri', 'fastmri_brain', 'oasis'")
         volume_stats = None
         if _needs_volume_stats(cfg):
+            if is_multicoil_dataset(cfg):
+                raise ValueError("norm_scope='volume' / ring_phase_mag (tools/volume_stats.py) only support single-coil HDF5 volumes")
             phase(f"Loading volume statistics for {data_dir} (computed and cached on first use)")
             volume_stats = load_or_compute_volume_stats(data_dir, tuple(cfg.image_size), cfg.acceleration_factors[0],
                                                         cfg.center_fractions[0], cfg.kspace_key,
@@ -1085,14 +1114,15 @@ def main():
             volume_stats=volume_stats,
             skip_starting_slice=skip_starting_slice,
             skip_ending_slice=skip_ending_slice,
+            num_coils=cfg.num_channels if is_multicoil_dataset(cfg) else None,
         )
 
     phase(f"Loading train dataset from {train_data_dir}")
     # Edge-slice skipping applies to training only; validation / inference see every slice of a volume.
     train_ds = _make_dataset(train_data_dir, max_files=cfg.max_train_files,
-                             return_metadata=cfg.dataset == "fastmri" and (_uses_pca_encoder(cfg) or _needs_volume_stats(cfg)),
+                             return_metadata=is_h5_dataset(cfg) and (_uses_pca_encoder(cfg) or _needs_volume_stats(cfg)),
                              skip_starting_slice=cfg.skip_starting_slice, skip_ending_slice=cfg.skip_ending_slice)
-    if cfg.dataset == "fastmri":
+    if is_h5_dataset(cfg):
         phase("Probing one sample to determine image size...")
         sample_shape = tuple(int(x) for x in _unpack_kspace_batch(train_ds[0])[0].shape[-2:])
         cfg.image_size = sample_shape
@@ -1101,7 +1131,7 @@ def main():
     val_ds = _make_dataset(
         val_data_dir,
         max_files=cfg.max_val_files,
-        return_metadata=cfg.dataset == "fastmri",
+        return_metadata=is_h5_dataset(cfg),
     )
 
     checkpoint = None
@@ -1137,7 +1167,7 @@ def main():
     with open(config_path, 'w') as f:
         json.dump(grouped_config, f, indent=2)
 
-    _WANDB_PROJECT = {"fastmri": "fastMRI", "oasis": "OASIS"}
+    _WANDB_PROJECT = {"fastmri": "fastMRI", "fastmri_brain": "fastMRI-brain", "oasis": "OASIS"}
     phase("Initializing Weights & Biases...")
     t_wandb = time.time()
     wandb.init(
@@ -1160,7 +1190,7 @@ def main():
 
     phase(f"Creating DataLoaders (num_workers={cfg.num_workers}, pin_memory=True)...")
     if _uses_volume_batches(cfg):
-        if cfg.dataset != "fastmri":
+        if not is_h5_dataset(cfg):
             raise ValueError("The 'pca' encoder with pca_scope='volume' needs fastMRI H5 volumes")
         vpb = cfg.pca_volumes_per_batch
         phase(f"PCA encoder: volume-grouped batches, {vpb} volume(s) per batch (batch_size ignored)")
