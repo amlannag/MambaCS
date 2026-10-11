@@ -1,10 +1,24 @@
 
 EXPERIMENTS = [
+    
     {
-        "prefix": "brain",
-        "name": "axial_complex_8vcoils_p95_slice_l2_final_r4",
-        "dataset": "fastmri_brain",
-        "num_channels": 8,
-        "axial_d_model": 320,
+        "prefix": "combined",
+        "name": "fnet_both_cross_axial5_ms13_gfilt_imgconv16x3_freqw_m3_g0.5_cap0.6_p95_slice_100ep_r4",
+        "encoders": ["fnet", "cross_axial", "axial", "axial", "axial", "axial", "axial"],
+        "attn_type": "complex_ms",
+        "attn_scales": (1, 3),
+        "fnet_token_axis": "both",
+        "fnet_share_ffn": True,
+        "global_filter": True,
+        "image_conv": True,
+        "image_conv_channels": 16,
+        "image_conv_layers": 3,
+        "image_conv_kernel": 3,
+        "final_loss_type": "freq_weighted_complex_l2",
+        "intermediate_loss_type": "freq_weighted_complex_l2",
+        "freq_weight_form": "power",
+        "freq_weight_m": 3.0,
+        "freq_weight_gamma": 0.5,
+        "freq_weight_r_cap": 0.6,
     },
 ]
