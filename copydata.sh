@@ -19,7 +19,12 @@ WORK_DIR="${WORK_DIR:-/scratch/user/uqanag/copy_t2_work}"
 
 # split name -> source folder name (under SRC_ROOT) and destination folder (under DEST_ROOT)
 # format: "dest_name:src_folder"
-SPLITS=("val:multicoil_val" "train:multicoil_train")
+SPLITS=("val:multicoil_val")   # val only (train is already submitted separately)
+
+# rsync flags. --size-only: files already in the destination with the same size are
+# skipped (even if their timestamps differ, e.g. from an earlier cp); files with a
+# different size (e.g. truncated) are re-copied.
+RSYNC_FLAGS="${RSYNC_FLAGS:--ah --size-only --info=progress2}"
 
 PATTERN="${PATTERN:-*T2*.h5}"     # change to '*AXT2*.h5' if you want to be stricter
 N_NODES="${N_NODES:-5}"           # number of chunks == number of array tasks
@@ -117,7 +122,7 @@ if [[ "$MODE" == "worker" ]]; then
   echo "To:     $dest/"
   echo "Start:  $(date)"
 
-  rsync -ah --info=progress2 --files-from="$chunk" "$src/" "$dest/"
+  rsync $RSYNC_FLAGS --files-from="$chunk" "$src/" "$dest/"
   rc=$?
 
   echo "End:    $(date)   rsync exit code: $rc"
