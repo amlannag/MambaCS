@@ -19,7 +19,7 @@ WORK_DIR="${WORK_DIR:-/scratch/user/uqanag/copy_t2_work}"
 
 # split name -> source folder name (under SRC_ROOT) and destination folder (under DEST_ROOT)
 # format: "dest_name:src_folder"
-SPLITS=("val:multicoil_val")   # val only (train is already submitted separately)
+SPLITS=("train:multicoil_train" "val:multicoil_val")
 
 # rsync flags. --size-only: files already in the destination with the same size are
 # skipped (even if their timestamps differ, e.g. from an earlier cp); files with a
@@ -31,7 +31,7 @@ N_NODES="${N_NODES:-5}"           # number of chunks == number of array tasks
 
 ACCOUNT="${ACCOUNT:-}"            # leave empty to use your default account
 PARTITION="${PARTITION:-}"        # leave empty to use the default partition
-TIME="${TIME:-04:00:00}"
+TIME="${TIME:-12:00:00}"
 CPUS="${CPUS:-2}"
 MEM="${MEM:-4G}"
 # -----------------------------------------------------------------------------
@@ -73,10 +73,15 @@ if [[ "$MODE" == "submit" ]]; then
     mkdir -p "$WORK_DIR/$split" "$DEST_ROOT/$split"
     rm -f "$WORK_DIR/$split"/part_*
 
-    # Build the list of T2 files (names only) and split it into N chunks by line
-    find "$src" -maxdepth 1 -type f -name "$PATTERN" -printf '%f\n' | sort > "$(list_file "$split")"
+    # Build the list of T2 files (names only) that are NOT yet in the destination
+    # (missing, or present with a different size), and split it into N chunks by line
+    comm -23 \
+      <(find "$src"               -maxdepth 1 -type f -name "$PATTERN" -printf '%f\t%s\n' | sort) \
+      <(find "$DEST_ROOT/$split"  -maxdepth 1 -type f -name "$PATTERN" -printf '%f\t%s\n' | sort) \
+      | cut -f1 > "$(list_file "$split")"
+    n_src=$(find "$src" -maxdepth 1 -type f -name "$PATTERN" | wc -l)
     total=$(wc -l < "$(list_file "$split")")
-    echo "[$split] found $total files matching $PATTERN in $src"
+    echo "[$split] $n_src files matching $PATTERN in $src, $total still to copy"
 
     if [[ "$total" -eq 0 ]]; then
       echo "[$split] nothing to copy, skipping"
