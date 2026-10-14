@@ -1,5 +1,6 @@
 import os
 import time
+from collections import OrderedDict
 
 import h5py
 import numpy as np
@@ -114,7 +115,7 @@ class H5MRIDataset(Dataset):
 
     def __init__(self, data_dir, image_size=(320, 320), kspace_key='kspace', max_files=None,
                  return_metadata=False, volume_stats=None, skip_starting_slice=0, skip_ending_slice=0,
-                 num_coils=None):
+                 num_coils=None, max_open_files=16):
         if skip_starting_slice < 0 or skip_ending_slice < 0:
             raise ValueError("skip_starting_slice / skip_ending_slice must be >= 0")
         if num_coils is not None and num_coils < 1:
@@ -127,7 +128,11 @@ class H5MRIDataset(Dataset):
         self.skip_ending_slice = int(skip_ending_slice)
         # optional {fname: {"sigma_raw", "p95_vol"}} (tools/volume_stats.py); returned in the metadata when present
         self.volume_stats = volume_stats or {}
-        self._file_handles = {}
+        # LRU cache of open h5py handles, bounded per process: with ~1000 shuffled multi-coil volumes every
+        # DataLoader worker would otherwise end up holding every file open (HDF5 metadata / chunk caches per
+        # file), and host memory grows over the epoch until the worker is OOM-killed.
+        self._file_handles = OrderedDict()
+        self.max_open_files = max_open_files
 
         h5_files = sorted(
             os.path.join(data_dir, f)
@@ -166,9 +171,18 @@ class H5MRIDataset(Dataset):
         worker = get_worker_info()
         worker_id = worker.id if worker is not None else None
         handle_key = (worker_id, fpath)
-        if handle_key not in self._file_handles:
-            self._file_handles[handle_key] = h5py.File(fpath, 'r')
-        return self._file_handles[handle_key]
+        handle = self._file_handles.get(handle_key)
+        if handle is None:
+            while len(self._file_handles) >= self.max_open_files:
+                _, oldest = self._file_handles.popitem(last=False)
+                try:
+                    oldest.close()
+                except Exception:
+                    pass
+            handle = self._file_handles[handle_key] = h5py.File(fpath, 'r')
+        else:
+            self._file_handles.move_to_end(handle_key)
+        return handle
 
     def __len__(self):
         return len(self.index)

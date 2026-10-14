@@ -6,6 +6,8 @@ EXPERIMENTS = [
         "dataset": "fastmri_brain",
         "num_channels": 8,
         "axial_d_model": 320,
+        "batch_size": 32,
+        "batch_size_search_start": 32,
         "encoders": ["fnet", "cross_axial", "axial", "axial", "axial", "axial", "axial"],
         "attn_type": "complex_ms",
         "attn_scales": (1, 3),
