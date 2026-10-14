@@ -2,7 +2,7 @@
 EXPERIMENTS = [
     {
         "prefix": "fastmri",
-        "name": "axial_vertical3_singlecoil_complex_l2_learned_lambda_r4",
+        "name": "axial_vertical3_singlecoil_complex_l2_learned_lambda_single_scale1_r4",
         "dataset": "fastmri",
         "num_channels": 1,
         "axial_d_model": 320,
@@ -11,7 +11,7 @@ EXPERIMENTS = [
         "encoders": ["axial", "axial", "axial"],
         "axial_token_axis": "vertical",
         "attn_type": "complex_ms",
-        "attn_scales": (1, 3),
+        "attn_scales": (1,),
         "lambda_schedule": "none",
         "ffn_sharing": "global",
         "global_filter": False,
