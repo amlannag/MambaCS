@@ -19,7 +19,7 @@ WORK_DIR="${WORK_DIR:-/scratch/user/uqanag/copy_t2_work}"
 
 # split name -> source folder name (under SRC_ROOT) and destination folder (under DEST_ROOT)
 # format: "dest_name:src_folder"
-SPLITS=("train:multicoil_train" "val:multicoil_val")
+SPLITS=("train:multicoil_train")   # train only (val is already copied)
 
 # rsync flags. --size-only: files already in the destination with the same size are
 # skipped (even if their timestamps differ, e.g. from an earlier cp); files with a

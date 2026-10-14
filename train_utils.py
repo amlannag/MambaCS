@@ -23,8 +23,8 @@ DATASET_DIRS = {
         "/scratch/user/uqanag/OASIS/keras_png_slices_validate",
     ),
     "fastmri_brain": (
-        "/QRISdata/Q9618/brain/multicoil_train",
-        "/QRISdata/Q9618/brain/multicoil_val",
+        "/scratch/user/uqanag/fastmri_brain/train",
+        "/scratch/user/uqanag/fastmri_brain/val",
     ),
 }
 
