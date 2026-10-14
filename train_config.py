@@ -2,7 +2,7 @@
 EXPERIMENTS = [
     {
         "prefix": "brain",
-        "name": "axial3_2layers_multicoil8_complex_scale1_l2_final_only_learned_lambda_r4_100epochs",
+        "name": "axial3_2layers_multicoil8_complex_scale1_l2_final_only_learned_lambda_r4_grappa_prefill_100epochs",
         "dataset": "fastmri_brain",
         "num_channels": 8,
         "image_size": (320, 320),
@@ -19,6 +19,7 @@ EXPERIMENTS = [
         "ffn_sharing": "global",
         "learning": "k_space",
         "norm": "fastmri_magnitude",
+        "kspace_fill": "grappa",
         "acceleration_factors": [4],
         "center_fractions": [0.08],
         "mask_type": "random",

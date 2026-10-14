@@ -90,7 +90,8 @@ def config_to_dict(cfg):
     flat["apt_layout"] = resolve_fixed_apt_layout(flat.get("apt_layout"))
     data_keys = {
         "dataset", "data_dir", "val_data_dir", "kspace_key", "image_size",
-        "num_channels", "acceleration_factors", "center_fractions", "mask_type",
+        "num_channels", "acceleration_factors", "center_fractions", "mask_type", "kspace_fill",
+        "grappa_phase_lines", "grappa_readout_width", "grappa_ridge",
         "val_fraction", "seed", "max_train_files", "max_val_files", "skip_starting_slice", "skip_ending_slice", "norm",
         "robust_clip", "robust_shift", "companding_p", "companding_a", "companding_centering", "norm_quantile",
     }
@@ -514,7 +515,7 @@ def _probe_batch_candidate(cfg, dataset, batch_size, device, checkpoint=None):
                 kspace_full, _ = _unpack_kspace_batch(next(probe_iterator))
             kspace_full = kspace_full.to(device)
             acceleration = cfg.acceleration_factors[step % len(cfg.acceleration_factors)]
-            kspace_us, mask, _ = mask_generator.apply(
+            kspace_us, mask, num_low_frequencies = mask_generator.apply(
                 kspace_full,
                 acceleration,
                 seed=(cfg.seed, step, int(acceleration)),
@@ -527,6 +528,10 @@ def _probe_batch_candidate(cfg, dataset, batch_size, device, checkpoint=None):
                     cfg.norm,
                     kspace_us=kspace_us,
                     kspace_fill=cfg.kspace_fill,
+                    num_low_frequencies=num_low_frequencies,
+                    grappa_phase_lines=cfg.grappa_phase_lines,
+                    grappa_readout_width=cfg.grappa_readout_width,
+                    grappa_ridge=cfg.grappa_ridge,
                     robust_clip=cfg.robust_clip,
                     robust_shift=cfg.robust_shift,
                     companding_p=cfg.companding_p,
@@ -618,7 +623,7 @@ def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer
         volume_id = _volume_ids(cfg, fnames, device)
         volume_kwargs = _volume_kwargs(cfg, batch, device)
         R    = accel_factors[int(accel_rng.integers(len(accel_factors)))]
-        kspace_us, mask, _ = mask_generator.apply(
+        kspace_us, mask, num_low_frequencies = mask_generator.apply(
             kspace_full,
             R,
             seed=(cfg.seed, epoch, batch_idx, int(R)),
@@ -632,6 +637,10 @@ def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer
                 cfg.norm,
                 kspace_us=kspace_us,
                 kspace_fill=cfg.kspace_fill,
+                num_low_frequencies=num_low_frequencies,
+                grappa_phase_lines=cfg.grappa_phase_lines,
+                grappa_readout_width=cfg.grappa_readout_width,
+                grappa_ridge=cfg.grappa_ridge,
                 robust_clip=cfg.robust_clip,
                 robust_shift=cfg.robust_shift,
                 companding_p=cfg.companding_p,
@@ -734,7 +743,7 @@ def validate(cfg, model, loader, accel_factors, image_size, final_criterion,
         volume_id = _volume_ids(cfg, fnames, device)
         volume_kwargs = _volume_kwargs(cfg, batch, device)
         R    = accel_factors[batch_idx % len(accel_factors)]
-        kspace_us, mask, _ = mask_generator.apply(kspace_full, R, seed=(cfg.seed, batch_idx, int(R)))
+        kspace_us, mask, num_low_frequencies = mask_generator.apply(kspace_full, R, seed=(cfg.seed, batch_idx, int(R)))
 
         model_input, DC_input, target, stats = simulate_undersampling(
             kspace_full,
@@ -743,6 +752,10 @@ def validate(cfg, model, loader, accel_factors, image_size, final_criterion,
             cfg.norm,
             kspace_us=kspace_us,
             kspace_fill=cfg.kspace_fill,
+            num_low_frequencies=num_low_frequencies,
+            grappa_phase_lines=cfg.grappa_phase_lines,
+            grappa_readout_width=cfg.grappa_readout_width,
+            grappa_ridge=cfg.grappa_ridge,
             robust_clip=cfg.robust_clip,
             robust_shift=cfg.robust_shift,
             companding_p=cfg.companding_p,
@@ -904,7 +917,8 @@ def _oasis_slice_number(path):
 
 
 @torch.no_grad()
-def _run_validation_slice(cfg, model, kspace_full, kspace_us, mask, volume_id=None, volume_stats=None):
+def _run_validation_slice(cfg, model, kspace_full, kspace_us, mask, num_low_frequencies=None,
+                         volume_id=None, volume_stats=None):
     extra = {}
     if volume_stats is not None:
         n = kspace_full.shape[0]
@@ -918,6 +932,10 @@ def _run_validation_slice(cfg, model, kspace_full, kspace_us, mask, volume_id=No
         cfg.norm,
         kspace_us=kspace_us,
         kspace_fill=cfg.kspace_fill,
+        num_low_frequencies=num_low_frequencies,
+        grappa_phase_lines=cfg.grappa_phase_lines,
+        grappa_readout_width=cfg.grappa_readout_width,
+        grappa_ridge=cfg.grappa_ridge,
         robust_clip=cfg.robust_clip,
         robust_shift=cfg.robust_shift,
         companding_p=cfg.companding_p,
@@ -989,11 +1007,12 @@ def evaluate_validation_set(cfg, model, device):
                     for slice_index in range(slice_count):
                         kf = prepare_kspace_slice(torch.as_tensor(dataset[slice_index], dtype=torch.complex64), image_size, num_coils)
                         kf = kf.unsqueeze(0).to(device)
-                        ku, m, _ = mask_generator.apply(kf, acceleration, seed=(mask_seed, file_index, slice_index, acceleration))
+                        ku, m, num_low_frequencies = mask_generator.apply(kf, acceleration, seed=(mask_seed, file_index, slice_index, acceleration))
                         fulls.append(kf); uss.append(ku); masks.append(m)
                     kspace_full, kspace_us, mask = torch.cat(fulls), torch.cat(uss), torch.cat(masks)
                     pred_kspace, pred_image = _run_validation_slice(
                         cfg, model, kspace_full, kspace_us, mask,
+                        num_low_frequencies=num_low_frequencies,
                         volume_id=torch.zeros(slice_count, dtype=torch.long, device=device), volume_stats=vstats,
                     )
                     _update_volume_accumulator(accumulator, ifft_2d(kspace_full), pred_image, kspace_full, pred_kspace)
@@ -1001,11 +1020,12 @@ def evaluate_validation_set(cfg, model, device):
                   for slice_index in range(slice_count):
                     kspace_full = prepare_kspace_slice(torch.as_tensor(dataset[slice_index], dtype=torch.complex64), image_size, num_coils)
                     kspace_full = kspace_full.unsqueeze(0).to(device)
-                    kspace_us, mask, _ = mask_generator.apply(
+                    kspace_us, mask, num_low_frequencies = mask_generator.apply(
                         kspace_full, acceleration, seed=(mask_seed, file_index, slice_index, acceleration)
                     )
                     pred_kspace, pred_image = _run_validation_slice(
-                        cfg, model, kspace_full, kspace_us, mask, volume_stats=vstats
+                        cfg, model, kspace_full, kspace_us, mask,
+                        num_low_frequencies=num_low_frequencies, volume_stats=vstats,
                     )
                     _update_volume_accumulator(
                         accumulator, ifft_2d(kspace_full), pred_image, kspace_full, pred_kspace
@@ -1038,10 +1058,12 @@ def evaluate_validation_set(cfg, model, device):
                 kspace = torch.fft.fftshift(torch.fft.fft2(torch.fft.ifftshift(img_t), norm="ortho"))
                 kspace_full = kspace.unsqueeze(0).unsqueeze(0).to(torch.complex64).to(device)
                 slice_index = _oasis_slice_number(path)
-                kspace_us, mask, _ = mask_generator.apply(
+                kspace_us, mask, num_low_frequencies = mask_generator.apply(
                     kspace_full, acceleration, seed=(mask_seed, file_index, slice_index, acceleration)
                 )
-                pred_kspace, pred_image = _run_validation_slice(cfg, model, kspace_full, kspace_us, mask)
+                pred_kspace, pred_image = _run_validation_slice(
+                    cfg, model, kspace_full, kspace_us, mask, num_low_frequencies=num_low_frequencies,
+                )
                 _update_volume_accumulator(accumulator, ifft_2d(kspace_full), pred_image, kspace_full, pred_kspace)
                 slice_count += 1
             volumes.append({
@@ -1184,6 +1206,7 @@ def main():
     print(f"Image size : {cfg.image_size}")
     print(f"Batch size : {cfg.batch_size}")
     print(f"Accel      : R = {cfg.acceleration_factors}  |  mask={cfg.mask_type}  |  center_fractions={cfg.center_fractions}")
+    print(f"Input fill : {cfg.kspace_fill}")
 
     train_generator = torch.Generator().manual_seed(cfg.seed)
     val_generator = torch.Generator().manual_seed(cfg.seed)

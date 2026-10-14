@@ -2,6 +2,7 @@
 Shared helpers used by training and inference.
 """
 
+import numpy as np
 import torch
 from fastmri.data.subsample import EquiSpacedMaskFunc, RandomMaskFunc
 from fastmri.data.transforms import apply_mask
@@ -542,7 +543,7 @@ _NORMALIZERS = {
 }
 
 
-KSPACE_FILL_STRATEGIES = {"linear", "cartesian_linear", "exponential", "inverse_distance"}
+KSPACE_FILL_STRATEGIES = {"linear", "cartesian_linear", "exponential", "inverse_distance", "grappa"}
 
 
 def _mask_to_2d(mask):
@@ -558,12 +559,210 @@ def _mask_to_2d(mask):
     raise ValueError(f"Cannot interpret mask with shape {tuple(mask.shape)} as a 2D Cartesian mask")
 
 
+def _grappa_source_offsets(target_column, acquired_columns, source_line_count, acs_width):
+    candidates = []
+    for start in range(acquired_columns.size - source_line_count + 1):
+        sources = acquired_columns[start:start + source_line_count]
+        offsets = tuple((sources - target_column).astype(int).tolist())
+        calibration_start = max(0, -min(offsets))
+        calibration_stop = min(acs_width - 1, acs_width - 1 - max(offsets))
+        if calibration_start <= calibration_stop:
+            candidates.append((int(abs(sources - target_column).sum()), offsets))
+    return min(candidates)[1] if candidates else None
+
+
+def _grappa_source_features(kspace, target_column, phase_offsets, readout_offsets):
+    _, height, width = kspace.shape
+    rows = np.arange(height)
+    features = []
+    for phase_offset in phase_offsets:
+        column = target_column + phase_offset
+        if not 0 <= column < width:
+            raise ValueError(f"GRAPPA source column {column} is outside k-space.")
+        for readout_offset in readout_offsets:
+            source_rows = np.clip(rows + readout_offset, 0, height - 1)
+            features.append(kspace[:, source_rows, column].T)
+    return np.concatenate(features, axis=1).astype(np.complex128, copy=False)
+
+
+def _grappa_calibrate_pattern(kspace, acs_start, acs_stop, phase_offsets, readout_offsets, ridge):
+    _, height, _ = kspace.shape
+    targets = [
+        column for column in range(acs_start, acs_stop)
+        if all(acs_start <= column + offset < acs_stop for offset in phase_offsets)
+    ]
+    if not targets:
+        raise ValueError(f"No ACS training targets for GRAPPA source offsets {phase_offsets}.")
+
+    x = np.concatenate([
+        _grappa_source_features(kspace, column, phase_offsets, readout_offsets)
+        for column in targets
+    ], axis=0)
+    y = np.concatenate([kspace[:, :, column].T for column in targets], axis=0)
+    y = y.astype(np.complex128, copy=False)
+    gram = x.conj().T @ x
+    scale = max(float(gram.diagonal().real.mean()), np.finfo(np.float64).eps)
+    regularized = gram + ridge * scale * np.eye(gram.shape[0], dtype=np.complex128)
+    return np.linalg.solve(regularized, x.conj().T @ y)
+
+
+def _grappa_prefill_sample(kspace_us, line_mask, num_low_frequencies,
+                           phase_line_count, readout_kernel_width, ridge):
+    coils, height, width = kspace_us.shape
+    if phase_line_count < 1:
+        raise ValueError("grappa_phase_lines must be positive.")
+    if readout_kernel_width < 1 or readout_kernel_width % 2 != 1:
+        raise ValueError("grappa_readout_width must be an odd positive number.")
+    if ridge < 0:
+        raise ValueError("grappa_ridge must be non-negative.")
+
+    acs_start = (width - num_low_frequencies + 1) // 2
+    acs_stop = acs_start + num_low_frequencies
+    if not 0 < num_low_frequencies <= width or not np.all(line_mask[acs_start:acs_stop]):
+        raise ValueError("The GRAPPA ACS region must be fully sampled and fit the phase-encode width.")
+
+    acquired_columns = np.flatnonzero(line_mask)
+    missing_columns = np.flatnonzero(~line_mask)
+    patterns = {
+        int(column): offsets
+        for column in missing_columns
+        if (offsets := _grappa_source_offsets(
+            int(column), acquired_columns, phase_line_count, acs_stop - acs_start,
+        )) is not None
+    }
+    readout_radius = readout_kernel_width // 2
+    readout_offsets = tuple(range(-readout_radius, readout_radius + 1))
+    weights = {
+        offsets: _grappa_calibrate_pattern(
+            kspace_us, acs_start, acs_stop, offsets, readout_offsets, ridge,
+        )
+        for offsets in set(patterns.values())
+    }
+
+    reconstructed = kspace_us.copy()
+    for column, offsets in patterns.items():
+        features = _grappa_source_features(kspace_us, column, offsets, readout_offsets)
+        reconstructed[:, :, column] = (features @ weights[offsets]).T
+    return reconstructed
+
+
+def _grappa_batch_features(kspace, target_column, phase_offsets, readout_offsets):
+    _, _, height, width = kspace.shape
+    rows = np.arange(height)
+    features = []
+    for phase_offset in phase_offsets:
+        column = target_column + phase_offset
+        if not 0 <= column < width:
+            raise ValueError(f"GRAPPA source column {column} is outside k-space.")
+        for readout_offset in readout_offsets:
+            source_rows = np.clip(rows + readout_offset, 0, height - 1)
+            features.append(kspace[:, :, source_rows, column].transpose(0, 2, 1))
+    return np.concatenate(features, axis=2).astype(np.complex128, copy=False)
+
+
+def _grappa_prefill_batch(kspace_us, line_mask, num_low_frequencies,
+                          phase_line_count, readout_kernel_width, ridge):
+    _, _, _, width = kspace_us.shape
+    acs_start = (width - num_low_frequencies + 1) // 2
+    acs_stop = acs_start + num_low_frequencies
+    if not 0 < num_low_frequencies <= width or not np.all(line_mask[acs_start:acs_stop]):
+        raise ValueError("The GRAPPA ACS region must be fully sampled and fit the phase-encode width.")
+
+    acquired_columns = np.flatnonzero(line_mask)
+    missing_columns = np.flatnonzero(~line_mask)
+    patterns = {
+        int(column): offsets
+        for column in missing_columns
+        if (offsets := _grappa_source_offsets(
+            int(column), acquired_columns, phase_line_count, acs_stop - acs_start,
+        )) is not None
+    }
+    readout_radius = readout_kernel_width // 2
+    readout_offsets = tuple(range(-readout_radius, readout_radius + 1))
+    weights = {}
+    identity = None
+    for offsets in set(patterns.values()):
+        targets = [
+            column for column in range(acs_start, acs_stop)
+            if all(acs_start <= column + offset < acs_stop for offset in offsets)
+        ]
+        if not targets:
+            raise ValueError(f"No ACS training targets for GRAPPA source offsets {offsets}.")
+        x = np.concatenate([
+            _grappa_batch_features(kspace_us, column, offsets, readout_offsets)
+            for column in targets
+        ], axis=1)
+        y = np.concatenate([
+            kspace_us[:, :, :, column].transpose(0, 2, 1)
+            for column in targets
+        ], axis=1).astype(np.complex128, copy=False)
+        gram = x.conj().transpose(0, 2, 1) @ x
+        scale = np.maximum(
+            gram.diagonal(axis1=1, axis2=2).real.mean(axis=1),
+            np.finfo(np.float64).eps,
+        )
+        if identity is None or identity.shape[0] != gram.shape[1]:
+            identity = np.eye(gram.shape[1], dtype=np.complex128)
+        regularized = gram + ridge * scale[:, None, None] * identity
+        rhs = x.conj().transpose(0, 2, 1) @ y
+        weights[offsets] = np.linalg.solve(regularized, rhs)
+
+    reconstructed = kspace_us.copy()
+    for column, offsets in patterns.items():
+        features = _grappa_batch_features(kspace_us, column, offsets, readout_offsets)
+        reconstructed[:, :, :, column] = (features @ weights[offsets]).transpose(0, 2, 1)
+    return reconstructed
+
+
 @torch.no_grad()
-def interpolate_kspace_us(kspace_us, mask, strategy):
+def grappa_prefill_kspace_us(kspace_us, mask, num_low_frequencies,
+                             phase_line_count=2, readout_kernel_width=3, ridge=1e-1):
+    if kspace_us.ndim != 4 or kspace_us.shape[1] < 2:
+        raise ValueError(f"GRAPPA prefill expects multicoil [B, C>=2, H, W] k-space, got {tuple(kspace_us.shape)}")
+    batch_size, _, _, width = kspace_us.shape
+    line_masks = mask.detach().to(device="cpu", dtype=torch.bool).reshape(-1, width).numpy()
+    if line_masks.shape[0] == 1:
+        line_masks = np.repeat(line_masks, batch_size, axis=0)
+    elif line_masks.shape[0] != batch_size:
+        raise ValueError(f"Mask batch dimension {line_masks.shape[0]} does not match k-space batch {batch_size}.")
+
+    low_frequencies = torch.as_tensor(num_low_frequencies).detach().cpu().reshape(-1).numpy()
+    if low_frequencies.size == 1:
+        low_frequencies = np.repeat(low_frequencies, batch_size)
+    elif low_frequencies.size != batch_size:
+        raise ValueError("num_low_frequencies must be scalar or contain one value per batch item.")
+
+    samples = kspace_us.detach().cpu().numpy()
+    if np.all(line_masks == line_masks[0]) and np.all(low_frequencies == low_frequencies[0]):
+        filled = _grappa_prefill_batch(
+            samples,
+            line_masks[0],
+            int(low_frequencies[0]),
+            phase_line_count,
+            readout_kernel_width,
+            ridge,
+        )
+    else:
+        filled = np.stack([
+            _grappa_prefill_sample(
+                samples[index],
+                line_masks[index],
+                int(low_frequencies[index]),
+                phase_line_count,
+                readout_kernel_width,
+                ridge,
+            )
+            for index in range(batch_size)
+        ])
+    return torch.as_tensor(filled, device=kspace_us.device, dtype=kspace_us.dtype)
+
+
+@torch.no_grad()
+def interpolate_kspace_us(kspace_us, mask, strategy, num_low_frequencies=None,
+                          grappa_phase_lines=2, grappa_readout_width=3, grappa_ridge=1e-1):
     """
     Replace the zero-filled unmeasured k-space with an interpolated estimate.
 
-    Only Cartesian full-column masks are supported (see DcTNN/radial_interpolation.py).
     Measured points are preserved exactly; only unmeasured points are filled. The returned
     tensor is only meant as the MODEL INPUT — data consistency still uses the raw measured
     k-space (simulate_undersampling returns the measured k-space as the DC input).
@@ -572,9 +771,16 @@ def interpolate_kspace_us(kspace_us, mask, strategy):
         raise ValueError(
             f"Unknown kspace_fill strategy '{strategy}'. Choose from: {sorted(KSPACE_FILL_STRATEGIES)}"
         )
+    if strategy == "grappa":
+        if num_low_frequencies is None:
+            raise ValueError("num_low_frequencies is required for GRAPPA prefill.")
+        return grappa_prefill_kspace_us(
+            kspace_us, mask, num_low_frequencies, grappa_phase_lines, grappa_readout_width, grappa_ridge,
+        )
+
     from DcTNN.radial_interpolation import radial_complex_interpolate
 
-    if kspace_us.ndim != 4:
+    if kspace_us.ndim != 4 or kspace_us.shape[1] != 1:
         raise ValueError(f"Expected [B, 1, H, W] k-space, got {tuple(kspace_us.shape)}")
     mask2d = _mask_to_2d(mask).to(device=kspace_us.device)
     filled = []
@@ -600,6 +806,10 @@ def simulate_undersampling(
     volume_scale=None,
     sigma_raw=None,
     norm_quantile: float = 0.95,
+    num_low_frequencies=None,
+    grappa_phase_lines: int = 2,
+    grappa_readout_width: int = 3,
+    grappa_ridge: float = 1e-1,
 ):
     """
     volume_scale : optional [B] volume-wise normalisation scale (fastmri_magnitude / log_quantile, k_space learning):
@@ -616,15 +826,22 @@ def simulate_undersampling(
     norm="log_quantile" : log1p(|k| / q_p) with preserved phase, q_p = norm_quantile of the zero-filled |k| (k_space only)
     norm=None     : no normalisation — tensors left in raw k-space units
     kspace_fill  : pre-fill the unmeasured k-space before normalisation instead of zero-filling.
-                   One of "linear", "cartesian_linear", "exponential", "inverse_distance"
-                   (see DcTNN/radial_interpolation.py). None/"none"/"zero_fill" = zero-fill.
-                   The filled k-space is used as the model input; the raw measured k-space is
-                   still returned as the DC input.
+                   One of "linear", "cartesian_linear", "exponential", "inverse_distance", "grappa",
+                   or None/"none"/"zero_fill" = zero-fill. The filled k-space is used as the model
+                   input; the raw measured k-space is still returned as the DC input.
     """
     measured = kspace_full * mask if kspace_us is None else kspace_us
     prefilled = kspace_fill not in (None, "none", "zero_fill")
     if prefilled:
-        model_kspace = interpolate_kspace_us(measured, mask, kspace_fill)
+        model_kspace = interpolate_kspace_us(
+            measured,
+            mask,
+            kspace_fill,
+            num_low_frequencies=num_low_frequencies,
+            grappa_phase_lines=grappa_phase_lines,
+            grappa_readout_width=grappa_readout_width,
+            grappa_ridge=grappa_ridge,
+        )
     else:
         model_kspace = measured
     fn = _NORMALIZERS.get(norm)

@@ -157,12 +157,12 @@ class Config:
     # Quantile of the zero-filled magnitude that is pinned to 1 by "fastmri_magnitude" / "image_magnitude" / "log_quantile"
     # (0.95 = p95 default, 1.0 = max). Ignored when norm_scope="volume" (the cached volume p95 is used instead).
     norm_quantile: float = 0.95
-    # Pre-fill the undersampled (unmeasured) k-space BEFORE normalisation instead of
-    # zero-filling: "linear", "cartesian_linear", "exponential", "inverse_distance"
-    # (see DcTNN/radial_interpolation.py), or None/"zero_fill" for standard zero-fill.
-    # Only Cartesian full-column masks are supported. The fill only affects the model input;
-    # data consistency still uses the raw measured k-space.
+    # Pre-fill undersampled k-space before normalisation: interpolation strategies, "grappa",
+    # or None/"zero_fill". The fill only affects model input; data consistency uses measured k-space.
     kspace_fill: Optional[str] = None
+    grappa_phase_lines: int = 2
+    grappa_readout_width: int = 3
+    grappa_ridge: float = 1e-1
     robust_clip: float = 3.0
     robust_shift: float = 3.0
     companding_p: float = 0.8

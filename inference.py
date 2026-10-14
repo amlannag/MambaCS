@@ -26,7 +26,8 @@ from normalizer import invert_normalization, reconstruction_to_image_magnitude
 # Fields that belong in cfg['data'] vs cfg['model'] for notebook consumers.
 _DATA_KEYS = {
     "dataset", "data_dir", "val_data_dir", "kspace_key", "image_size",
-    "num_channels", "acceleration_factors", "center_fractions", "mask_type",
+    "num_channels", "acceleration_factors", "center_fractions", "mask_type", "kspace_fill",
+    "grappa_phase_lines", "grappa_readout_width", "grappa_ridge",
     "val_fraction", "seed", "max_train_files", "max_val_files", "skip_starting_slice", "skip_ending_slice",
     "norm", "robust_clip", "robust_shift",
     "companding_p", "companding_a", "companding_centering", "norm_quantile",
