@@ -34,9 +34,23 @@ def center_crop_complex(arr: torch.Tensor, out_h: int, out_w: int) -> torch.Tens
     return arr[..., h0:h0 + out_h, w0:w0 + out_w]
 
 
+def center_pad_kspace(kspace: torch.Tensor, min_h: int, min_w: int) -> torch.Tensor:
+    """
+    Zero-pad k-space symmetrically about DC so each of the last two dims is at least (min_h, min_w).
+    Volumes acquired with fewer phase-encode lines (e.g. fastMRI brain 640x272 next to 640x320) are padded the same way
+    the scanner pads reduced phase-resolution scans: the outer k-space lines are zero, the image FOV / pixel size is unchanged.
+    """
+    h, w = kspace.shape[-2:]
+    pad_h, pad_w = max(min_h - h, 0), max(min_w - w, 0)
+    if pad_h == 0 and pad_w == 0:
+        return kspace
+    return torch.nn.functional.pad(kspace, (pad_w // 2, pad_w - pad_w // 2, pad_h // 2, pad_h - pad_h // 2))
+
+
 def prepare_fastmri_kspace(kspace: torch.Tensor, image_size: tuple[int, int]) -> torch.Tensor:
-    """Centred IFFT -> image-domain centre crop -> centred FFT. Acts on the last two dims, so a (coils, H, W) slice is cropped per coil."""
-    image = centered_ifft2(kspace)
+    """Centred IFFT -> image-domain centre crop -> centred FFT. Acts on the last two dims, so a (coils, H, W) slice is cropped per coil.
+    k-space narrower than image_size (fewer acquired phase-encode lines) is zero-padded about DC first."""
+    image = centered_ifft2(center_pad_kspace(kspace, *image_size))
     image = center_crop_complex(image, *image_size)
     return centered_fft2(image)
 
