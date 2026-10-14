@@ -3,8 +3,8 @@
 # Uses SSH ControlMaster so you only authenticate (Okta MFA) once per run.
 
 REMOTE_HOST="uqanag@bunya.rcc.uq.edu.au"
-REMOTE_BASE="/scratch/user/uqanag"          # was .../prostate; your knee files live under knee
-LOCAL_BASE="$HOME/Desktop/MambaCS/Data"
+REMOTE_BASE="/scratch/user/uqanag/fastmri_brain/train"
+LOCAL_BASE="$HOME/Desktop/MambaCS/data/Brain Multicoil"
 CONTROL_PATH="$HOME/.ssh/controlmasters/%r@%h:%p"
 
 mkdir -p "$LOCAL_BASE" "$HOME/.ssh/controlmasters"
@@ -16,10 +16,14 @@ ssh -MNf -o ControlMaster=yes -o ControlPath="$CONTROL_PATH" -o ControlPersist=1
 cleanup() { ssh -O exit -o ControlPath="$CONTROL_PATH" "$REMOTE_HOST" 2>/dev/null; }
 trap cleanup EXIT
 
-# Paths are relative to REMOTE_BASE. Each entry can be a file or a folder.
+# Download only these files from the brain multi-coil training directory.
 ITEMS=(
-  fastmri_knee      # a file
-  fastmri_prostate                   # a folder (copied INTO LOCAL_BASE as LOCAL_BASE/some_folder)
+  file_brain_AXT2_201_2010181.h5
+  file_brain_AXT2_201_2010187.h5
+  file_brain_AXT2_201_2010188.h5
+  file_brain_AXT2_201_2010193.h5
+  file_brain_AXT2_201_2010195.h5
+  file_brain_AXT2_201_2010196.h5
 )
 
 failed=()
