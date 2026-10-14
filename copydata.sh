@@ -24,14 +24,14 @@ SPLITS=("train:multicoil_train")   # train only (val is already copied)
 # rsync flags. --size-only: files already in the destination with the same size are
 # skipped (even if their timestamps differ, e.g. from an earlier cp); files with a
 # different size (e.g. truncated) are re-copied.
-RSYNC_FLAGS="${RSYNC_FLAGS:--ah --size-only --info=progress2}"
+RSYNC_FLAGS="${RSYNC_FLAGS:--ah --size-only --partial --info=progress2}"
 
 PATTERN="${PATTERN:-*T2*.h5}"     # change to '*AXT2*.h5' if you want to be stricter
-N_NODES="${N_NODES:-5}"           # number of chunks == number of array tasks
+N_NODES="${N_NODES:-8}"           # number of chunks == number of array tasks
 
 ACCOUNT="${ACCOUNT:-}"            # leave empty to use your default account
 PARTITION="${PARTITION:-}"        # leave empty to use the default partition
-TIME="${TIME:-12:00:00}"
+TIME="${TIME:-24:00:00}"          # wall time per array task; the earlier 4h default was hit before the copy finished
 CPUS="${CPUS:-2}"
 MEM="${MEM:-4G}"
 # -----------------------------------------------------------------------------
@@ -130,7 +130,11 @@ if [[ "$MODE" == "worker" ]]; then
   rsync $RSYNC_FLAGS --files-from="$chunk" "$src/" "$dest/"
   rc=$?
 
-  echo "End:    $(date)   rsync exit code: $rc"
+  # How many files of this chunk are still missing / size-mismatched in the destination
+  remaining=$(comm -23 \
+    <(while read -r f; do [[ -f "$src/$f" ]] && printf '%s\t%s\n' "$f" "$(stat -c %s "$src/$f")"; done < "$chunk" | sort) \
+    <(while read -r f; do [[ -f "$dest/$f" ]] && printf '%s\t%s\n' "$f" "$(stat -c %s "$dest/$f")"; done < "$chunk" | sort) | wc -l)
+  echo "End:    $(date)   rsync exit code: $rc   files still to copy in this chunk: $remaining"
   exit $rc
 fi
 
