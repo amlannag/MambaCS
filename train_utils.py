@@ -112,6 +112,7 @@ _ENCODER_ARGS = {
             attn_type=cfg.attn_type,
             row_stride=cfg.axial_row_stride,
             mask_vertical_attn=cfg.mask_vertical_attn,
+            token_axis=getattr(cfg, "axial_token_axis", "both"),
             attn_scales=tuple(getattr(cfg, "attn_scales", (1, 3))),
             kspace_stem=_kspace_stem_args(cfg),
         ),
@@ -465,6 +466,7 @@ def build_model_from_config_dict(cfg_dict):
     cfg.rope_theta = model_cfg.get("rope_theta", 100.0)
     cfg.rope_mixed_rotate = model_cfg.get("rope_mixed_rotate", True)
     cfg.axial_row_stride = model_cfg.get("axial_row_stride", 1)
+    cfg.axial_token_axis = model_cfg.get("axial_token_axis", "both")
     cfg.mask_vertical_attn = model_cfg.get("mask_vertical_attn", "none")
     cfg.ffn_sharing = model_cfg.get("ffn_sharing", "none")
     cfg.flattening_order = model_cfg.get("flattening_order", "row_major")

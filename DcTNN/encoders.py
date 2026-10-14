@@ -265,15 +265,22 @@ class axialEncoder(nn.Module):
                     device=None, dtype=None, norm=None,
                     pos_emb_type="APE", rope_theta=100.0, attn_type="standard", row_stride=1,
                     mask_vertical_attn="none", ffn_sharing="none", shared_ffn=None,
-                    flattening_order="row_major", attn_scales=(1, 3), kspace_stem=None):
+                    flattening_order="row_major", attn_scales=(1, 3), kspace_stem=None, token_axis="both"):
         super().__init__()
 
+        if token_axis not in ("both", "vertical"):
+            raise ValueError(f"token_axis must be 'both' or 'vertical', got '{token_axis}'")
+        if token_axis == "vertical" and row_stride != 1:
+            raise ValueError("row_stride only applies to horizontal tokens; use row_stride=1 with token_axis='vertical'")
+        self.token_axis = token_axis
         self.pos_emb_type = pos_emb_type
         self.d_model = d_model
         self.is_complex = attn_type in _COMPLEX_ATTN_TYPES
         self.mask_vertical_attn = mask_vertical_attn
         self.kspace_stem, self.global_filter_mid = build_axial_kspace_stems(
             image_size, numCh, is_complex=self.is_complex, **(kspace_stem or {}))
+        if token_axis == "vertical" and self.global_filter_mid is not None:
+            raise ValueError("global_filter_mid requires both axial token axes")
         if attn_type == "complex_ms" and flattening_order != "row_major":
             raise ValueError("attn_type='complex_ms' needs adjacent row/column tokens: use flattening_order='row_major'")
         attn_scales = attn_scales if attn_type == "complex_ms" else None
@@ -286,14 +293,16 @@ class axialEncoder(nn.Module):
         image_height, image_width = pair(image_size)
         h_tokens = image_height // row_stride  # horizontal token count after row grouping
 
-        self.to_horizontal_embedding, self.to_vertical_embedding = get_to_embedding(
+        horizontal_embedding, self.to_vertical_embedding = get_to_embedding(
             "axial", image_height=image_height, image_width=image_width, numCh=numCh, d_model=d_model,
             row_stride=row_stride, is_complex=self.is_complex, flattening_order=flattening_order)
+        self.to_horizontal_embedding = horizontal_embedding if token_axis == "both" else None
 
-        self.horizontal_mlp_head, self.vertical_mlp_head = get_mlp_head(
+        horizontal_head, self.vertical_mlp_head = get_mlp_head(
             "axial", d_model, numCh=numCh, image_height=image_height, image_width=image_width,
             row_stride=row_stride, is_complex=self.is_complex, flattening_order=flattening_order,
             layer_norm_eps=layer_norm_eps)
+        self.horizontal_mlp_head = horizontal_head if token_axis == "both" else None
 
         self.dropout = ComplexDropout(dropout) if self.is_complex else nn.Dropout(dropout)
 
@@ -305,8 +314,9 @@ class axialEncoder(nn.Module):
             freqs_h = None
             freqs_v = None
             ape_dtype = torch.cfloat if self.is_complex else None
-            self.horizontal_pos_embedding = nn.Parameter(torch.randn(1, h_tokens,     d_model, dtype=ape_dtype))
-            self.vertical_pos_embedding   = nn.Parameter(torch.randn(1, image_width,  d_model, dtype=ape_dtype))
+            if token_axis == "both":
+                self.horizontal_pos_embedding = nn.Parameter(torch.randn(1, h_tokens, d_model, dtype=ape_dtype))
+            self.vertical_pos_embedding = nn.Parameter(torch.randn(1, image_width, d_model, dtype=ape_dtype))
 
         elif pos_emb_type in ("Rope-Axial", "Rope-Mixed"):
             freqs_h = cis_fn(dim=head_dim, end_x=h_tokens,    end_y=1, theta=rope_theta)
@@ -315,26 +325,32 @@ class axialEncoder(nn.Module):
         if shared_ffn is None and ffn_sharing == "per_stage":
             shared_ffn = FeedForward(d_model, dim_feedforward, dropout, activation, self.is_complex)
 
-        h_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation,
-                                          layer_norm_eps, freqs_cis=freqs_h, attn_type=attn_type,
-                                          ff=shared_ffn, attn_scales=attn_scales)
+        if token_axis == "both":
+            h_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation,
+                                              layer_norm_eps, freqs_cis=freqs_h, attn_type=attn_type,
+                                              ff=shared_ffn, attn_scales=attn_scales)
+            self.horizontalEncoder = TransformerEncoder(h_layer, numLayers, tie_ffn=shared_ffn is not None)
+        else:
+            self.horizontalEncoder = None
         v_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation,
                                           layer_norm_eps, freqs_cis=freqs_v, attn_type=attn_type,
                                           ff=shared_ffn, attn_scales=attn_scales)
-        self.horizontalEncoder = TransformerEncoder(h_layer, numLayers, tie_ffn=shared_ffn is not None)
         self.verticalEncoder = TransformerEncoder(v_layer, numLayers, tie_ffn=shared_ffn is not None)
 
     def forward(self, img, col_mask=None):
         if self.kspace_stem is not None:
             img = self.kspace_stem(img)
-        x = self.to_horizontal_embedding(img)
-        if self.pos_emb_type == "APE":
-            x = x + self.horizontal_pos_embedding
-        x = self.dropout(x)
-        x = self.horizontalEncoder(x)
-        x = self.horizontal_mlp_head(x)
-        if self.global_filter_mid is not None:
-            x = self.global_filter_mid(x)
+        if self.token_axis == "both":
+            x = self.to_horizontal_embedding(img)
+            if self.pos_emb_type == "APE":
+                x = x + self.horizontal_pos_embedding
+            x = self.dropout(x)
+            x = self.horizontalEncoder(x)
+            x = self.horizontal_mlp_head(x)
+            if self.global_filter_mid is not None:
+                x = self.global_filter_mid(x)
+        else:
+            x = img
 
         x = self.to_vertical_embedding(x)
         if self.pos_emb_type == "APE":

@@ -32,7 +32,7 @@ _DATA_KEYS = {
     "companding_p", "companding_a", "companding_centering", "norm_quantile",
 }
 _MODEL_KEYS = {
-    "model_type", "encoders", "patch_size", "axial_row_stride", "nhead_patch", "nhead_axial",
+    "model_type", "encoders", "patch_size", "axial_row_stride", "axial_token_axis", "nhead_patch", "nhead_axial",
     "layer_no", "num_encoder_layers", "layer_norm_eps", "learned_lambda", "learning", "kspace_real_channels",
     "reconformer_num_ch", "reconformer_num_iter", "reconformer_down_scales",
     "reconformer_num_heads", "reconformer_depths", "reconformer_window_sizes",
@@ -540,6 +540,21 @@ class BenchmarkImageCache:
                                    file_index=file_index, mask_seed=mask_seed, settings=settings))
 
     @staticmethod
+    def _contexts_equivalent(old, new):
+        """
+        Volume contexts match up to the HDF5 file's location / timestamps: the same validation volume may be read
+        from a different directory (or a fresh copy) than the one the results were saved from. The file name, size,
+        index, mask seed and acquisition settings must agree; slice contents are verified separately through the
+        per-slice input digests.
+        """
+        def strip(context):
+            context = dict(context)
+            context['file'] = {k: v for k, v in dict(context.get('file') or {}).items()
+                               if k not in ('path', 'mtime_ns', 'ctime_ns')}
+            return context
+        return isinstance(old, dict) and strip(old) == strip(new)
+
+    @staticmethod
     def _volume_result(result):
         if not isinstance(result, dict) or not {
                 'slice_count', 'checkpoint_epoch', 'h5_max', 'metrics', 'zero_fill_metrics'} <= result.keys():
@@ -601,7 +616,7 @@ class BenchmarkImageCache:
                     return None
             except (ValueError, TypeError, KeyError, OSError, OverflowError):
                 return None
-            if context != current:
+            if not self._contexts_equivalent(context, current):
                 if not self.refresh:
                     self._mismatch(f'data/mask/settings do not match volume {path.name}')
                 return None
@@ -643,8 +658,10 @@ class BenchmarkImageCache:
                     old_context = {}
                 if (isinstance(old_context, dict) and old_context.get('generation') == context['generation']
                         and old_context.get('model_identity') == context['model_identity']
-                        and old_context != context and not self.refresh):
+                        and not self._contexts_equivalent(old_context, context) and not self.refresh):
                     self._mismatch(f'data/mask/settings do not match volume {path.name}')
+                if self._contexts_equivalent(old_context, context) and old_context != context:
+                    context = old_context          # keep the original file location in the saved summary
             serialized = dict(result)
             for field in ('metrics', 'zero_fill_metrics'):
                 serialized[field] = {name: metric if np.isfinite(metric) else str(metric)

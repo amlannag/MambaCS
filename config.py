@@ -96,6 +96,7 @@ class Config:
     apt_rope_ref_grid: Optional[Tuple[int, int]] = None
     apt_use_abs_pos_emb: bool = False
     axial_row_stride: int = 1
+    axial_token_axis: str = "both"
     # Axial encoder token width. None = image_width * num_channels (no projection for single-coil 320 data).
     # With several virtual coils a row token is width * num_channels wide; set e.g. 320 to project it down so the
     # transformer / FFN stay the single-coil size.
