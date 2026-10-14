@@ -121,7 +121,7 @@ _ENCODER_ARGS = {
         dict(
             layerNo=cfg.layer_no,
             numCh=cfg.num_channels,
-            d_model=None,
+            d_model=getattr(cfg, "axial_d_model", None),
             nhead=cfg.nhead_axial,
             num_encoder_layers=cfg.num_encoder_layers,
             layer_norm_eps=getattr(cfg, "layer_norm_eps", 1e-5),
@@ -140,7 +140,7 @@ _ENCODER_ARGS = {
         dict(
             layerNo=cfg.layer_no,
             numCh=cfg.num_channels,
-            d_model=None,
+            d_model=getattr(cfg, "axial_d_model", None),
             nhead=cfg.nhead_axial,
             num_encoder_layers=cfg.num_encoder_layers,
             layer_norm_eps=getattr(cfg, "layer_norm_eps", 1e-5),

@@ -1,9 +1,11 @@
 
 EXPERIMENTS = [
-    
     {
-        "prefix": "combined",
-        "name": "fnet_both_cross_axial5_ms13_gfilt_imgconv16x3_freqw_m3_g0.5_cap0.6_p95_slice_100ep_r4",
+        "prefix": "brain",
+        "name": "fnet_both_cross_axial5_ms13_gfilt_imgconv16x3_8vcoils_freqw_m3_g0.5_cap0.6_p95_slice_100ep_r4",
+        "dataset": "fastmri_brain",
+        "num_channels": 8,
+        "axial_d_model": 320,
         "encoders": ["fnet", "cross_axial", "axial", "axial", "axial", "axial", "axial"],
         "attn_type": "complex_ms",
         "attn_scales": (1, 3),
