@@ -326,6 +326,8 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Experiments root: {experiments_root}")
     print(f"Device: {device}")
+    if device.type == "cuda":
+        print(f"GPU: {torch.cuda.get_device_name(0)} (ROCm/HIP={torch.version.hip})")
     summaries = []
     for name in args.experiments:
         experiment_dir = (experiments_root / name).resolve()
