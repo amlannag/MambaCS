@@ -2,7 +2,7 @@
 EXPERIMENTS = [
     {
         "prefix": "brain",
-        "name": "axial3_2layers_multicoil8_spirit5x5_3x3_ungated_l2_r4_100epochs",
+        "name": "axial3_2layers_multicoil8_spirit5x5_gated_l2_r4_100epochs",
         "dataset": "fastmri_brain",
         "num_channels": 8,
         "image_size": (320, 320),
@@ -32,8 +32,8 @@ EXPERIMENTS = [
         "global_filter_mid": False,
         "kspace_conv": False,
         "spirit_conv": True,
-        "spirit_conv_kernels": (5, 3),
-        "spirit_conv_mode": "ungated",
+        "spirit_conv_kernels": (5,),
+        "spirit_conv_mode": "gated",
         "image_conv": False,
     },
 ]
