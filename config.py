@@ -310,6 +310,9 @@ class Config:
     loraks_rank: Optional[int] = None
     loraks_normalize: str = "ratio"
     epochs: int = 100
+    # Number of GPUs for one distributed training run (set via train_config.py and launch.sh).
+    num_gpus: int = 1
+    # batch_size and batch_size_search_start are global across all GPUs.
     batch_size: int = 32
     auto_batch_size: bool = True
     batch_size_search_start: int = 128

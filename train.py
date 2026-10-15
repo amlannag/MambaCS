@@ -14,10 +14,13 @@ import time
 import h5py
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import wandb
 from PIL import Image
 from torch.utils.data import DataLoader
+from torch.nn.parallel import DistributedDataParallel
+from torch.utils.data.distributed import DistributedSampler
 
 from dataset import VolumeBatchSampler, volume_ids_from_fnames, H5MRIDataset, OASISDataset, prepare_kspace_slice
 from tools.volume_stats import load_or_compute_volume_stats
@@ -48,6 +51,8 @@ def build_cfg(exp_idx: int) -> Config:
 
 _parser = argparse.ArgumentParser()
 _parser.add_argument('--exp_idx', type=int, default=0)
+_parser.add_argument('--num_gpus', type=int, default=None,
+                     help='Override the experiment GPU count; multi-GPU runs must be launched with torchrun.')
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -141,6 +146,55 @@ def _seed_worker(worker_id):
     worker_seed = torch.initial_seed() % 2**32
     np.random.seed(worker_seed)
     random.seed(worker_seed)
+
+
+def _unwrap_distributed(module):
+    return module.module if isinstance(module, DistributedDataParallel) else module
+
+
+def _per_rank_batch_size(global_batch_size, world_size):
+    if world_size < 1 or global_batch_size < 1:
+        raise ValueError("Batch size and GPU count must both be positive.")
+    if global_batch_size % world_size:
+        raise ValueError(
+            f"Global batch size {global_batch_size} must be divisible by num_gpus={world_size}."
+        )
+    return global_batch_size // world_size
+
+
+def _init_distributed(cfg):
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    requested = int(getattr(cfg, "num_gpus", 1))
+    if requested < 1:
+        raise ValueError(f"num_gpus must be at least 1, got {requested}")
+    if world_size != requested:
+        raise RuntimeError(
+            f"Experiment requests num_gpus={requested}, but this process has WORLD_SIZE={world_size}. "
+            "Use launch.sh (which reads train_config.py) or launch train.py with torchrun and matching --num_gpus."
+        )
+
+    distributed = world_size > 1
+    if distributed:
+        if not dist.is_available():
+            raise RuntimeError("This PyTorch build does not include torch.distributed.")
+        if torch.cuda.is_available():
+            if local_rank >= torch.cuda.device_count():
+                raise RuntimeError(
+                    f"LOCAL_RANK={local_rank}, but only {torch.cuda.device_count()} CUDA device(s) are visible."
+                )
+            torch.cuda.set_device(local_rank)
+            backend = "nccl"
+        else:
+            backend = "gloo"
+        dist.init_process_group(backend=backend, init_method="env://")
+    elif torch.cuda.is_available():
+        torch.cuda.set_device(0)
+
+    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+    return device, rank, world_size, distributed
+
 
 def _coil_combine(magnitude):
     """
@@ -269,6 +323,7 @@ def _compute_losses(recon, intermediates, target, final_criterion, intermediate_
 
 def _set_perpendicular_weight_m(criteria, value):
     for criterion in criteria:
+        criterion = _unwrap_distributed(criterion)
         if isinstance(criterion, PerpendicularLoss):
             criterion.set_current_m(value)
 
@@ -284,6 +339,7 @@ def _init_stage_totals(num_stages):
 
 
 def _num_intermediate_stages(model):
+    model = _unwrap_distributed(model)
     if hasattr(model, "num_intermediate_stages"):
         return int(model.num_intermediate_stages)
     return len(model.transformers)
@@ -576,7 +632,7 @@ def _probe_batch_candidate(cfg, dataset, batch_size, device, checkpoint=None):
         del optimizer, model
 
 
-def _resolve_batch_size(cfg, dataset, device, checkpoint=None):
+def _resolve_batch_size(cfg, dataset, device, checkpoint=None, starting_batch_size=None):
     if not cfg.auto_batch_size:
         return cfg.batch_size
     if device.type != "cuda":
@@ -587,7 +643,9 @@ def _resolve_batch_size(cfg, dataset, device, checkpoint=None):
     if cfg.batch_size_probe_steps < 1:
         raise ValueError("batch_size_probe_steps must be at least 1")
 
-    starting_batch_size = min(cfg.batch_size_search_start, len(dataset))
+    if starting_batch_size is None:
+        starting_batch_size = cfg.batch_size_search_start
+    starting_batch_size = min(starting_batch_size, len(dataset))
     return _find_executable_batch_size(
         starting_batch_size,
         lambda batch_size: _probe_batch_candidate(
@@ -705,6 +763,27 @@ def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer
         f"({epoch_time / num_batches:.2f}s/batch; data avg {data_accum / num_batches:.2f}s, "
         f"compute avg {compute_accum / num_batches:.2f}s)"
     )
+
+    if dist.is_available() and dist.is_initialized():
+        stage_count = len(stage_totals)
+        totals = torch.tensor(
+            [
+                total_loss,
+                total_final_loss,
+                total_intermediate_loss_sum,
+                total_psnr,
+                total_samples,
+                *stage_totals,
+                *psnr_gain_totals,
+            ],
+            dtype=torch.float64,
+            device=device,
+        )
+        dist.all_reduce(totals, op=dist.ReduceOp.SUM)
+        total_loss, total_final_loss, total_intermediate_loss_sum, total_psnr = totals[:4].tolist()
+        total_samples = int(totals[4].item())
+        stage_totals = totals[5:5 + stage_count].tolist()
+        psnr_gain_totals = totals[5 + stage_count:].tolist()
 
     return _build_epoch_metrics(
         total_loss, total_final_loss, total_intermediate_loss_sum, total_psnr,
@@ -1094,11 +1173,14 @@ def _print_final_val_summary(means):
 def main():
     args = _parser.parse_args()
     cfg = build_cfg(args.exp_idx)
-    print(f"Experiment {args.exp_idx}: {cfg.prefix}_{cfg.name}", flush=True)
+    if args.num_gpus is not None:
+        cfg.num_gpus = args.num_gpus
+    device, rank, world_size, distributed = _init_distributed(cfg)
+    is_primary = rank == 0
+    if is_primary:
+        print(f"Experiment {args.exp_idx}: {cfg.prefix}_{cfg.name}", flush=True)
     phase("Pipeline: dataset scan -> batch-size search -> wandb init -> model build -> epochs")
     _seed_everything(cfg.seed)
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # ---- Output directory ----
     out_dir = experiment_dir(cfg)
@@ -1176,42 +1258,87 @@ def main():
         cfg.apt_layout = resolve_fixed_apt_layout(cfg.apt_layout)
 
     phase("Resolving batch size...")
-    if cfg.auto_batch_size and device.type == "cuda":
-        phase(
-            f"auto_batch_size=True: searching from {cfg.batch_size_search_start}, "
-            f"{cfg.batch_size_probe_steps} full train step(s) per candidate; "
-            f"each candidate also rebuilds the model, so this can take a while"
-        )
-    cfg.batch_size = cfg.batch_size if _uses_volume_batches(cfg) else _resolve_batch_size(cfg, train_ds, device, checkpoint=checkpoint)
+    uses_volume_batches = _uses_volume_batches(cfg)
+    if distributed and uses_volume_batches:
+        raise ValueError("Distributed training does not yet support volume-grouped PCA batches.")
+    if uses_volume_batches:
+        local_batch_size = cfg.batch_size
+    elif distributed:
+        if cfg.auto_batch_size and device.type == "cuda":
+            search_batch_per_gpu = _per_rank_batch_size(cfg.batch_size_search_start, world_size)
+            if is_primary:
+                phase(
+                    f"Searching per-GPU batch size from {search_batch_per_gpu}; "
+                    f"the selected global batch size is shared across ranks."
+                )
+                selected_local_batch = _resolve_batch_size(
+                    cfg,
+                    train_ds,
+                    device,
+                    checkpoint=checkpoint,
+                    starting_batch_size=search_batch_per_gpu,
+                )
+                selected_global_batch = selected_local_batch * world_size
+            else:
+                selected_global_batch = 0
+            batch_tensor = torch.tensor(selected_global_batch, dtype=torch.int64, device=device)
+            dist.broadcast(batch_tensor, src=0)
+            cfg.batch_size = int(batch_tensor.item())
+        else:
+            _per_rank_batch_size(cfg.batch_size, world_size)
+        local_batch_size = _per_rank_batch_size(cfg.batch_size, world_size)
+    else:
+        if cfg.auto_batch_size and device.type == "cuda":
+            phase(
+                f"auto_batch_size=True: searching from {cfg.batch_size_search_start}, "
+                f"{cfg.batch_size_probe_steps} full train step(s) per candidate; "
+                f"each candidate also rebuilds the model, so this can take a while"
+            )
+        cfg.batch_size = _resolve_batch_size(cfg, train_ds, device, checkpoint=checkpoint)
+        local_batch_size = cfg.batch_size
     _seed_everything(cfg.seed)
 
     grouped_config = config_to_dict(cfg)
-    with open(config_path, 'w') as f:
-        json.dump(grouped_config, f, indent=2)
+    if is_primary:
+        with open(config_path, 'w') as f:
+            json.dump(grouped_config, f, indent=2)
 
     _WANDB_PROJECT = {"fastmri": "fastMRI", "fastmri_brain": "fastMRI-brain", "oasis": "OASIS"}
-    phase("Initializing Weights & Biases...")
-    t_wandb = time.time()
-    wandb.init(
-        project=_WANDB_PROJECT.get(cfg.dataset, "MambaCS"),
-        name=f"{cfg.prefix}_{cfg.name}",
-        config=grouped_config,
-    )
-    phase(f"W&B ready in {time.time() - t_wandb:.1f}s")
+    if is_primary:
+        phase("Initializing Weights & Biases...")
+        t_wandb = time.time()
+        wandb.init(
+            project=_WANDB_PROJECT.get(cfg.dataset, "MambaCS"),
+            name=f"{cfg.prefix}_{cfg.name}",
+            config=grouped_config,
+        )
+        phase(f"W&B ready in {time.time() - t_wandb:.1f}s")
 
-    print(f"Experiment : {cfg.prefix}_{cfg.name}")
-    print(f"Encoders   : {cfg.encoders}")
-    print(f"Output dir : {out_dir}")
-    print(f"Device     : {device}")
-    print(f"Image size : {cfg.image_size}")
-    print(f"Batch size : {cfg.batch_size}")
-    print(f"Accel      : R = {cfg.acceleration_factors}  |  mask={cfg.mask_type}  |  center_fractions={cfg.center_fractions}")
-    print(f"Input fill : {cfg.kspace_fill}")
+        print(f"Experiment : {cfg.prefix}_{cfg.name}")
+        print(f"Encoders   : {cfg.encoders}")
+        print(f"Output dir : {out_dir}")
+        print(f"Device     : {device}")
+        print(f"Image size : {cfg.image_size}")
+        print(f"Batch size : {cfg.batch_size} global ({local_batch_size} per GPU)")
+        print(f"Accel      : R = {cfg.acceleration_factors}  |  mask={cfg.mask_type}  |  center_fractions={cfg.center_fractions}")
+        print(f"Input fill : {cfg.kspace_fill}")
 
     train_generator = torch.Generator().manual_seed(cfg.seed)
     val_generator = torch.Generator().manual_seed(cfg.seed)
 
     phase(f"Creating DataLoaders (num_workers={cfg.num_workers}, pin_memory=True)...")
+    train_sampler = (
+        DistributedSampler(
+            train_ds,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=True,
+            seed=cfg.seed,
+            drop_last=False,
+        )
+        if distributed
+        else None
+    )
     if _uses_volume_batches(cfg):
         if not is_h5_dataset(cfg):
             raise ValueError("The 'pca' encoder with pca_scope='volume' needs fastMRI H5 volumes")
@@ -1224,14 +1351,15 @@ def main():
                                 num_workers=cfg.num_workers, pin_memory=True,
                                 persistent_workers=cfg.num_workers > 0, worker_init_fn=_seed_worker)
     else:
-        train_loader = DataLoader(train_ds, batch_size=cfg.batch_size,
-                                  shuffle=True,  num_workers=cfg.num_workers,
+        train_loader = DataLoader(train_ds, batch_size=local_batch_size,
+                                  sampler=train_sampler, shuffle=train_sampler is None,
+                                  num_workers=cfg.num_workers,
                                   pin_memory=True,
                                   persistent_workers=cfg.num_workers > 0,
                                   worker_init_fn=_seed_worker,
                                   generator=train_generator)
 
-        val_loader = DataLoader(val_ds, batch_size=cfg.batch_size,
+        val_loader = DataLoader(val_ds, batch_size=local_batch_size,
                                 shuffle=False, num_workers=cfg.num_workers,
                                 pin_memory=True,
                                 persistent_workers=cfg.num_workers > 0,
@@ -1239,19 +1367,21 @@ def main():
                                 generator=val_generator)
 
     file_list = getattr(val_ds, 'h5_files', None) or getattr(val_ds, 'image_files', None)
-    print(f"Train dir   : {train_data_dir}")
-    print(f"Val dir     : {val_data_dir}")
-    if cfg.max_val_files is not None and file_list is not None:
-        print(f"Val files   : {len(file_list)} capped")
-    print(f"Train / Val : {len(train_ds)} / {len(val_ds)} samples")
+    if is_primary:
+        print(f"Train dir   : {train_data_dir}")
+        print(f"Val dir     : {val_data_dir}")
+        if cfg.max_val_files is not None and file_list is not None:
+            print(f"Val files   : {len(file_list)} capped")
+        print(f"Train / Val : {len(train_ds)} / {len(val_ds)} samples")
 
     # ---- Model ----
     phase("Building model...")
     t_model = time.time()
-    model    = build_model(cfg).to(device)
-    n_params = sum(p.numel() for p in unique_model_parameters(model))
+    base_model = build_model(cfg).to(device)
+    n_params = sum(p.numel() for p in unique_model_parameters(base_model))
     phase(f"Model ready in {time.time() - t_model:.1f}s")
-    print(f"Parameters : {n_params:,}")
+    if is_primary:
+        print(f"Parameters : {n_params:,}")
     mask_generator = FastMRIMaskGenerator(
         cfg.acceleration_factors,
         center_fractions=cfg.center_fractions,
@@ -1260,6 +1390,26 @@ def main():
 
     # ---- Optimiser / scheduler / loss ----
     final_criterion, intermediate_criterion = _build_criteria(cfg, device)
+    if checkpoint is not None:
+        base_model.load_state_dict(checkpoint['model'])
+        if checkpoint.get('final_criterion') is not None:
+            final_criterion.load_state_dict(checkpoint['final_criterion'])
+        if checkpoint.get('intermediate_criterion') is not None:
+            intermediate_criterion.load_state_dict(checkpoint['intermediate_criterion'])
+
+    if distributed:
+        ddp_kwargs = {"device_ids": [device.index], "output_device": device.index} if device.type == "cuda" else {}
+        model = DistributedDataParallel(base_model, **ddp_kwargs)
+        if any(parameter.requires_grad for parameter in final_criterion.parameters()):
+            final_criterion = DistributedDataParallel(final_criterion, **ddp_kwargs)
+        if (
+            cfg.loss_mode != "final_only"
+            and any(parameter.requires_grad for parameter in intermediate_criterion.parameters())
+        ):
+            intermediate_criterion = DistributedDataParallel(intermediate_criterion, **ddp_kwargs)
+    else:
+        model = base_model
+
     loss_parameters = [p for crit in {id(final_criterion): final_criterion, id(intermediate_criterion): intermediate_criterion}.values()
                        for p in crit.parameters()]
     if loss_parameters:
@@ -1274,11 +1424,6 @@ def main():
     best_val_metric = float('-inf')
 
     if checkpoint is not None:
-        model.load_state_dict(checkpoint['model'])
-        if checkpoint.get('final_criterion') is not None:
-            final_criterion.load_state_dict(checkpoint['final_criterion'])
-        if checkpoint.get('intermediate_criterion') is not None:
-            intermediate_criterion.load_state_dict(checkpoint['intermediate_criterion'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         scheduler.load_state_dict(checkpoint['scheduler'])
         start_epoch = checkpoint['epoch'] + 1
@@ -1288,7 +1433,8 @@ def main():
             else checkpoint.get('best_val_psnr', checkpoint.get('val_psnr', float('-inf')))
         )
         best_val_metric = checkpoint.get('best_val_metric', fallback_metric)
-        print(f"Resumed from epoch {start_epoch}  ({cfg.resume})")
+        if is_primary:
+            print(f"Resumed from epoch {start_epoch}  ({cfg.resume})")
         checkpoint = None
 
     # ---- Lambda scheduler (if active) ----
@@ -1304,14 +1450,17 @@ def main():
 
     # ---- Training loop ----
     phase(f"Starting training: epochs {start_epoch + 1} to {cfg.epochs}")
-    print()
+    if is_primary:
+        print()
     for epoch in range(start_epoch, cfg.epochs):
         t0 = time.time()
 
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
         if lamb_sched is not None:
-            if not hasattr(model, "set_scheduled_lamb"):
+            if not hasattr(base_model, "set_scheduled_lamb"):
                 raise ValueError(f"{cfg.model_type} does not support lambda scheduling")
-            model.set_scheduled_lamb(lamb_sched.get_lambda(epoch))
+            base_model.set_scheduled_lamb(lamb_sched.get_lambda(epoch))
         if cfg.perpendicular_mag_weighting:
             current_perp_m = cfg.perpendicular_mag_weight_m
             if perp_m_sched is not None:
@@ -1322,11 +1471,16 @@ def main():
             cfg, model, train_loader, cfg.acceleration_factors, mask_generator, optimizer,
             final_criterion, intermediate_criterion, cfg.loss_mode, device, epoch
         )
-        val_metrics = validate(
-            cfg, model, val_loader, cfg.acceleration_factors, cfg.image_size,
-            final_criterion, intermediate_criterion, cfg.loss_mode, device
-        )
         scheduler.step()
+        if not is_primary:
+            dist.barrier()
+            continue
+
+        val_metrics = validate(
+            cfg, base_model, val_loader, cfg.acceleration_factors, cfg.image_size,
+            _unwrap_distributed(final_criterion), _unwrap_distributed(intermediate_criterion),
+            cfg.loss_mode, device
+        )
 
         lr      = scheduler.get_last_lr()[0]
         elapsed = time.time() - t0
@@ -1368,15 +1522,18 @@ def main():
             metrics[f'train_encoder_{i+1}_psnr_gain'] = round(gain, 6)
         for i, gain in enumerate(val_metrics["stage_psnr_gains"]):
             metrics[f'val_encoder_{i+1}_psnr_gain'] = round(gain, 6)
-        if getattr(final_criterion, "log_var", None) is not None:
-            for k, value in enumerate(final_criterion.log_var.detach().cpu().tolist()):
+        base_final_criterion = _unwrap_distributed(final_criterion)
+        if getattr(base_final_criterion, "log_var", None) is not None:
+            for k, value in enumerate(base_final_criterion.log_var.detach().cpu().tolist()):
                 metrics[f'ring_s_{k}'] = round(value, 4)
-                metrics[f'ring_phase_weight_{k}'] = round(math.exp(-max(value, final_criterion.s_floor)), 4)
-        if model.lamb is not False:
-            for i, lv in enumerate(model.lamb):
+                metrics[f'ring_phase_weight_{k}'] = round(
+                    math.exp(-max(value, base_final_criterion.s_floor)), 4
+                )
+        if base_model.lamb is not False:
+            for i, lv in enumerate(base_model.lamb):
                 metrics[f'lambda_{i}'] = round(lv.item(), 6)
         elif lamb_sched is not None:
-            metrics['lambda_scheduled'] = round(model.scheduled_lamb, 6)
+            metrics['lambda_scheduled'] = round(base_model.scheduled_lamb, 6)
         if cfg.perpendicular_mag_weighting:
             metrics['perpendicular_mag_weight_m'] = round(current_perp_m, 6)
         append_metrics(metrics_path, metrics)
@@ -1387,9 +1544,9 @@ def main():
             best_val_metric = selection_value
             torch.save({
                 'epoch':         epoch,
-                'model':         model.state_dict(),
-                'final_criterion': final_criterion.state_dict(),
-                'intermediate_criterion': intermediate_criterion.state_dict(),
+                'model':         base_model.state_dict(),
+                'final_criterion': _unwrap_distributed(final_criterion).state_dict(),
+                'intermediate_criterion': _unwrap_distributed(intermediate_criterion).state_dict(),
                 'config':        grouped_config,
                 'optimizer':     optimizer.state_dict(),
                 'scheduler':     scheduler.state_dict(),
@@ -1403,9 +1560,9 @@ def main():
 
         torch.save({
             'epoch':         epoch,
-            'model':         model.state_dict(),
-            'final_criterion': final_criterion.state_dict(),
-            'intermediate_criterion': intermediate_criterion.state_dict(),
+            'model':         base_model.state_dict(),
+            'final_criterion': _unwrap_distributed(final_criterion).state_dict(),
+            'intermediate_criterion': _unwrap_distributed(intermediate_criterion).state_dict(),
             'config':        grouped_config,
             'optimizer':     optimizer.state_dict(),
             'scheduler':     scheduler.state_dict(),
@@ -1417,7 +1574,7 @@ def main():
 
         if epoch == cfg.epochs - 1:
             phase("Last epoch: running full validation-set inference over every file...")
-            final_metrics = evaluate_validation_set(cfg, model, device)
+            final_metrics = evaluate_validation_set(cfg, base_model, device)
             _print_final_val_summary(final_metrics["means"])
 
             final_metrics_path = os.path.join(out_dir, 'final_validation_metrics.json')
@@ -1441,8 +1598,14 @@ def main():
             wandb.log(final_log, step=epoch + 1)
             phase(f"Final validation-set metrics saved to {final_metrics_path}")
 
-    wandb.finish()
-    print(f"\nTraining complete.  Outputs saved to: {out_dir}")
+        if distributed:
+            dist.barrier()
+
+    if is_primary:
+        wandb.finish()
+        print(f"\nTraining complete.  Outputs saved to: {out_dir}")
+    if distributed:
+        dist.destroy_process_group()
 
 if __name__ == '__main__':
     main()

@@ -6,6 +6,7 @@ redirected to a file (e.g. a SLURM log). Falls back to throttled plain
 prints when tqdm is not installed.
 """
 
+import os
 import sys
 import time
 
@@ -19,6 +20,8 @@ except Exception:  # pragma: no cover - depends on environment
 
 def phase(message):
     """Print a timestamped phase marker (always flushed)."""
+    if int(os.environ.get("RANK", "0")) != 0:
+        return
     print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
 
 
@@ -34,6 +37,7 @@ class _FallbackBar:
         self._start = time.time()
         self._last_print = 0.0
         self._postfix = {}
+        self._disabled = int(os.environ.get("RANK", "0")) != 0
 
     def set_postfix(self, **kwargs):
         self._postfix.update({k: str(v) for k, v in kwargs.items()})
@@ -42,6 +46,8 @@ class _FallbackBar:
         self._desc = desc
 
     def _maybe_print(self, force=False):
+        if self._disabled:
+            return
         now = time.time()
         if not force and now - self._last_print < 10.0:
             return
@@ -87,7 +93,7 @@ class Progress:
                 desc=desc,
                 total=total,
                 unit=unit,
-                disable=False,     # keep the bar even when stdout is a log file
+                disable=int(os.environ.get("RANK", "0")) != 0,
                 file=sys.stdout,
                 mininterval=5.0,   # avoid flooding the log file
             )

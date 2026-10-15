@@ -63,6 +63,8 @@ All hyperparameters are defined in `config.py`. Experiments are defined as overr
 python train.py --exp_idx 0
 ```
 
+For a multi-GPU run, set `num_gpus` in that experiment's `train_config.py` entry and submit it with `launch.sh`. The launcher requests that many GPUs from Slurm and starts one DDP worker per GPU. `batch_size` and `batch_size_search_start` are global batch sizes and must be divisible by `num_gpus`. To launch directly on a single node instead, use `torchrun --standalone --nproc_per_node=2 train.py --exp_idx 0 --num_gpus 2`.
+
 Key config fields:
 
 | Field                  | Default  | Description                                                              |
@@ -73,6 +75,7 @@ Key config fields:
 | `num_encoder_layers`   | `2`      | Transformer layers per encoder block                                     |
 | `pos_emb_type`         | `"APE"`  | Positional embedding type                                                |
 | `acceleration_factors` | `[8]`    | Undersampling rates to train on                                          |
+| `num_gpus`             | `1`      | Number of GPUs for one DDP training run                                   |
 | `k_space_learning`     | `False`  | Bool or per-stage list — whether each stage operates in k-space          |
 | `lambda_schedule`      | `"none"` | `"none"` (learned) or `"cosine"` / `"linear"` / `"constant"`            |
 

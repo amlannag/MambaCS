@@ -33,9 +33,15 @@ echo "Working dir: $(pwd)"
 echo ""
 
 EXP_IDX="${EXP_IDX:-0}"
+NUM_GPUS="${NUM_GPUS:-1}"
 
 unset SLURM_MEM_PER_GPU SLURM_MEM_PER_CPU SLURM_MEM_PER_NODE
-srun --cpu-bind=none python -u train.py --exp_idx "$EXP_IDX"
+if (( NUM_GPUS > 1 )); then
+    srun --cpu-bind=none torchrun --standalone --nnodes=1 \
+        --nproc_per_node="$NUM_GPUS" train.py --exp_idx "$EXP_IDX"
+else
+    srun --cpu-bind=none python -u train.py --exp_idx "$EXP_IDX"
+fi
 
 echo ""
 echo "End time: $(date)"
