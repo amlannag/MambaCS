@@ -14,12 +14,17 @@
 
 set -euo pipefail
 
+if [[ -z "${SLURM_SUBMIT_DIR:-}" || -z "${SLURM_JOB_ID:-}" ]]; then
+    echo "This is a Slurm job script. Submit it with: sbatch submit_inference.sh (do not run it with bash)." >&2
+    exit 2
+fi
+
 module purge
 module load miniforge/24.11.3-0
 source "$ROOTMINIFORGE/etc/profile.d/conda.sh"
 conda activate mambacs-rocm-all
 
-cd "${SLURM_SUBMIT_DIR:?Submit this job from the MambaCS repository directory}"
+cd "$SLURM_SUBMIT_DIR"
 
 export MPLBACKEND=Agg
 export PYTHONUNBUFFERED=1

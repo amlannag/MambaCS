@@ -9,6 +9,7 @@ import math
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .complex_init import trabelsi_init_
 from .dc import fft_2d, ifft_2d, complex_to_pair, pair_to_complex
@@ -131,15 +132,104 @@ class ImageDomainConvStem(_GatedResidualStem):
         return complex_to_pair(out) if self.pair_input else out
 
 
+class _SpiritConvLayer(nn.Module):
+    """
+    Single SPIRiT-style multi-coil k-space convolution layer:
+    - Each output coil c_out in {0, ..., C-1} has its own 3D filter of shape (C, p, p) over all C coils.
+    - The spatial center tap of the target coil itself (w[c, c, p//2, p//2]) is fixed to 0 via an unlearned
+      binary mask buffer so a coil never contributes to itself at the center pixel (0, 0).
+    - mode="gated"   : residual gated update  x -> x + alpha * conv(x, W * mask)  with scalar alpha = 0 at init.
+    - mode="ungated" : forced direct filter   x -> conv(x, W * mask)              with no gating or skip connection.
+    """
+    def __init__(self, num_channels: int, kernel_size: int = 3, mode: str = "gated"):
+        super().__init__()
+        if num_channels < 1:
+            raise ValueError(f"SpiritConvLayer requires num_channels >= 1, got {num_channels}")
+        if kernel_size < 3 or kernel_size % 2 == 0:
+            raise ValueError(f"spirit_conv_kernels entries must be odd integers >= 3, got {kernel_size}")
+        mode = mode.lower()
+        if mode == "direct":
+            mode = "ungated"
+        if mode not in ("gated", "ungated"):
+            raise ValueError(f"spirit_conv_mode must be 'gated' or 'ungated', got {mode!r}")
+
+        self.num_channels = int(num_channels)
+        self.kernel_size = int(kernel_size)
+        self.pad = self.kernel_size // 2
+        self.mode = mode
+
+        self.weight = nn.Parameter(
+            torch.empty(self.num_channels, self.num_channels, self.kernel_size, self.kernel_size, dtype=torch.cfloat)
+        )
+        active_taps = max(self.num_channels * (self.kernel_size ** 2) - 1, 1)
+        trabelsi_init_(self.weight, fan_in=active_taps, fan_out=active_taps, criterion="glorot")
+
+        mask = torch.ones(
+            self.num_channels, self.num_channels, self.kernel_size, self.kernel_size, dtype=torch.float32
+        )
+        coil_idx = torch.arange(self.num_channels)
+        mask[coil_idx, coil_idx, self.pad, self.pad] = 0.0
+        self.register_buffer("kernel_mask", mask)
+        with torch.no_grad():
+            self.weight[coil_idx, coil_idx, self.pad, self.pad] = 0.0
+
+        if self.mode == "gated":
+            self.alpha = nn.Parameter(torch.zeros(1))
+        else:
+            self.register_parameter("alpha", None)
+
+    def effective_weight(self) -> torch.Tensor:
+        return self.weight * self.kernel_mask
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        conv_out = F.conv2d(x, self.effective_weight(), bias=None, padding=self.pad)
+        if self.mode == "gated":
+            return x + self.alpha * conv_out
+        return conv_out
+
+
+class SpiritConvStem(nn.Module):
+    """
+    Stack of 1 or more SPIRiT-style multi-coil k-space convolution layers (e.g. p=5 followed by p=3).
+    Supports both 'gated' (x + alpha * G(x)) and 'ungated' (forced through G(x) with no skip connection) modes.
+    """
+    def __init__(self, num_channels: int = 8, kernel_sizes=(5, 3), mode: str = "gated", is_complex: bool = True):
+        super().__init__()
+        if not is_complex and num_channels % 2:
+            raise ValueError("SpiritConvStem on a real (re, im) input needs an even channel count")
+        if isinstance(kernel_sizes, int):
+            kernel_sizes = (kernel_sizes,)
+        else:
+            kernel_sizes = tuple(int(k) for k in kernel_sizes)
+        if not kernel_sizes:
+            raise ValueError("spirit_conv_kernels must contain at least one kernel size")
+
+        self.pair_input = not is_complex
+        complex_channels = num_channels if is_complex else num_channels // 2
+        self.kernel_sizes = kernel_sizes
+        self.mode = "ungated" if mode.lower() == "direct" else mode.lower()
+        self.layers = nn.ModuleList([
+            _SpiritConvLayer(complex_channels, kernel_size=k, mode=self.mode)
+            for k in self.kernel_sizes
+        ])
+
+    def forward(self, k: torch.Tensor) -> torch.Tensor:
+        x = pair_to_complex(k) if self.pair_input else k
+        for layer in self.layers:
+            x = layer(x)
+        return complex_to_pair(x) if self.pair_input else x
+
+
 def build_kspace_stem(image_size, num_channels=1, global_filter=False, kspace_conv=False,
                       kspace_conv_channels=8, kspace_conv_kernel=3, global_filter_mid=False, is_complex=True,
-                      image_conv=False, image_conv_channels=32, image_conv_layers=3, image_conv_kernel=3):
+                      image_conv=False, image_conv_channels=32, image_conv_layers=3, image_conv_kernel=3,
+                      spirit_conv=False, spirit_conv_kernels=(5, 3), spirit_conv_mode="gated"):
     """
-    Compose the enabled input stems in the order ImageDomainConvStem -> GlobalFilter -> KSpaceConvStem. Returns
-    None when none is enabled so callers can skip the call entirely. `global_filter_mid` is not an input stem: it
-    is accepted here only so that encoders without a mid-point can reject it (see `build_mid_global_filter`).
+    Compose the enabled input stems in the order ImageDomainConvStem -> GlobalFilter -> SpiritConvStem -> KSpaceConvStem.
+    Returns None when none is enabled so callers can skip the call entirely. `global_filter_mid` is not an input stem:
+    it is accepted here only so that encoders without a mid-point can reject it (see `build_mid_global_filter`).
     `is_complex=False` builds real-valued k-space stems for encoders that see k-space as (re, im) channels (the
-    image-domain CNN stays complex and converts at its boundary).
+    image-domain CNN and SpiritConvStem stay complex and convert at their boundary).
     """
     if global_filter_mid:
         raise ValueError("global_filter_mid is only supported by the axial encoder (it sits between the "
@@ -150,6 +240,8 @@ def build_kspace_stem(image_size, num_channels=1, global_filter=False, kspace_co
                                           is_complex))
     if global_filter:
         stages.append(GlobalFilter(image_size, num_channels, is_complex))
+    if spirit_conv:
+        stages.append(SpiritConvStem(num_channels, spirit_conv_kernels, spirit_conv_mode, is_complex))
     if kspace_conv:
         stages.append(KSpaceConvStem(num_channels, kspace_conv_channels, kspace_conv_kernel, is_complex))
     return nn.Sequential(*stages) if stages else None

@@ -192,6 +192,14 @@ class Config:
     kspace_conv: bool = False
     kspace_conv_channels: int = 8
     kspace_conv_kernel: int = 3
+    # spirit_conv: stacked SPIRiT-style multi-coil k-space convolution stem where each coil c in {0..C-1} learns its
+    # own (C x p x p) complex filter across all coils with the self-center tap w[c, c, p//2, p//2] fixed to 0.
+    # spirit_conv_kernels: sequence of odd kernel widths p (e.g. (5,) for a single 5x5 layer or (5, 3) for 5x5 -> 3x3).
+    # spirit_conv_mode: "gated" (x + alpha * G(x) per layer, alpha=0 at init) or "ungated" (forced through G(x) with
+    # no gating and no skip connection).
+    spirit_conv: bool = False
+    spirit_conv_kernels: Tuple[int, ...] = (5, 3)
+    spirit_conv_mode: str = "gated"
     # image_conv (k_space learning, patch/axial/fnet encoders): DcCNN-style residual COMPLEX CNN in the image domain at
     # the start of every encoder stage: IFFT(k) -> conv(1 -> image_conv_channels) + CReLU -> ... -> conv(-> 1), residual
     # add, FFT back to k-space. image_conv_layers is the total number of convolutions (>= 2). The residual branch is

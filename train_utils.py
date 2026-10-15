@@ -65,13 +65,21 @@ def psnr(pred, target, max_val=None):
 
 
 def _kspace_stem_args(cfg):
-    """Options for the optional k-space stems (GlobalFilter / KSpaceConvStem) on patch and axial encoders."""
+    """Options for the optional k-space stems (GlobalFilter / SpiritConvStem / KSpaceConvStem) on patch and axial encoders."""
+    kernels = getattr(cfg, "spirit_conv_kernels", (5, 3))
+    if isinstance(kernels, int):
+        kernels = (kernels,)
+    else:
+        kernels = tuple(int(k) for k in kernels)
     return dict(
         global_filter=getattr(cfg, "global_filter", False),
         global_filter_mid=getattr(cfg, "global_filter_mid", False),
         kspace_conv=getattr(cfg, "kspace_conv", False),
         kspace_conv_channels=getattr(cfg, "kspace_conv_channels", 8),
         kspace_conv_kernel=getattr(cfg, "kspace_conv_kernel", 3),
+        spirit_conv=getattr(cfg, "spirit_conv", False),
+        spirit_conv_kernels=kernels,
+        spirit_conv_mode=getattr(cfg, "spirit_conv_mode", "gated"),
         image_conv=getattr(cfg, "image_conv", False),
         image_conv_channels=getattr(cfg, "image_conv_channels", 32),
         image_conv_layers=getattr(cfg, "image_conv_layers", 3),

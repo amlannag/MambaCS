@@ -76,6 +76,13 @@ def _needs_volume_stats(cfg):
     )
 
 
+def _write_json_atomic(path, value):
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    with temporary_path.open("w") as handle:
+        json.dump(value, handle, indent=2, allow_nan=False)
+    os.replace(temporary_path, path)
+
+
 def _run_experiment(experiment_dir, val_dir_override, device, batch_size, num_workers):
     experiment_dir = experiment_dir.resolve()
     checkpoint_path = experiment_dir / "best_model.pth"
@@ -151,6 +158,49 @@ def _run_experiment(experiment_dir, val_dir_override, device, batch_size, num_wo
     per_slice = []
     first_index = 0
     started = time.time()
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_root = experiment_dir / "inference_runs"
+    run_root.mkdir(parents=True, exist_ok=True)
+    run_dir = run_root / timestamp
+    suffix = 1
+    while run_dir.exists():
+        run_dir = run_root / f"{timestamp}_{suffix:02d}"
+        suffix += 1
+    run_dir.mkdir()
+    csv_path = run_dir / "per_slice_metrics.csv"
+    progress_path = run_dir / "progress.json"
+    csv_fields = [
+        "filename",
+        "slice_index",
+        "acceleration",
+        "rss_psnr_db",
+        "rss_ssim",
+        "target_rss_peak",
+    ]
+    with csv_path.open("w", newline="") as handle:
+        csv.DictWriter(handle, fieldnames=csv_fields).writeheader()
+
+    def summarize(records):
+        return {
+            "slice_count": len(records),
+            "mean_rss_psnr_db": float(np.mean([record["rss_psnr_db"] for record in records])),
+            "mean_rss_ssim": float(np.mean([record["rss_ssim"] for record in records])),
+        }
+
+    def write_progress(status):
+        progress = {
+            "experiment": experiment_dir.name,
+            "status": status,
+            "processed_slices": len(per_slice),
+            "total_slices": len(dataset),
+            "runtime_seconds": round(time.time() - started, 2),
+            "partial_metrics": summarize(per_slice) if per_slice else None,
+            "per_slice_csv": str(csv_path),
+        }
+        _write_json_atomic(progress_path, progress)
+
+    write_progress("running")
+    print(f"  Writing incremental results to {run_dir}", flush=True)
     model.eval()
 
     with torch.inference_mode():
@@ -208,9 +258,10 @@ def _run_experiment(experiment_dir, val_dir_override, device, batch_size, num_wo
             predicted_rss = _rss_image(predicted_coil_images).cpu().numpy()
             target_rss = _rss_image(target["image"]).cpu().numpy()
 
+            batch_records = []
             for offset in range(current_batch_size):
                 psnr, ssim, peak = _slice_metric(target_rss[offset], predicted_rss[offset])
-                per_slice.append({
+                batch_records.append({
                     "filename": filenames[offset],
                     "slice_index": slice_numbers[offset],
                     "acceleration": acceleration,
@@ -218,6 +269,12 @@ def _run_experiment(experiment_dir, val_dir_override, device, batch_size, num_wo
                     "rss_ssim": ssim,
                     "target_rss_peak": peak,
                 })
+            per_slice.extend(batch_records)
+            with csv_path.open("a", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=csv_fields)
+                writer.writerows(batch_records)
+            if (batch_index + 1) % 10 == 0:
+                write_progress("running")
             first_index += current_batch_size
             if (batch_index + 1) % 100 == 0 or batch_index + 1 == len(loader):
                 print(
@@ -228,13 +285,6 @@ def _run_experiment(experiment_dir, val_dir_override, device, batch_size, num_wo
     if not per_slice:
         raise ValueError(f"No validation slices found in {val_dir}.")
 
-    def summarize(records):
-        return {
-            "slice_count": len(records),
-            "mean_rss_psnr_db": float(np.mean([record["rss_psnr_db"] for record in records])),
-            "mean_rss_ssim": float(np.mean([record["rss_ssim"] for record in records])),
-        }
-
     by_acceleration = {
         str(acceleration): summarize([
             record for record in per_slice if record["acceleration"] == acceleration
@@ -242,15 +292,6 @@ def _run_experiment(experiment_dir, val_dir_override, device, batch_size, num_wo
         for acceleration in sorted({record["acceleration"] for record in per_slice})
     }
     overall = summarize(per_slice)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_root = experiment_dir / "inference_runs"
-    run_root.mkdir(parents=True, exist_ok=True)
-    run_dir = run_root / timestamp
-    suffix = 1
-    while run_dir.exists():
-        run_dir = run_root / f"{timestamp}_{suffix:02d}"
-        suffix += 1
-    run_dir.mkdir()
 
     result = {
         "experiment": experiment_dir.name,
@@ -274,14 +315,10 @@ def _run_experiment(experiment_dir, val_dir_override, device, batch_size, num_wo
         "overall": overall,
         "by_acceleration": by_acceleration,
         "runtime_seconds": round(time.time() - started, 2),
-        "per_slice_csv": str(run_dir / "per_slice_metrics.csv"),
+        "per_slice_csv": str(csv_path),
     }
-    with (run_dir / "per_slice_metrics.csv").open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(per_slice[0]))
-        writer.writeheader()
-        writer.writerows(per_slice)
-    with (run_dir / "summary.json").open("w") as handle:
-        json.dump(result, handle, indent=2, allow_nan=False)
+    _write_json_atomic(run_dir / "summary.json", result)
+    write_progress("complete")
 
     print(
         f"{experiment_dir.name}: mean RSS PSNR={overall['mean_rss_psnr_db']:.3f} dB, "
