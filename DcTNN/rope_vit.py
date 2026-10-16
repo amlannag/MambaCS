@@ -106,6 +106,21 @@ def compute_axial_cis_complex(dim: int, end_x: int, end_y: int, theta: float = 1
     return torch.cat([freqs_x, freqs_y], dim=-1)
 
 
+def axial_cis_complex_from_coords(t_x: torch.Tensor, t_y: torch.Tensor, dim: int, theta: float = 100.0):
+    """
+    Axial RoPE rotations for complex-valued Q/K at arbitrary (x, y) coordinates.
+    Same formula as compute_axial_cis_complex, but driven by explicit coordinate tensors of any shape
+    (..., ) instead of a dense end_x * end_y grid. Returns (..., dim) complex unit rotations; the first
+    dim//2 elements rotate by t_x, the remaining dim//2 by t_y. dim must be divisible by 2.
+    """
+    if t_x.shape != t_y.shape:
+        raise ValueError(f"t_x shape {tuple(t_x.shape)} must match t_y shape {tuple(t_y.shape)}")
+    freq = 1.0 / (theta ** (torch.arange(0, dim, 2, device=t_x.device)[: (dim // 2)].float() / dim))
+    ang_x = t_x.float().unsqueeze(-1) * freq
+    ang_y = t_y.float().unsqueeze(-1) * freq
+    return torch.cat([torch.polar(torch.ones_like(ang_x), ang_x), torch.polar(torch.ones_like(ang_y), ang_y)], dim=-1)
+
+
 def compute_mixed_cis_complex(dim: int, end_x: int, end_y: int, theta: float = 100.0):
     """
     Compute mixed RoPE frequencies for complex-valued Q/K tensors.
