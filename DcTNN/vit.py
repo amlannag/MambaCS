@@ -3,6 +3,7 @@ Defines ViT denoising blocks — cascades of encoder instances with a shared for
 """
 from torch import nn
 from .encoders import TokenEncoder, axialEncoder, crossAxialEncoder, fnetEncoder, pcaEncoder, pair
+from .neighbourhood_attention import CrossAxialNeighbourhoodEncoder
 
 
 class BaseVIT(nn.Module):
@@ -145,6 +146,58 @@ class CrossAttentionVIT(BaseVIT):
                 pos_emb_type=pos_emb_type, rope_theta=rope_theta, attn_type=attn_type,
                 row_stride=row_stride, ffn_sharing=ffn_sharing, shared_ffn=shared_ffn,
                 flattening_order=flattening_order, kspace_stem=kspace_stem
+            )
+            for _ in range(layerNo)
+        ])
+        super().__init__(N, layerNo, numCh, transformers)
+
+    def forward(self, xPrev, col_mask=None):
+        im = xPrev
+        for transformer in self.transformers:
+            im = transformer(im, col_mask=col_mask)
+        return im
+
+
+class CrossAxialNeighbourhoodVIT(BaseVIT):
+    """
+    Cascade of CrossAxialNeighbourhoodEncoder blocks: global column cross-attention (crossAxialEncoder) combined
+    with GRAPPA-style per-coil neighbourhood cross-attention (DcTNN/neighbourhood_attention.py).
+    Args beyond CrossAttentionVIT:
+        strip_len (int)             -       kx samples per token
+        n_neighbours (int)          -       nearest acquired columns taken from each side of a query column
+        kx_halo (int)               -       neighbouring strips on each side included as keys
+        keys_acquired_only (bool)   -       only acquired columns may be keys
+        local_attn_type (str)       -       "complex" | "real_valued" | "phase_aware" scoring of the local branch
+        combine (str)               -       "sum" | "gate" | "sequential" | "local_only"
+        local_layers (int)          -       layers of the local branch (None = num_encoder_layers)
+    """
+    def __init__(self, N, layerNo=2, numCh=1, d_model=None, nhead=8, num_encoder_layers=2,
+                    dim_feedforward=None, dropout=0.1, activation='relu',
+                    layer_norm_eps=1e-05, batch_first=True, device=None, dtype=None,
+                    pos_emb_type="Rope-Axial", rope_theta=100.0, rope_mixed_rotate=True, attn_type="complex",
+                    row_stride=1, ffn_sharing="none", shared_ffn=None, flattening_order="row_major",
+                    kspace_stem=None, strip_len=16, n_neighbours=3, kx_halo=1, keys_acquired_only=True,
+                    local_attn_type="complex", combine="sum", local_layers=None):
+        if attn_type != "complex":
+            raise ValueError(
+                "CrossAxialNeighbourhoodVIT only supports attn_type='complex'. "
+                f"Received '{attn_type}'."
+            )
+        if d_model is None:
+            _, image_width = N if isinstance(N, (tuple, list)) else (N, N)
+            d_model = image_width * numCh
+        if dim_feedforward is None:
+            dim_feedforward = int(d_model * 4)
+        transformers = nn.ModuleList([
+            CrossAxialNeighbourhoodEncoder(
+                N, numCh, d_model, nhead, num_encoder_layers, dim_feedforward,
+                dropout, activation, layer_norm_eps, batch_first, device, dtype,
+                pos_emb_type=pos_emb_type, rope_theta=rope_theta, attn_type=attn_type,
+                row_stride=row_stride, ffn_sharing=ffn_sharing, shared_ffn=shared_ffn,
+                flattening_order=flattening_order, kspace_stem=kspace_stem,
+                strip_len=strip_len, n_neighbours=n_neighbours, kx_halo=kx_halo,
+                keys_acquired_only=keys_acquired_only, local_attn_type=local_attn_type,
+                combine=combine, local_layers=local_layers,
             )
             for _ in range(layerNo)
         ])

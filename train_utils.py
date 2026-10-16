@@ -7,7 +7,7 @@ import torch
 from fastmri.data.subsample import EquiSpacedMaskFunc, RandomMaskFunc
 from fastmri.data.transforms import apply_mask
 
-from DcTNN.model import TokenVIT, axVIT, CrossAttentionVIT, FNetVIT, FixedAPTVIT, PCAVIT, cascadeNet
+from DcTNN.model import TokenVIT, axVIT, CrossAttentionVIT, CrossAxialNeighbourhoodVIT, FNetVIT, FixedAPTVIT, PCAVIT, cascadeNet
 from DcTNN.fixed_apt import resolve_fixed_apt_layout
 from DcTNN.util import _COMPLEX_ATTN_TYPES
 from ReconFormer import ReconFormerBaseline
@@ -143,6 +143,33 @@ _ENCODER_ARGS = {
             attn_type="complex" if cfg.attn_type == "complex_ms" else cfg.attn_type,
             row_stride=cfg.axial_row_stride,
             kspace_stem=_kspace_stem_args(cfg),
+        ),
+    ),
+    "cross_axial_neighbourhood": lambda cfg: (
+        CrossAxialNeighbourhoodVIT,
+        dict(
+            layerNo=cfg.layer_no,
+            numCh=cfg.num_channels,
+            d_model=getattr(cfg, "axial_d_model", None),
+            nhead=cfg.nhead_axial,
+            num_encoder_layers=cfg.num_encoder_layers,
+            layer_norm_eps=getattr(cfg, "layer_norm_eps", 1e-5),
+            dim_feedforward=None,
+            pos_emb_type=cfg.pos_emb_type,
+            rope_theta=cfg.rope_theta,
+            rope_mixed_rotate=cfg.rope_mixed_rotate,
+            # The global branch is plain complex cross-attention (as "cross_axial"); the local branch's scoring
+            # rule is neighbourhood_attn_type.
+            attn_type="complex" if cfg.attn_type == "complex_ms" else cfg.attn_type,
+            row_stride=cfg.axial_row_stride,
+            kspace_stem=_kspace_stem_args(cfg),
+            strip_len=getattr(cfg, "neighbourhood_strip_len", 16),
+            n_neighbours=getattr(cfg, "neighbourhood_n_neighbours", 3),
+            kx_halo=getattr(cfg, "neighbourhood_kx_halo", 1),
+            keys_acquired_only=getattr(cfg, "neighbourhood_keys_acquired_only", True),
+            local_attn_type=getattr(cfg, "neighbourhood_attn_type", "complex"),
+            combine=getattr(cfg, "neighbourhood_combine", "sum"),
+            local_layers=getattr(cfg, "neighbourhood_layers", None),
         ),
     ),
     "fnet": lambda cfg: (
@@ -365,7 +392,7 @@ def _build_model_impl(cfg):
         if cfg.attn_type in _COMPLEX_ATTN_TYPES:
             raise ValueError("kspace_real_channels needs a real-valued attn_type ('standard'); "
                              f"got {cfg.attn_type!r}")
-        unsupported = {"fixed_apt", "cross_axial", "pca"} & set(cfg.encoders)
+        unsupported = {"fixed_apt", "cross_axial", "cross_axial_neighbourhood", "pca"} & set(cfg.encoders)
         if unsupported:
             raise ValueError(f"kspace_real_channels does not support complex-only encoders: {sorted(unsupported)}")
         num_ch = 2 * num_ch

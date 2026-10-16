@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 from .dc import KSpace_DC
-from .vit import TokenVIT, axVIT, CrossAttentionVIT, FNetVIT, PCAVIT
+from .vit import TokenVIT, axVIT, CrossAttentionVIT, CrossAxialNeighbourhoodVIT, FNetVIT, PCAVIT
 from .fixed_apt import FixedAPTVIT
 from .encoders import TokenEncoder, axialEncoder, crossAxialEncoder, pair
 from .util import FeedForward, _COMPLEX_ATTN_TYPES, validate_flattening_order
@@ -88,7 +88,7 @@ class cascadeNet(nn.Module):
             if learning != "k_space":
                 raise ValueError("real_channels requires learning='k_space'")
             for cls, args in zip(encList, encArgs):
-                if cls in (FixedAPTVIT, CrossAttentionVIT, PCAVIT):
+                if cls in (FixedAPTVIT, CrossAttentionVIT, CrossAxialNeighbourhoodVIT, PCAVIT):
                     raise ValueError(f"{cls.__name__} is complex-only and cannot be used with real_channels")
                 if args.get("attn_type", "standard") in _COMPLEX_ATTN_TYPES:
                     raise ValueError("real_channels requires a real-valued attn_type ('standard') on every stage")

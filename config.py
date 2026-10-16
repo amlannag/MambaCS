@@ -6,6 +6,7 @@ To run experiments, define overrides in train_config.py and run:
 
 Encoder options for `encoders`:
     "cross_axial"   — vertical-only sampled/unsampled complex cross-attention
+    "cross_axial_neighbourhood" — cross_axial plus GRAPPA-style per-coil local neighbourhood cross-attention
     "fnet"          — FNet Fourier token mixing over vertical column tokens (no attention)
     "axial"         — axial row/column transformer (global structure)
     "kaleidoscope"  — kaleidoscope patch transformer (non-local features)
@@ -137,6 +138,23 @@ class Config:
     # True: FNet stages join ffn_sharing ("per_stage"/"global") like the attention stages (needs
     # fnet_with_embedding=True so the hidden width matches). False: FNet stages always keep their own FFNs.
     fnet_share_ffn: bool = False
+    # "cross_axial_neighbourhood" stage (DcTNN/neighbourhood_attention.py): GRAPPA-style local cross-attention over
+    # per-coil kx-strip tokens, run alongside the global cross_axial branch. Each unsampled (coil, strip, column) token
+    # attends to the neighbourhood_n_neighbours nearest acquired columns on each side, in all coils, in the strips
+    # s-kx_halo..s+kx_halo. Ignored by every other encoder. d_model / nhead come from axial_d_model / nhead_axial.
+    neighbourhood_strip_len: int = 16
+    neighbourhood_n_neighbours: int = 3
+    neighbourhood_kx_halo: int = 1
+    # True: only acquired columns are keys (no information from the model's own estimates).
+    neighbourhood_keys_acquired_only: bool = True
+    # Scoring rule of the local branch: "complex" (Hermitian, dual softmax, as the global branch), "real_valued"
+    # (real softmax of Re(q.conj(k))) or "phase_aware" (phase-damped scores, coherent aggregation).
+    neighbourhood_attn_type: str = "complex"
+    # How the local branch joins the global cross_axial branch: "sum", "gate" (learned scalar, sigmoid(0) at init),
+    # "sequential" (local sees the globally updated k-space), or "local_only" (global branch not built).
+    neighbourhood_combine: str = "sum"
+    # Layers of the local branch; None = num_encoder_layers (the global branch's count).
+    neighbourhood_layers: Optional[int] = None
     # Optional per-stage override of num_encoder_layers (one int per entry of `encoders`),
     # e.g. [1, 2, 1, 2] for a cross_axial/axial cascade with 1 layer per cross stage and 2 per axial.
     stage_encoder_layers: Optional[List[int]] = None
