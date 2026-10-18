@@ -40,4 +40,16 @@ _NEIGHBOURHOOD_BASE = {
 EXPERIMENTS += [
     dict(_NEIGHBOURHOOD_BASE, name="nbr3_cross3_crosspercoil3_axial3_r4",
          encoders=["neighbourhood"] * 3 + ["cross_axial"] * 3 + ["cross_axial_per_coil"] * 3 + ["axial"] * 3),
+    # Fixed equispaced mask (every 4th line from column 0 + ACS; effective R ~ 3.2). GRAPPA prefill of the model
+    # input (kernels cached per slice under <data_dir>/grappa_cache), then 3 axial stages. DC still uses the
+    # measured k-space only.
+    dict(_NEIGHBOURHOOD_BASE, name="equi_grappa_axial3_r4",
+         mask_type="equispaced", kspace_fill="grappa", grappa_phase_lines=2, grappa_readout_width=3,
+         grappa_ridge=1e-1, encoders=["axial"] * 3),
+    # Fixed equispaced mask, zero-filled input: fnet -> neighbourhood attention (2 acquired columns per side,
+    # 8 kx strips of 40 samples per column, 32 keys per query) -> 3 axial stages.
+    dict(_NEIGHBOURHOOD_BASE, name="equi_fnet_nbr_n2_s8_axial3_r4",
+         mask_type="equispaced", fnet_token_axis="both", fnet_with_embedding=True,
+         encoders=["fnet", "neighbourhood"] + ["axial"] * 3,
+         neighbourhood_n_neighbours=2, neighbourhood_strip_len=40, neighbourhood_kx_halo=0),
 ]
