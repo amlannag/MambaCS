@@ -534,17 +534,28 @@ def _default_center_fraction(accel):
 
 
 class FastMRIMaskGenerator:
+    """
+    Cartesian line masks for training / validation / inference.
+
+    mask_type:
+      "random"              fastMRI knee masks: outer columns drawn independently, new mask per call (seeded).
+      "equispaced"          every R-th outer column starting at column 0, ACS added on top. Deterministic: the mask
+                            depends only on (R, width), so it is built once and cached (`fixed_masks`), not
+                            regenerated per batch. Effective acceleration is below nominal (~3.2x at "4x").
+      "equispaced_fraction" fastMRI brain challenge masks: equispaced outer columns with the spacing adjusted so
+                            the total sampled fraction including the ACS is exactly 1/R; random offset per call.
+    """
+    FIXED_MASK_TYPES = ("equispaced", "equi_spaced")
+
     def __init__(self, accelerations, center_fractions=None, mask_type="random"):
         if center_fractions is not None and len(center_fractions) != len(accelerations):
             raise ValueError("center_fractions must be None or match acceleration_factors length")
 
         if mask_type == "random":
             mask_cls = RandomMaskFunc
-        elif mask_type in {"equispaced", "equi_spaced"}:
+        elif mask_type in self.FIXED_MASK_TYPES:
             mask_cls = EquiSpacedMaskFunc
         elif mask_type == "equispaced_fraction":
-            # fastMRI brain challenge masks: equispaced outer lines with the spacing adjusted so that the total
-            # sampled fraction including the ACS is exactly 1/R (fastmri's EquispacedMaskFractionFunc).
             mask_cls = EquispacedMaskFractionFunc
         else:
             raise ValueError("mask_type must be 'random', 'equispaced' or 'equispaced_fraction'")
@@ -552,6 +563,8 @@ class FastMRIMaskGenerator:
         if center_fractions is None:
             center_fractions = [_default_center_fraction(accel) for accel in accelerations]
 
+        self.mask_type = mask_type
+        self.fixed = mask_type in self.FIXED_MASK_TYPES
         self.center_fractions = {
             int(accel): float(center_fraction)
             for accel, center_fraction in zip(accelerations, center_fractions)
@@ -563,6 +576,18 @@ class FastMRIMaskGenerator:
             )
             for accel in accelerations
         }
+        # (accel, width) -> (mask [1, 1, W] float32 on CPU, num_low_frequencies); fixed mask types only
+        self.fixed_masks = {}
+
+    def fixed_mask(self, accel, width):
+        """Return the cached deterministic mask for (accel, width), building it on first use."""
+        if not self.fixed:
+            raise ValueError(f"mask_type '{self.mask_type}' is not a fixed mask type")
+        key = (int(accel), int(width))
+        if key not in self.fixed_masks:
+            mask, num_low_frequencies = self.mask_funcs[key[0]]((1, 1, width, 2), offset=0, seed=0)
+            self.fixed_masks[key] = (mask.reshape(1, 1, width).to(torch.float32), int(num_low_frequencies))
+        return self.fixed_masks[key]
 
     def apply(self, kspace_full, accel, seed=None):
         accel = int(accel)
@@ -570,6 +595,12 @@ class FastMRIMaskGenerator:
             raise ValueError(f"Acceleration R={accel} was not configured")
 
         device = kspace_full.device
+        if self.fixed:
+            mask, num_low_frequencies = self.fixed_mask(accel, kspace_full.shape[-1])
+            # same broadcast layout as fastmri's apply_mask: (1, ..., 1, W)
+            mask = mask.reshape((1,) * (kspace_full.ndim - 1) + (-1,)).to(device=device, dtype=kspace_full.real.dtype)
+            return kspace_full * mask, mask, num_low_frequencies
+
         # fastmri's apply_mask creates its mask on CPU, so run on CPU then restore device
         kspace_ri = torch.view_as_real(kspace_full).cpu()
         masked_ri, mask, num_low_frequencies = apply_mask(
