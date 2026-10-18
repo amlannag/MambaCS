@@ -28,8 +28,8 @@ from config import Config
 from progress import phase, progress_iter
 from train_config import EXPERIMENTS
 from DcTNN.lambda_scheduler import LambdaScheduler
-from train_utils import (FastMRIMaskGenerator, build_model, resolve_data_dirs, is_h5_dataset, is_multicoil_dataset,
-                         simulate_undersampling, unique_model_parameters,
+from train_utils import (FastMRIMaskGenerator, GrappaWeightCache, build_model, resolve_data_dirs, is_h5_dataset,
+                         is_multicoil_dataset, simulate_undersampling, unique_model_parameters,
                          validate_resume_flattening_order, validate_resume_fixed_apt_config)
 from DcTNN.fixed_apt import resolve_fixed_apt_layout
 from DcTNN.loss import LOSS_FUNCTION_DOMAINS, PerpendicularLoss, build_loss
@@ -221,6 +221,34 @@ def _unpack_kspace_batch(batch):
     if isinstance(batch, dict):
         return batch["kspace"], batch.get("fname")
     return batch, None
+
+
+def _uses_grappa_prefill(cfg):
+    return cfg.kspace_fill == "grappa"
+
+
+def _make_grappa_cache(cfg, data_dir):
+    """
+    GRAPPA kernels are calibrated per slice from its ACS and depend only on the slice and the mask, so with a
+    fixed mask they are cached under <data_dir>/grappa_cache/ and reused across epochs. Per-batch random masks
+    would never hit the cache, so it is only enabled for fixed mask types.
+    """
+    if not _uses_grappa_prefill(cfg) or not is_h5_dataset(cfg):
+        return None
+    if cfg.mask_type not in FastMRIMaskGenerator.FIXED_MASK_TYPES:
+        phase(f"GRAPPA kernel cache disabled: mask_type={cfg.mask_type!r} changes per batch")
+        return None
+    cache = GrappaWeightCache(data_dir)
+    phase(f"GRAPPA kernel cache: {cache.root}")
+    return cache
+
+
+def _grappa_kwargs(cache, batch):
+    """simulate_undersampling kwargs that let GRAPPA prefill use the kernel cache for this batch."""
+    if cache is None or not isinstance(batch, dict) or "slice_num" not in batch:
+        return {}
+    slices = batch["slice_num"].tolist() if torch.is_tensor(batch["slice_num"]) else list(batch["slice_num"])
+    return {"grappa_cache": cache, "sample_ids": list(zip(batch["fname"], slices))}
 
 
 def _uses_pca_encoder(cfg):
@@ -656,7 +684,7 @@ def _resolve_batch_size(cfg, dataset, device, checkpoint=None, starting_batch_si
 
 
 def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer,
-                    final_criterion, intermediate_criterion, loss_mode, device, epoch):
+                    final_criterion, intermediate_criterion, loss_mode, device, epoch, grappa_cache=None):
     model.train()
     total_loss = 0.0
     total_final_loss = 0.0
@@ -707,6 +735,7 @@ def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer
                 companding_centering=cfg.companding_centering,
                 norm_quantile=cfg.norm_quantile,
                 **volume_kwargs,
+                **_grappa_kwargs(grappa_cache, batch),
             )
 
         optimizer.zero_grad(set_to_none=True)
@@ -794,7 +823,7 @@ def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer
 
 @torch.no_grad()
 def validate(cfg, model, loader, accel_factors, image_size, final_criterion,
-             intermediate_criterion, loss_mode, device):
+             intermediate_criterion, loss_mode, device, grappa_cache=None):
     model.eval()
     total_loss = 0.0
     total_final_loss = 0.0
@@ -843,6 +872,7 @@ def validate(cfg, model, loader, accel_factors, image_size, final_criterion,
             companding_centering=cfg.companding_centering,
             norm_quantile=cfg.norm_quantile,
             **volume_kwargs,
+            **_grappa_kwargs(grappa_cache, batch),
         )
         recon, intermediates = model(
             model_input, DC_input, mask, return_intermediates=True, stats=stats, volume_id=volume_id
@@ -1225,7 +1255,8 @@ def main():
     phase(f"Loading train dataset from {train_data_dir}")
     # Edge-slice skipping applies to training only; validation / inference see every slice of a volume.
     train_ds = _make_dataset(train_data_dir, max_files=cfg.max_train_files,
-                             return_metadata=is_h5_dataset(cfg) and (_uses_pca_encoder(cfg) or _needs_volume_stats(cfg)),
+                             return_metadata=is_h5_dataset(cfg) and (_uses_pca_encoder(cfg) or _needs_volume_stats(cfg)
+                                                                     or _uses_grappa_prefill(cfg)),
                              skip_starting_slice=cfg.skip_starting_slice, skip_ending_slice=cfg.skip_ending_slice)
     if is_h5_dataset(cfg):
         phase("Probing one sample to determine image size...")
@@ -1238,6 +1269,8 @@ def main():
         max_files=cfg.max_val_files,
         return_metadata=is_h5_dataset(cfg),
     )
+    train_grappa_cache = _make_grappa_cache(cfg, train_data_dir)
+    val_grappa_cache = _make_grappa_cache(cfg, val_data_dir)
 
     checkpoint = None
     if cfg.resume and os.path.exists(cfg.resume):
@@ -1470,7 +1503,7 @@ def main():
 
         train_metrics = train_one_epoch(
             cfg, model, train_loader, cfg.acceleration_factors, mask_generator, optimizer,
-            final_criterion, intermediate_criterion, cfg.loss_mode, device, epoch
+            final_criterion, intermediate_criterion, cfg.loss_mode, device, epoch, grappa_cache=train_grappa_cache
         )
         scheduler.step()
         if not is_primary:
@@ -1480,7 +1513,7 @@ def main():
         val_metrics = validate(
             cfg, base_model, val_loader, cfg.acceleration_factors, cfg.image_size,
             _unwrap_distributed(final_criterion), _unwrap_distributed(intermediate_criterion),
-            cfg.loss_mode, device
+            cfg.loss_mode, device, grappa_cache=val_grappa_cache
         )
 
         lr      = scheduler.get_last_lr()[0]

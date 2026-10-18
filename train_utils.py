@@ -2,6 +2,9 @@
 Shared helpers used by training and inference.
 """
 
+import hashlib
+import os
+
 import numpy as np
 import torch
 from fastmri.data.subsample import EquiSpacedMaskFunc, EquispacedMaskFractionFunc, RandomMaskFunc
@@ -745,7 +748,12 @@ def _grappa_batch_features(kspace, target_column, phase_offsets, readout_offsets
 
 
 def _grappa_prefill_batch(kspace_us, line_mask, num_low_frequencies,
-                          phase_line_count, readout_kernel_width, ridge):
+                          phase_line_count, readout_kernel_width, ridge, weights=None):
+    """
+    GRAPPA-fill a batch that shares one line mask. `weights` may supply precomputed kernels as
+    {offsets: (B, F, C)} (see GrappaWeightCache); otherwise they are calibrated from each sample's ACS.
+    Returns (reconstructed, weights).
+    """
     _, _, _, width = kspace_us.shape
     acs_start = (width - num_low_frequencies + 1) // 2
     acs_stop = acs_start + num_low_frequencies
@@ -763,9 +771,16 @@ def _grappa_prefill_batch(kspace_us, line_mask, num_low_frequencies,
     }
     readout_radius = readout_kernel_width // 2
     readout_offsets = tuple(range(-readout_radius, readout_radius + 1))
+    if weights is not None:
+        reconstructed = kspace_us.copy()
+        for column, offsets in patterns.items():
+            features = _grappa_batch_features(kspace_us, column, offsets, readout_offsets)
+            reconstructed[:, :, :, column] = (features @ weights[offsets]).transpose(0, 2, 1)
+        return reconstructed, weights
+
     weights = {}
     identity = None
-    for offsets in set(patterns.values()):
+    for offsets in sorted(set(patterns.values())):
         targets = [
             column for column in range(acs_start, acs_stop)
             if all(acs_start <= column + offset < acs_stop for offset in offsets)
@@ -795,12 +810,87 @@ def _grappa_prefill_batch(kspace_us, line_mask, num_low_frequencies,
     for column, offsets in patterns.items():
         features = _grappa_batch_features(kspace_us, column, offsets, readout_offsets)
         reconstructed[:, :, :, column] = (features @ weights[offsets]).transpose(0, 2, 1)
-    return reconstructed
+    return reconstructed, weights
+
+
+class GrappaWeightCache:
+    """
+    On-disk cache of per-slice GRAPPA kernels so calibration runs once per slice, not once per epoch.
+
+    Kernels are calibrated from each slice's own ACS, so they depend on the slice (file, slice index, crop and coil
+    compression), the line mask and the kernel parameters. The mask and parameters are folded into a tag that names
+    the cache directory, <root>/grappa_cache/<tag>/; each slice is one .npy file holding the kernels of every source
+    pattern stacked in sorted-pattern order, (P, F, C) complex64. A tag mismatch (different mask / kernel) is simply
+    a different directory, and a shape mismatch falls back to recalibration. Only useful with a mask that is the same
+    for every batch (mask_type "equispaced"); with per-batch random masks every batch would get its own tag.
+    Writes are atomic (tmp + rename) so DDP ranks sharing a filesystem do not corrupt each other.
+    """
+    def __init__(self, root):
+        self.root = os.path.join(root, "grappa_cache")
+        self.hits = 0
+        self.misses = 0
+
+    @staticmethod
+    def tag(line_mask, num_low_frequencies, phase_line_count, readout_kernel_width, ridge, coils, height):
+        h = hashlib.sha1()
+        h.update(np.ascontiguousarray(line_mask, dtype=np.bool_).tobytes())
+        h.update(f"|{int(num_low_frequencies)}|{int(phase_line_count)}|{int(readout_kernel_width)}|{float(ridge):.6g}"
+                 f"|{int(coils)}|{int(height)}".encode())
+        return h.hexdigest()[:16]
+
+    def _path(self, tag, sample_id):
+        fname, slice_index = sample_id
+        return os.path.join(self.root, tag, f"{os.path.splitext(os.path.basename(str(fname)))[0]}__s{int(slice_index):03d}.npy")
+
+    def load(self, tag, sample_ids, pattern_keys, feature_dim, coils):
+        """Return {offsets: (B, F, C)} if every sample of the batch is cached with the expected shape, else None."""
+        expected = (len(pattern_keys), feature_dim, coils)
+        stacks = []
+        for sample_id in sample_ids:
+            path = self._path(tag, sample_id)
+            if not os.path.isfile(path):
+                self.misses += 1
+                return None
+            arr = np.load(path)
+            if arr.shape != expected:
+                self.misses += 1
+                return None
+            stacks.append(arr)
+        self.hits += len(sample_ids)
+        stacked = np.stack(stacks).astype(np.complex128)                       # (B, P, F, C)
+        return {offsets: stacked[:, index] for index, offsets in enumerate(pattern_keys)}
+
+    def save(self, tag, sample_ids, pattern_keys, weights):
+        os.makedirs(os.path.join(self.root, tag), exist_ok=True)
+        for index, sample_id in enumerate(sample_ids):
+            path = self._path(tag, sample_id)
+            if os.path.isfile(path):
+                continue
+            arr = np.stack([weights[offsets][index] for offsets in pattern_keys]).astype(np.complex64)
+            tmp = f"{path[:-4]}.{os.getpid()}.tmp.npy"
+            np.save(tmp, arr)
+            os.replace(tmp, path)
+
+
+def _grappa_pattern_keys(line_mask, num_low_frequencies, phase_line_count):
+    width = line_mask.shape[0]
+    acs_start = (width - num_low_frequencies + 1) // 2
+    acquired_columns = np.flatnonzero(line_mask)
+    offsets = {
+        _grappa_source_offsets(int(column), acquired_columns, phase_line_count, num_low_frequencies)
+        for column in np.flatnonzero(~line_mask)
+    }
+    return sorted(o for o in offsets if o is not None)
 
 
 @torch.no_grad()
 def grappa_prefill_kspace_us(kspace_us, mask, num_low_frequencies,
-                             phase_line_count=2, readout_kernel_width=3, ridge=1e-1):
+                             phase_line_count=2, readout_kernel_width=3, ridge=1e-1,
+                             cache=None, sample_ids=None):
+    """
+    cache / sample_ids : optional GrappaWeightCache and per-sample (fname, slice) ids. When both are given and the
+    batch shares one mask, calibrated kernels are loaded from / stored to the cache.
+    """
     if kspace_us.ndim != 4 or kspace_us.shape[1] < 2:
         raise ValueError(f"GRAPPA prefill expects multicoil [B, C>=2, H, W] k-space, got {tuple(kspace_us.shape)}")
     batch_size, _, _, width = kspace_us.shape
@@ -818,14 +908,25 @@ def grappa_prefill_kspace_us(kspace_us, mask, num_low_frequencies,
 
     samples = kspace_us.detach().cpu().numpy()
     if np.all(line_masks == line_masks[0]) and np.all(low_frequencies == low_frequencies[0]):
-        filled = _grappa_prefill_batch(
+        line_mask, low = line_masks[0], int(low_frequencies[0])
+        use_cache = cache is not None and sample_ids is not None and len(sample_ids) == batch_size
+        weights = tag = pattern_keys = None
+        if use_cache:
+            coils, height = samples.shape[1], samples.shape[2]
+            tag = cache.tag(line_mask, low, phase_line_count, readout_kernel_width, ridge, coils, height)
+            pattern_keys = _grappa_pattern_keys(line_mask, low, phase_line_count)
+            weights = cache.load(tag, sample_ids, pattern_keys, coils * phase_line_count * readout_kernel_width, coils)
+        filled, computed = _grappa_prefill_batch(
             samples,
-            line_masks[0],
-            int(low_frequencies[0]),
+            line_mask,
+            low,
             phase_line_count,
             readout_kernel_width,
             ridge,
+            weights=weights,
         )
+        if use_cache and weights is None:
+            cache.save(tag, sample_ids, pattern_keys, computed)
     else:
         filled = np.stack([
             _grappa_prefill_sample(
@@ -843,7 +944,8 @@ def grappa_prefill_kspace_us(kspace_us, mask, num_low_frequencies,
 
 @torch.no_grad()
 def interpolate_kspace_us(kspace_us, mask, strategy, num_low_frequencies=None,
-                          grappa_phase_lines=2, grappa_readout_width=3, grappa_ridge=1e-1):
+                          grappa_phase_lines=2, grappa_readout_width=3, grappa_ridge=1e-1,
+                          grappa_cache=None, sample_ids=None):
     """
     Replace the zero-filled unmeasured k-space with an interpolated estimate.
 
@@ -860,6 +962,7 @@ def interpolate_kspace_us(kspace_us, mask, strategy, num_low_frequencies=None,
             raise ValueError("num_low_frequencies is required for GRAPPA prefill.")
         return grappa_prefill_kspace_us(
             kspace_us, mask, num_low_frequencies, grappa_phase_lines, grappa_readout_width, grappa_ridge,
+            cache=grappa_cache, sample_ids=sample_ids,
         )
 
     from DcTNN.radial_interpolation import radial_complex_interpolate
@@ -894,8 +997,12 @@ def simulate_undersampling(
     grappa_phase_lines: int = 2,
     grappa_readout_width: int = 3,
     grappa_ridge: float = 1e-1,
+    grappa_cache=None,
+    sample_ids=None,
 ):
     """
+    grappa_cache / sample_ids : optional GrappaWeightCache and per-sample (fname, slice) ids so GRAPPA kernels are
+                   calibrated once per slice and reused across epochs (kspace_fill="grappa" only).
     volume_scale : optional [B] volume-wise normalisation scale (fastmri_magnitude / log_quantile, k_space learning):
                    replaces the per-slice quantile. norm_quantile : quantile of the zero-filled magnitude pinned to 1
                    by fastmri_magnitude / log_quantile (0.95 default, 1.0 = max). sigma_raw : optional [B] raw k-space noise std per sample, forwarded into stats
@@ -925,6 +1032,8 @@ def simulate_undersampling(
             grappa_phase_lines=grappa_phase_lines,
             grappa_readout_width=grappa_readout_width,
             grappa_ridge=grappa_ridge,
+            grappa_cache=grappa_cache,
+            sample_ids=sample_ids,
         )
     else:
         model_kspace = measured
