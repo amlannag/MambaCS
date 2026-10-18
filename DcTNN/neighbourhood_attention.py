@@ -31,7 +31,6 @@ from .rope_vit import axial_cis_complex_from_coords
 from .util import ComplexDropout, ComplexLayerNorm, FeedForward
 
 NEIGHBOURHOOD_ATTN_TYPES = ("complex", "real_valued", "phase_aware")
-NEIGHBOURHOOD_COMBINE_MODES = ("sum", "gate", "sequential", "local_only")
 
 
 def build_neighbour_tables(candidates: torch.Tensor, n: int):
@@ -355,71 +354,3 @@ class PerCoilCrossAxialEncoder(nn.Module):
         unsampled_idx = (~sampled).nonzero(as_tuple=True)[0]
         x = enc.verticalEncoder(x, sampled_idx, unsampled_idx)
         return enc.vertical_mlp_head(x).reshape(B, C, H, W)
-
-
-def build_cross_axial_encoder(coil_mode, image_size, numCh, *args, **kwargs):
-    """'folded': the standard crossAxialEncoder (all coils in one column token); 'per_coil': PerCoilCrossAxialEncoder."""
-    if coil_mode == "folded":
-        return crossAxialEncoder(image_size, numCh, *args, **kwargs)
-    if coil_mode == "per_coil":
-        return PerCoilCrossAxialEncoder(image_size, numCh, *args, **kwargs)
-    raise ValueError(f"Unknown cross_axial_coil_mode '{coil_mode}'. Choose from: folded, per_coil")
-
-
-class CrossAxialNeighbourhoodEncoder(nn.Module):
-    """
-    Global sampled->unsampled column cross-attention (crossAxialEncoder) combined with the local per-coil
-    neighbourhood attention on the same stage input. combine:
-      "sum"         global(x) + local(x)
-      "gate"        global(x) + sigmoid(gate) * local(x),  learned scalar gate initialised at 0
-      "sequential"  g = global(x); g + local(x + g)
-      "local_only"  local(x)  (the global branch is not built)
-    global_coil_mode: "folded" (standard crossAxialEncoder) or "per_coil" (PerCoilCrossAxialEncoder).
-    The optional k-space stem is built once here and applied before both branches.
-    """
-    def __init__(self, image_size, numCh=1, d_model=512, nhead=8, num_layers=6, dim_feedforward=None,
-                 dropout=0.1, activation='relu', layer_norm_eps=1e-05, batch_first=True,
-                 device=None, dtype=None, norm=None,
-                 pos_emb_type="Rope-Axial", rope_theta=100.0, attn_type="complex", row_stride=1,
-                 ffn_sharing="none", shared_ffn=None, flattening_order="row_major", kspace_stem=None,
-                 strip_len=16, n_neighbours=3, kx_halo=1, keys_acquired_only=True,
-                 local_attn_type="complex", combine="sum", local_layers=None, global_coil_mode="folded"):
-        super().__init__()
-        if combine not in NEIGHBOURHOOD_COMBINE_MODES:
-            raise ValueError(f"Unknown neighbourhood combine mode '{combine}'. Choose from: {NEIGHBOURHOOD_COMBINE_MODES}")
-        if flattening_order != "row_major":
-            raise ValueError("cross_axial_neighbourhood requires flattening_order='row_major'")
-        if dim_feedforward is None:
-            dim_feedforward = int(d_model * 4)
-        self.combine = combine
-        self.kspace_stem = build_kspace_stem(image_size, numCh, is_complex=True, **(kspace_stem or {}))
-        if shared_ffn is None and ffn_sharing == "per_stage":
-            shared_ffn = FeedForward(d_model, dim_feedforward, dropout, activation, True)
-        self.global_branch = None if combine == "local_only" else build_cross_axial_encoder(
-            global_coil_mode,
-            image_size, numCh, d_model, nhead, num_layers, dim_feedforward, dropout, activation, layer_norm_eps,
-            batch_first, device, dtype, norm, pos_emb_type=pos_emb_type, rope_theta=rope_theta, attn_type=attn_type,
-            row_stride=row_stride, ffn_sharing=ffn_sharing, shared_ffn=shared_ffn,
-            flattening_order=flattening_order, kspace_stem=None,
-        )
-        self.local_branch = NeighbourhoodEncoder(
-            image_size, numCh, d_model, nhead, local_layers or num_layers, dim_feedforward, dropout, activation,
-            layer_norm_eps, pos_emb_type=pos_emb_type, rope_theta=rope_theta, attn_type=local_attn_type,
-            strip_len=strip_len, n_neighbours=n_neighbours, kx_halo=kx_halo, keys_acquired_only=keys_acquired_only,
-            ffn_sharing=ffn_sharing, shared_ffn=shared_ffn, kspace_stem=None,
-        )
-        if combine == "gate":
-            self.gate = nn.Parameter(torch.zeros(()))
-
-    def forward(self, img, col_mask=None):
-        if self.kspace_stem is not None:
-            img = self.kspace_stem(img)
-        if self.combine == "local_only":
-            return self.local_branch(img, col_mask=col_mask)
-        g = self.global_branch(img, col_mask=col_mask)
-        if self.combine == "sequential":
-            return g + self.local_branch(img + g, col_mask=col_mask)
-        local = self.local_branch(img, col_mask=col_mask)
-        if self.combine == "gate":
-            return g + torch.sigmoid(self.gate) * local
-        return g + local
