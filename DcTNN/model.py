@@ -44,21 +44,24 @@ def _apply_ffn_sharing(N, encList, encArgs, ffn_sharing):
         return [dict(args, ffn_sharing="per_stage") if share else dict(args, ffn_sharing="none")
                 for args, share in zip(encArgs, shared)]
 
-    # global: one FeedForward shared by every non-FNet stage
-    specs = [_stage_ffn_spec(N, cls, args) for cls, args, share in zip(encList, encArgs, shared) if share]
-    if not specs:
-        return [dict(args, ffn_sharing="none") for args in encArgs]
-    base = specs[0]
-    if any(spec != base for spec in specs[1:]):
-        raise ValueError(
-            "ffn_sharing='global' requires every cascade stage to use the same "
-            "d_model, dim_feedforward, dropout, activation, and complex dtype. "
-            f"Got stage specs: {specs}"
-        )
-    d_model, dim_ff, dropout, activation, is_complex = base
-    shared_ffn = FeedForward(d_model, dim_ff, dropout, activation, is_complex)
-    return [dict(args, shared_ffn=shared_ffn) if share else dict(args, ffn_sharing="none")
-            for args, share in zip(encArgs, shared)]
+    # global: one FeedForward shared by every non-FNet stage of the same encoder type (axial with axial,
+    # fixed_apt with fixed_apt, ...); stages of different types never share.
+    specs = {}
+    for cls, args, share in zip(encList, encArgs, shared):
+        if share:
+            specs.setdefault(cls, []).append(_stage_ffn_spec(N, cls, args))
+    shared_ffns = {}
+    for cls, cls_specs in specs.items():
+        base = cls_specs[0]
+        if any(spec != base for spec in cls_specs[1:]):
+            raise ValueError(
+                f"ffn_sharing='global' requires every {cls.__name__} cascade stage to use the same "
+                "d_model, dim_feedforward, dropout, activation, and complex dtype. "
+                f"Got stage specs: {cls_specs}"
+            )
+        shared_ffns[cls] = FeedForward(*base)
+    return [dict(args, shared_ffn=shared_ffns[cls]) if share else dict(args, ffn_sharing="none")
+            for cls, args, share in zip(encList, encArgs, shared)]
 
 
 class cascadeNet(nn.Module):
