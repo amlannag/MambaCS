@@ -18,8 +18,8 @@ _NEIGHBOURHOOD_BASE = {
     "axial_d_model": 320,
     "axial_token_axis": "both",
     "num_gpus": 1,
-    "batch_size": 64,
-    "batch_size_search_start": 64,
+    "batch_size": 30,
+    "batch_size_search_start": 30,
     "encoders": ["neighbourhood", "cross_axial_per_coil", "cross_axial"] + ["axial"] * 3,
     "num_encoder_layers": 2,
     "attn_type": "complex",
@@ -38,9 +38,6 @@ _NEIGHBOURHOOD_BASE = {
 }
 
 EXPERIMENTS += [
-    dict(_NEIGHBOURHOOD_BASE, name="nbr3_r4", encoders=["neighbourhood"] * 3),
-    dict(_NEIGHBOURHOOD_BASE, name="cross3_r4", encoders=["cross_axial"] * 3),
-    dict(_NEIGHBOURHOOD_BASE, name="crosspercoil3_r4", encoders=["cross_axial_per_coil"] * 3),
     dict(_NEIGHBOURHOOD_BASE, name="nbr3_cross3_crosspercoil3_axial3_r4",
          encoders=["neighbourhood"] * 3 + ["cross_axial"] * 3 + ["cross_axial_per_coil"] * 3 + ["axial"] * 3),
 ]
