@@ -39,7 +39,6 @@ _NEIGHBOURHOOD_BASE = {
 
 EXPERIMENTS += [
     
-    dict(_NEIGHBOURHOOD_BASE, name="equi_grappa_axial3_apt3_r4",
-         mask_type="equispaced", kspace_fill="grappa", grappa_phase_lines=2, grappa_readout_width=3,
-         grappa_ridge=1e-1, encoders=["axial"] * 3 + ["fixed_apt"] * 3),
+    dict(_NEIGHBOURHOOD_BASE, name="equi_axial3_apt3_r4",
+         mask_type="equispaced", kspace_fill=None, encoders=["axial"] * 3 + ["fixed_apt"] * 3),
 ]
