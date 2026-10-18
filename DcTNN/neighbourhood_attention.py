@@ -314,6 +314,58 @@ class NeighbourhoodEncoder(nn.Module):
         return out.masked_fill(sampled[None, None, None, :], 0)
 
 
+class PerCoilCrossAxialEncoder(nn.Module):
+    """
+    crossAxialEncoder run on every coil independently with shared weights: coils are folded into the batch,
+    so each coil's unsampled columns attend only to that coil's acquired columns (token = one coil's column,
+    Linear(H -> d_model)). A learned coil-ID embedding is added to the column tokens so the shared weights know
+    which coil they operate on. Returns (B, C, H, W) like crossAxialEncoder.
+    """
+    def __init__(self, image_size, numCh=1, d_model=512, nhead=8, num_layers=6, dim_feedforward=None,
+                 dropout=0.1, activation='relu', layer_norm_eps=1e-05, batch_first=True,
+                 device=None, dtype=None, norm=None,
+                 pos_emb_type="Rope-Axial", rope_theta=100.0, attn_type="complex", row_stride=1,
+                 ffn_sharing="none", shared_ffn=None, flattening_order="row_major", kspace_stem=None):
+        super().__init__()
+        if flattening_order != "row_major":
+            raise ValueError("per-coil cross_axial requires flattening_order='row_major'")
+        self.kspace_stem = build_kspace_stem(image_size, numCh, is_complex=True, **(kspace_stem or {}))
+        self.inner = crossAxialEncoder(
+            image_size, 1, d_model, nhead, num_layers, dim_feedforward, dropout, activation, layer_norm_eps,
+            batch_first, device, dtype, norm, pos_emb_type=pos_emb_type, rope_theta=rope_theta,
+            attn_type=attn_type, row_stride=row_stride, ffn_sharing=ffn_sharing, shared_ffn=shared_ffn,
+            flattening_order=flattening_order, kspace_stem=None,
+        )
+        self.coil_embedding = nn.Parameter(torch.randn(numCh, 1, d_model, dtype=torch.cfloat))
+
+    def forward(self, img, col_mask=None):
+        if col_mask is None:
+            raise ValueError("crossAxialEncoder requires col_mask for sampled/unsampled routing")
+        if self.kspace_stem is not None:
+            img = self.kspace_stem(img)
+        B, C, H, W = img.shape
+        enc = self.inner
+        x = enc.to_vertical_embedding(img.reshape(B * C, 1, H, W))                       # (B*C, W, d)
+        x = x + self.coil_embedding.repeat(B, 1, 1)
+        if enc.pos_emb_type == "APE":
+            x = x + enc.vertical_pos_embedding
+        x = enc.dropout(x)
+        sampled = _extract_shared_column_mask(col_mask, W)
+        sampled_idx = sampled.nonzero(as_tuple=True)[0]
+        unsampled_idx = (~sampled).nonzero(as_tuple=True)[0]
+        x = enc.verticalEncoder(x, sampled_idx, unsampled_idx)
+        return enc.vertical_mlp_head(x).reshape(B, C, H, W)
+
+
+def build_cross_axial_encoder(coil_mode, image_size, numCh, *args, **kwargs):
+    """'folded': the standard crossAxialEncoder (all coils in one column token); 'per_coil': PerCoilCrossAxialEncoder."""
+    if coil_mode == "folded":
+        return crossAxialEncoder(image_size, numCh, *args, **kwargs)
+    if coil_mode == "per_coil":
+        return PerCoilCrossAxialEncoder(image_size, numCh, *args, **kwargs)
+    raise ValueError(f"Unknown cross_axial_coil_mode '{coil_mode}'. Choose from: folded, per_coil")
+
+
 class CrossAxialNeighbourhoodEncoder(nn.Module):
     """
     Global sampled->unsampled column cross-attention (crossAxialEncoder) combined with the local per-coil
@@ -322,6 +374,7 @@ class CrossAxialNeighbourhoodEncoder(nn.Module):
       "gate"        global(x) + sigmoid(gate) * local(x),  learned scalar gate initialised at 0
       "sequential"  g = global(x); g + local(x + g)
       "local_only"  local(x)  (the global branch is not built)
+    global_coil_mode: "folded" (standard crossAxialEncoder) or "per_coil" (PerCoilCrossAxialEncoder).
     The optional k-space stem is built once here and applied before both branches.
     """
     def __init__(self, image_size, numCh=1, d_model=512, nhead=8, num_layers=6, dim_feedforward=None,
@@ -330,7 +383,7 @@ class CrossAxialNeighbourhoodEncoder(nn.Module):
                  pos_emb_type="Rope-Axial", rope_theta=100.0, attn_type="complex", row_stride=1,
                  ffn_sharing="none", shared_ffn=None, flattening_order="row_major", kspace_stem=None,
                  strip_len=16, n_neighbours=3, kx_halo=1, keys_acquired_only=True,
-                 local_attn_type="complex", combine="sum", local_layers=None):
+                 local_attn_type="complex", combine="sum", local_layers=None, global_coil_mode="folded"):
         super().__init__()
         if combine not in NEIGHBOURHOOD_COMBINE_MODES:
             raise ValueError(f"Unknown neighbourhood combine mode '{combine}'. Choose from: {NEIGHBOURHOOD_COMBINE_MODES}")
@@ -342,7 +395,8 @@ class CrossAxialNeighbourhoodEncoder(nn.Module):
         self.kspace_stem = build_kspace_stem(image_size, numCh, is_complex=True, **(kspace_stem or {}))
         if shared_ffn is None and ffn_sharing == "per_stage":
             shared_ffn = FeedForward(d_model, dim_feedforward, dropout, activation, True)
-        self.global_branch = None if combine == "local_only" else crossAxialEncoder(
+        self.global_branch = None if combine == "local_only" else build_cross_axial_encoder(
+            global_coil_mode,
             image_size, numCh, d_model, nhead, num_layers, dim_feedforward, dropout, activation, layer_norm_eps,
             batch_first, device, dtype, norm, pos_emb_type=pos_emb_type, rope_theta=rope_theta, attn_type=attn_type,
             row_stride=row_stride, ffn_sharing=ffn_sharing, shared_ffn=shared_ffn,

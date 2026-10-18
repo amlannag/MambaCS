@@ -143,6 +143,7 @@ _ENCODER_ARGS = {
             attn_type="complex" if cfg.attn_type == "complex_ms" else cfg.attn_type,
             row_stride=cfg.axial_row_stride,
             kspace_stem=_kspace_stem_args(cfg),
+            coil_mode=getattr(cfg, "cross_axial_coil_mode", "folded"),
         ),
     ),
     "cross_axial_neighbourhood": lambda cfg: (
@@ -170,6 +171,7 @@ _ENCODER_ARGS = {
             local_attn_type=getattr(cfg, "neighbourhood_attn_type", "complex"),
             combine=getattr(cfg, "neighbourhood_combine", "sum"),
             local_layers=getattr(cfg, "neighbourhood_layers", None),
+            global_coil_mode=getattr(cfg, "cross_axial_coil_mode", "folded"),
         ),
     ),
     "fnet": lambda cfg: (

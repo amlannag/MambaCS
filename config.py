@@ -138,6 +138,12 @@ class Config:
     # True: FNet stages join ffn_sharing ("per_stage"/"global") like the attention stages (needs
     # fnet_with_embedding=True so the hidden width matches). False: FNet stages always keep their own FFNs.
     fnet_share_ffn: bool = False
+    # Coil handling of the "cross_axial" stage and of the global branch of "cross_axial_neighbourhood":
+    #   "folded"   — one column token holds all coils, Linear(H * num_channels -> d_model) (default, current behaviour)
+    #   "per_coil" — every coil is processed independently with shared weights (coils folded into the batch),
+    #                Linear(H -> d_model) plus a learned coil-ID embedding; a coil's unsampled columns attend only to
+    #                that coil's acquired columns.
+    cross_axial_coil_mode: str = "folded"
     # "cross_axial_neighbourhood" stage (DcTNN/neighbourhood_attention.py): GRAPPA-style local cross-attention over
     # per-coil kx-strip tokens, run alongside the global cross_axial branch. Each unsampled (coil, strip, column) token
     # attends to the neighbourhood_n_neighbours nearest acquired columns on each side, in all coils, in the strips
