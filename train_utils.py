@@ -90,6 +90,11 @@ def _kspace_stem_args(cfg):
     )
 
 
+def _non_axial_attn_type(cfg):
+    """Multi-scale Q/K (complex_ms) is an axial-only option; every other stage falls back to plain complex attention."""
+    return "complex" if cfg.attn_type == "complex_ms" else cfg.attn_type
+
+
 _ENCODER_ARGS = {
     "fixed_apt": lambda cfg: (
         FixedAPTVIT,
@@ -101,7 +106,7 @@ _ENCODER_ARGS = {
             num_encoder_layers=cfg.num_encoder_layers,
             layer_norm_eps=getattr(cfg, "layer_norm_eps", 1e-5),
             dim_feedforward=None,
-            attn_type=cfg.attn_type,
+            attn_type=_non_axial_attn_type(cfg),
             layout=resolve_fixed_apt_layout(getattr(cfg, "apt_layout", None)),
             rope_theta=cfg.rope_theta,
             rope_ref_grid=getattr(cfg, "apt_rope_ref_grid", None),
@@ -143,7 +148,7 @@ _ENCODER_ARGS = {
             rope_theta=cfg.rope_theta,
             rope_mixed_rotate=cfg.rope_mixed_rotate,
             # Cross stages only implement plain complex attention; multi-scale Q/K applies to the axial stages.
-            attn_type="complex" if cfg.attn_type == "complex_ms" else cfg.attn_type,
+            attn_type=_non_axial_attn_type(cfg),
             row_stride=cfg.axial_row_stride,
             kspace_stem=_kspace_stem_args(cfg),
         ),
@@ -161,7 +166,7 @@ _ENCODER_ARGS = {
             pos_emb_type=cfg.pos_emb_type,
             rope_theta=cfg.rope_theta,
             rope_mixed_rotate=cfg.rope_mixed_rotate,
-            attn_type="complex" if cfg.attn_type == "complex_ms" else cfg.attn_type,
+            attn_type=_non_axial_attn_type(cfg),
             row_stride=cfg.axial_row_stride,
             kspace_stem=_kspace_stem_args(cfg),
         ),
@@ -202,7 +207,7 @@ _ENCODER_ARGS = {
             pos_emb_type=cfg.pos_emb_type,
             rope_theta=cfg.rope_theta,
             rope_mixed_rotate=cfg.rope_mixed_rotate,
-            attn_type=cfg.attn_type,
+            attn_type=_non_axial_attn_type(cfg),
             row_stride=cfg.axial_row_stride,
             fft_norm=getattr(cfg, "fnet_fft_norm", "ortho"),
             token_axis=getattr(cfg, "fnet_token_axis", "vertical"),
@@ -224,7 +229,7 @@ _ENCODER_ARGS = {
             pos_emb_type=cfg.pos_emb_type,
             rope_theta=cfg.rope_theta,
             rope_mixed_rotate=cfg.rope_mixed_rotate,
-            attn_type=cfg.attn_type,
+            attn_type=_non_axial_attn_type(cfg),
             row_stride=cfg.axial_row_stride,
             tokenizer=getattr(cfg, "pca_tokenizer", "axial"),
             n_bins=getattr(cfg, "pca_bins", 3),
@@ -255,7 +260,7 @@ _ENCODER_ARGS = {
             pos_emb_type=cfg.pos_emb_type,
             rope_theta=cfg.rope_theta,
             rope_mixed_rotate=cfg.rope_mixed_rotate,
-            attn_type=cfg.attn_type,
+            attn_type=_non_axial_attn_type(cfg),
         ),
     ),
     "patch": lambda cfg: (
@@ -273,8 +278,7 @@ _ENCODER_ARGS = {
             pos_emb_type=cfg.pos_emb_type,
             rope_theta=cfg.rope_theta,
             rope_mixed_rotate=cfg.rope_mixed_rotate,
-            attn_type=cfg.attn_type,
-            attn_scales=tuple(getattr(cfg, "attn_scales", (1, 3))),
+            attn_type=_non_axial_attn_type(cfg),
             kspace_stem=_kspace_stem_args(cfg),
         ),
     ),

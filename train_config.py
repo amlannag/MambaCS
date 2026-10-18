@@ -41,6 +41,6 @@ EXPERIMENTS += [
     dict(_NEIGHBOURHOOD_BASE, name="equi_grappa_fnet_percoil_nbr_axial3_apt3_r4",
          mask_type="equispaced", kspace_fill="grappa", grappa_phase_lines=2, grappa_readout_width=3,
          grappa_ridge=1e-1, fnet_token_axis="both", fnet_with_embedding=True,
-         loss_mode="intermediate_unweighted",
+         loss_mode="intermediate_unweighted", attn_type="complex_ms", attn_scales=(1, 3),
          encoders=["fnet", "cross_axial_per_coil", "neighbourhood"] + ["axial"] * 3 + ["fixed_apt"] * 3),
 ]
