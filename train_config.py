@@ -17,7 +17,7 @@ _NEIGHBOURHOOD_BASE = {
     "image_size": (320, 320),
     "axial_d_model": 320,
     "axial_token_axis": "both",
-    "num_gpus": 2,
+    "num_gpus": 1,
     "batch_size": 64,
     "batch_size_search_start": 64,
     "encoders": ["neighbourhood", "cross_axial_per_coil", "cross_axial"] + ["axial"] * 3,
