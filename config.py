@@ -56,6 +56,9 @@ class Config:
 
     acceleration_factors: List[int] = field(default_factory=lambda: [4])
     center_fractions: Optional[List[float]] = field(default_factory=lambda: [0.08])
+    # "random" (fastMRI knee: columns drawn independently), "equispaced" (every R-th outer line, effective R lower
+    # than nominal because of the ACS), or "equispaced_fraction" (fastMRI brain challenge: equispaced outer lines
+    # with the spacing adjusted so the total sampled fraction including the ACS is exactly 1/R).
     mask_type: str = "random"
 
     val_fraction: float = 0.1

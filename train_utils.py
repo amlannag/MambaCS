@@ -4,7 +4,7 @@ Shared helpers used by training and inference.
 
 import numpy as np
 import torch
-from fastmri.data.subsample import EquiSpacedMaskFunc, RandomMaskFunc
+from fastmri.data.subsample import EquiSpacedMaskFunc, EquispacedMaskFractionFunc, RandomMaskFunc
 from fastmri.data.transforms import apply_mask
 
 from DcTNN.model import TokenVIT, axVIT, CrossAttentionVIT, PerCoilCrossAttentionVIT, NeighbourhoodVIT, FNetVIT, FixedAPTVIT, PCAVIT, cascadeNet
@@ -542,8 +542,12 @@ class FastMRIMaskGenerator:
             mask_cls = RandomMaskFunc
         elif mask_type in {"equispaced", "equi_spaced"}:
             mask_cls = EquiSpacedMaskFunc
+        elif mask_type == "equispaced_fraction":
+            # fastMRI brain challenge masks: equispaced outer lines with the spacing adjusted so that the total
+            # sampled fraction including the ACS is exactly 1/R (fastmri's EquispacedMaskFractionFunc).
+            mask_cls = EquispacedMaskFractionFunc
         else:
-            raise ValueError("mask_type must be 'random' or 'equispaced'")
+            raise ValueError("mask_type must be 'random', 'equispaced' or 'equispaced_fraction'")
 
         if center_fractions is None:
             center_fractions = [_default_center_fraction(accel) for accel in accelerations]
