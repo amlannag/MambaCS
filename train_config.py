@@ -1,46 +1,23 @@
 
 EXPERIMENTS = [
-]
-
-# ---------------------------------------------------------------------------
-# GRAPPA-style neighbourhood cross-attention (DcTNN/neighbourhood_attention.py). Three independent stage types,
-# composed through `encoders`:
-#   "neighbourhood"        per-coil local attention: each unsampled column attends to its 3 nearest acquired
-#                          columns on each side in all 8 coils (whole-column tokens: strip_len = 320, kx_halo = 0)
-#   "cross_axial_per_coil" global column cross-attention run on every coil independently (shared weights)
-#   "cross_axial"          global column cross-attention with all coils folded into one token
-# ---------------------------------------------------------------------------
-_NEIGHBOURHOOD_BASE = {
-    "prefix": "brain",
-    "dataset": "fastmri_brain",
-    "num_channels": 8,
-    "image_size": (320, 320),
-    "axial_d_model": 320,
-    "axial_token_axis": "both",
-    "num_gpus": 1,
-    "batch_size": 64,
-    "batch_size_search_start": 64,
-    "encoders": ["neighbourhood", "cross_axial_per_coil", "cross_axial"] + ["axial"] * 3,
-    "num_encoder_layers": 2,
-    "attn_type": "complex",
-    "ffn_sharing": "global",
-    "learning": "k_space",
-    "norm": "fastmri_magnitude",
-    "acceleration_factors": [4],
-    "center_fractions": [0.08],
-    "mask_type": "random",
-    "final_loss_type": "complex_l2",
-    "epochs": 100,
-    "neighbourhood_strip_len": 320,
-    "neighbourhood_n_neighbours": 3,
-    "neighbourhood_kx_halo": 0,
-    "neighbourhood_attn_type": "complex",
-}
-
-EXPERIMENTS += [
-    dict(_NEIGHBOURHOOD_BASE, name="equi_grappa_fnet_percoil_nbr_axial3_apt3_r4",
-         mask_type="equispaced", kspace_fill="grappa", grappa_phase_lines=2, grappa_readout_width=3,
-         grappa_ridge=1e-1, fnet_token_axis="both", fnet_with_embedding=True,
-         loss_mode="intermediate_unweighted", attn_type="complex_ms", attn_scales=(1, 3),
-         encoders=["fnet", "cross_axial_per_coil", "neighbourhood"] + ["axial"] * 3 + ["fixed_apt"] * 3),
+    # fastMRI knee, 3 axial cascades, complex-L2 final-only loss, random R=4 mask (the standard axial-3 baseline)
+    # with a learned data-consistency weight for EVERY k-space pixel (one [H, W] map per stage) instead of one
+    # scalar lambda per stage; every weight starts at 1.
+    {
+        "prefix": "fastMRI",
+        "name": "axial3_l2_final_pixelwise_dc_init1_r4",
+        "dataset": "fastmri",
+        "encoders": ["axial", "axial", "axial"],
+        "final_loss_type": "complex_l2",
+        "loss_mode": "final_only",
+        "mask_type": "random",
+        "acceleration_factors": [4],
+        "center_fractions": [0.08],
+        "lambda_schedule": "none",
+        "dc_type": "pixelwise",
+        "dc_lambda_init": 1.0,
+        "batch_size": 128,
+        "batch_size_search_start": 128,
+        "epochs": 100,
+    },
 ]

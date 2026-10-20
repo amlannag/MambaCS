@@ -1563,7 +1563,13 @@ def main():
                 metrics[f'ring_phase_weight_{k}'] = round(
                     math.exp(-max(value, base_final_criterion.s_floor)), 4
                 )
-        if base_model.lamb is not False:
+        if getattr(base_model, "dc_weights", None) is not None:
+            for i in range(base_model.dc_weights.shape[0]):
+                lam = base_model.lambda_map(i).detach()
+                metrics[f'lambda_{i}_mean'] = round(lam.mean().item(), 6)
+                metrics[f'lambda_{i}_min'] = round(lam.min().item(), 6)
+                metrics[f'lambda_{i}_max'] = round(lam.max().item(), 6)
+        elif base_model.lamb is not False:
             for i, lv in enumerate(base_model.lamb):
                 metrics[f'lambda_{i}'] = round(lv.item(), 6)
         elif lamb_sched is not None:

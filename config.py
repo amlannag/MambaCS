@@ -160,6 +160,10 @@ class Config:
     stage_encoder_layers: Optional[List[int]] = None
     layer_norm_eps: float = 1e-5
     learned_lambda: bool = True
+    # Data-consistency weights (lambda_schedule="none" only): "scalar" = one learned lambda per stage (original);
+    # "pixelwise" = one learned lambda per k-space pixel and stage, usable with any mask type.
+    dc_type: str = "scalar"
+    dc_lambda_init: float = 0.5
     # Domain the model operates in: "k_space", "image", or "complex_image"
     learning: str = "k_space"
     # k_space learning only: treat the complex k-space as 2 real channels (re, im) instead of one complex

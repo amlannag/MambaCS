@@ -34,7 +34,7 @@ _DATA_KEYS = {
 }
 _MODEL_KEYS = {
     "model_type", "encoders", "patch_size", "axial_row_stride", "axial_token_axis", "nhead_patch", "nhead_axial",
-    "layer_no", "num_encoder_layers", "layer_norm_eps", "learned_lambda", "learning", "kspace_real_channels",
+    "layer_no", "num_encoder_layers", "layer_norm_eps", "learned_lambda", "dc_type", "dc_lambda_init", "learning", "kspace_real_channels",
     "reconformer_num_ch", "reconformer_num_iter", "reconformer_down_scales",
     "reconformer_num_heads", "reconformer_depths", "reconformer_window_sizes",
     "reconformer_mlp_ratio", "reconformer_resi_connection", "reconformer_use_checkpoint",

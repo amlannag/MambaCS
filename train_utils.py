@@ -446,6 +446,8 @@ def _build_model_impl(cfg):
         learning=cfg.learning,
         ffn_sharing=cfg.ffn_sharing,
         real_channels=real_channels,
+        dc_type=getattr(cfg, "dc_type", "scalar"),
+        dc_lambda_init=getattr(cfg, "dc_lambda_init", 0.5),
     )
 
 

@@ -1,5 +1,8 @@
+import math
+
 import torch
 from torch import nn
+import torch.nn.functional as F
 from .dc import KSpace_DC
 from .vit import TokenVIT, axVIT, CrossAttentionVIT, PerCoilCrossAttentionVIT, NeighbourhoodVIT, FNetVIT, PCAVIT
 from .fixed_apt import FixedAPTVIT
@@ -77,6 +80,11 @@ class cascadeNet(nn.Module):
         encList (list)          Encoder classes for each cascade stage
         encArgs (list)          Dicts of kwargs for each encoder
         lamb (bool)             Whether to use a learned per-stage lambda
+        dc_type (str)           "scalar": one learned lambda per stage (default);
+                                "pixelwise": one learned lambda per k-space pixel and stage ([stages, H, W],
+                                softplus-constrained > 0, so it works with any sampling mask incl. random ones;
+                                only the sampled pixels of a given mask have an effect)
+        dc_lambda_init (float)  Initial value of every lambda (0.5 for the original scalar DC)
         learning (str)          "k_space", "image", or "complex_image"
         real_channels (bool)    k_space only: run the whole cascade (encoders and data consistency) on a
                                 real [B, 2, H, W] tensor whose channels are the real and imaginary parts
@@ -84,7 +92,8 @@ class cascadeNet(nn.Module):
                                 must then be real-valued with numCh doubled. The complex k-space is only
                                 recovered at the cascade output so the loss/validation path is unchanged.
     """
-    def __init__(self, N, encList, encArgs, lamb=True, learning="k_space", ffn_sharing="none", real_channels=False):
+    def __init__(self, N, encList, encArgs, lamb=True, learning="k_space", ffn_sharing="none", real_channels=False,
+                 dc_type="scalar", dc_lambda_init=0.5):
         super().__init__()
         self.real_channels = bool(real_channels)
         if self.real_channels:
@@ -97,8 +106,17 @@ class cascadeNet(nn.Module):
                     raise ValueError("real_channels requires a real-valued attn_type ('standard') on every stage")
                 if args.get("numCh", 1) % 2:
                     raise ValueError("real_channels needs an even numCh (2 real channels per complex channel)")
-        if lamb:
-            self.lamb = nn.Parameter(torch.ones(len(encList)) * 0.5)
+        if dc_type not in ("scalar", "pixelwise"):
+            raise ValueError(f"Unknown dc_type '{dc_type}'. Choose from: scalar, pixelwise")
+        self.dc_type = dc_type
+        self.dc_weights = None
+        if lamb and dc_type == "pixelwise":
+            height, width = N if isinstance(N, (tuple, list)) else (N, N)
+            # raw weights; lambda = softplus(raw) so every pixel's lambda stays positive, initialised at dc_lambda_init
+            self.dc_weights = nn.Parameter(torch.full((len(encList), height, width), math.log(math.expm1(dc_lambda_init))))
+            self.lamb = False
+        elif lamb:
+            self.lamb = nn.Parameter(torch.ones(len(encList)) * dc_lambda_init)
         else:
             self.lamb = False
         self.scheduled_lamb = None
@@ -178,12 +196,7 @@ class cascadeNet(nn.Module):
         x = xPrev
         intermediates = []
         for i, transformer in enumerate(self.transformers):
-            if self.lamb is not False:
-                lamb_i = self.lamb[i]
-            elif self.scheduled_lamb is not None:
-                lamb_i = self.scheduled_lamb
-            else:
-                lamb_i = None
+            lamb_i = self._lamb_for_stage(i)
             if isinstance(transformer, PCAVIT):
                 candidate = x + transformer(x, col_mask=sampleMask, volume_id=volume_id)
             else:
@@ -214,9 +227,20 @@ class cascadeNet(nn.Module):
         return x
 
     def _lamb_for_stage(self, i):
+        """Stage lambda: scalar parameter, [H, W] pixelwise map (broadcast over batch/channels), schedule value, or None."""
+        if self.dc_weights is not None:
+            return F.softplus(self.dc_weights[i])
         if self.lamb is not False:
             return self.lamb[i]
         return self.scheduled_lamb
+
+    def lambda_map(self, i):
+        """[H, W] lambda map of stage i (scalar lambdas expanded), for inspection."""
+        lamb = self._lamb_for_stage(i)
+        height, width = self.N if isinstance(self.N, (tuple, list)) else (self.N, self.N)
+        if lamb is None:
+            return None
+        return torch.as_tensor(lamb).expand(height, width) if torch.as_tensor(lamb).ndim == 0 else lamb
 
     def _forward_real_channels(self, xPrev, y, sampleMask, return_intermediates, stats):
         """
