@@ -106,6 +106,11 @@ class Config:
     # With several virtual coils a row token is width * num_channels wide; set e.g. 320 to project it down so the
     # transformer / FFN stay the single-coil size.
     axial_d_model: Optional[int] = None
+    # Axial encoder vertical tokens: split every k-space column into this many equal segments, each one token (S*W
+    # tokens laid out as an (S, W) grid). RoPE becomes 2-D over (segment, column) and with attn_type="complex_ms"
+    # the multi-scale Q/K convolutions become 2-D, so a scale-3 head looks at the neighbouring columns AND the
+    # segments above/below. 1 = whole-column tokens (original behaviour). image height must be divisible by it.
+    axial_col_segments: int = 1
     nhead_patch: int = 8
     nhead_axial: int = 8
     layer_no: int = 1

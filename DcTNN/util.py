@@ -298,7 +298,7 @@ class PatchRoller(PatchUnroller):
 
 def get_to_embedding(tokenizer_type, patch_height=None, patch_width=None, patch_dim=None, d_model=None,
                      image_height=None, image_width=None, numCh=None, row_stride=1, is_complex=False,
-                     flattening_order='row_major'):
+                     flattening_order='row_major', col_segments=1):
     validate_flattening_order(flattening_order, tokenizer_type)
     dtype = torch.cfloat if is_complex else None
     if tokenizer_type == "patch":
@@ -327,10 +327,14 @@ def get_to_embedding(tokenizer_type, patch_height=None, patch_width=None, patch_
              Rearrange('b c (h p) w -> b h (p w c)', p=row_stride)),
             nn.Linear(row_stride * image_width * numCh, d_model, dtype=dtype),
         )
+        if col_segments > 1 and flattening_order == 'dc_radial':
+            raise ValueError("col_segments > 1 requires flattening_order='row_major'")
         v_seq = nn.Sequential(
             (PatchUnroller((image_height, image_width), (image_height, 1), flattening_order)
-             if flattening_order == 'dc_radial' else Rearrange('b c h w -> b w (h c)')),
-            nn.Linear(image_height * numCh, d_model, dtype=dtype),
+             if flattening_order == 'dc_radial' else
+             # column segments as tokens, segment-major: token (s, w) = rows [s*H/S, (s+1)*H/S) of column w
+             Rearrange('b c (s h) w -> b (s w) (h c)', s=col_segments)),
+            nn.Linear(image_height // col_segments * numCh, d_model, dtype=dtype),
         )
         if is_complex:
             apply_trabelsi_(h_seq[1], criterion="glorot")
@@ -341,7 +345,8 @@ def get_to_embedding(tokenizer_type, patch_height=None, patch_width=None, patch_
 
 
 def get_from_embedding(tokenizer_type, patch_height=None, patch_width=None, grid_h=None, numCh=None,
-                       image_height=None, image_width=None, row_stride=1, flattening_order='row_major'):
+                       image_height=None, image_width=None, row_stride=1, flattening_order='row_major',
+                       col_segments=1):
     validate_flattening_order(flattening_order, tokenizer_type)
     if flattening_order == 'dc_radial':
         if tokenizer_type == 'patch':
@@ -360,7 +365,7 @@ def get_from_embedding(tokenizer_type, patch_height=None, patch_width=None, grid
     elif tokenizer_type == "axial":
         return (
             Rearrange('b h (p w c) -> b c (h p) w', p=row_stride, w=image_width, c=numCh),
-            Rearrange('b w (h c) -> b c h w', c=numCh),
+            Rearrange('b (s w) (h c) -> b c (s h) w', s=col_segments, w=image_width, c=numCh),
         )
     else:
         raise ValueError(f"Unknown tokenizer_type '{tokenizer_type}'. Choose from: patch, kaleidoscope, axial")
@@ -368,7 +373,7 @@ def get_from_embedding(tokenizer_type, patch_height=None, patch_width=None, grid
 
 def get_mlp_head(tokenizer_type, d_model, patch_dim=None, patch_height=None, patch_width=None,
                  grid_h=None, numCh=None, image_height=None, image_width=None, row_stride=1, is_complex=False,
-                 flattening_order='row_major', layer_norm_eps=1e-5):
+                 flattening_order='row_major', layer_norm_eps=1e-5, col_segments=1):
     validate_flattening_order(flattening_order, tokenizer_type)
     norm = ComplexLayerNorm if is_complex else nn.LayerNorm
     dtype = torch.cfloat if is_complex else None
@@ -387,9 +392,9 @@ def get_mlp_head(tokenizer_type, d_model, patch_dim=None, patch_height=None, pat
     elif tokenizer_type == "axial":
         h_from, v_from = get_from_embedding("axial", numCh=numCh, image_height=image_height,
                                             image_width=image_width, row_stride=row_stride,
-                                            flattening_order=flattening_order)
+                                            flattening_order=flattening_order, col_segments=col_segments)
         h_seq = nn.Sequential(norm(d_model, eps=layer_norm_eps), nn.Linear(d_model, row_stride * image_width * numCh, dtype=dtype), h_from)
-        v_seq = nn.Sequential(norm(d_model, eps=layer_norm_eps), nn.Linear(d_model, image_height * numCh, dtype=dtype), v_from)
+        v_seq = nn.Sequential(norm(d_model, eps=layer_norm_eps), nn.Linear(d_model, image_height // col_segments * numCh, dtype=dtype), v_from)
         if is_complex:
             apply_trabelsi_(h_seq[1], criterion="glorot")
             apply_trabelsi_(v_seq[1], criterion="glorot")

@@ -88,13 +88,14 @@ class axVIT(BaseVIT):
         rope_mixed_rotate (bool)    -       Unused, kept for API consistency
         ffn_sharing (str)           -       "none" | "per_stage" | "global"
         shared_ffn                  -       Optional externally-provided shared FFN (global mode)
+        col_segments (int)          -       Vertical tokens per column (column split into equal segments; 1 = whole column)
     """
     def __init__(self, N, layerNo=2, numCh=1, d_model=None, nhead=8, num_encoder_layers=2,
                     dim_feedforward=None, dropout=0.1, activation='relu',
                     layer_norm_eps=1e-05, batch_first=True, device=None, dtype=None,
                     pos_emb_type="APE", rope_theta=100.0, rope_mixed_rotate=True, attn_type="standard",
                     row_stride=1, mask_vertical_attn="none", ffn_sharing="none", shared_ffn=None, flattening_order="row_major",
-                    attn_scales=(1, 3), kspace_stem=None, token_axis="both"):
+                    attn_scales=(1, 3), kspace_stem=None, token_axis="both", col_segments=1):
         if d_model is None:
             _, image_width = N if isinstance(N, (tuple, list)) else (N, N)
             d_model = image_width * numCh
@@ -107,7 +108,7 @@ class axVIT(BaseVIT):
                          row_stride=row_stride, mask_vertical_attn=mask_vertical_attn,
                          ffn_sharing=ffn_sharing, shared_ffn=shared_ffn,
                          flattening_order=flattening_order, attn_scales=attn_scales, kspace_stem=kspace_stem,
-                         token_axis=token_axis)
+                         token_axis=token_axis, col_segments=col_segments)
             for _ in range(layerNo)
         ])
         super().__init__(N, layerNo, numCh, transformers)

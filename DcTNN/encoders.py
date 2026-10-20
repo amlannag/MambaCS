@@ -265,14 +265,28 @@ class axialEncoder(nn.Module):
                     device=None, dtype=None, norm=None,
                     pos_emb_type="APE", rope_theta=100.0, attn_type="standard", row_stride=1,
                     mask_vertical_attn="none", ffn_sharing="none", shared_ffn=None,
-                    flattening_order="row_major", attn_scales=(1, 3), kspace_stem=None, token_axis="both"):
+                    flattening_order="row_major", attn_scales=(1, 3), kspace_stem=None, token_axis="both",
+                    col_segments=1):
+        """
+        col_segments : split every k-space column into this many equal vertical segments; each segment is one
+                       vertical token (S*W tokens of H/S*numCh values instead of W tokens of H*numCh). Tokens are laid
+                       out as a row-major (S, W) grid: RoPE is 2-D over (segment, column) and, with
+                       attn_type='complex_ms', the multi-scale Q/K convolutions are 2-D, so a scale-3 head sees the
+                       neighbouring columns (left/right) AND the segments above/below. 1 = whole-column tokens.
+        """
         super().__init__()
 
         if token_axis not in ("both", "vertical"):
             raise ValueError(f"token_axis must be 'both' or 'vertical', got '{token_axis}'")
         if token_axis == "vertical" and row_stride != 1:
             raise ValueError("row_stride only applies to horizontal tokens; use row_stride=1 with token_axis='vertical'")
+        col_segments = int(col_segments)
+        if col_segments < 1:
+            raise ValueError(f"col_segments must be >= 1, got {col_segments}")
+        if col_segments > 1 and flattening_order != "row_major":
+            raise ValueError("col_segments > 1 requires flattening_order='row_major'")
         self.token_axis = token_axis
+        self.col_segments = col_segments
         self.pos_emb_type = pos_emb_type
         self.d_model = d_model
         self.is_complex = attn_type in _COMPLEX_ATTN_TYPES
@@ -292,16 +306,21 @@ class axialEncoder(nn.Module):
 
         image_height, image_width = pair(image_size)
         h_tokens = image_height // row_stride  # horizontal token count after row grouping
+        if image_height % col_segments:
+            raise ValueError(f"image height {image_height} must be divisible by col_segments={col_segments}")
+        v_tokens = col_segments * image_width   # vertical token count: (segment, column) grid, row-major
+        self.vertical_token_grid = (col_segments, image_width)
 
         horizontal_embedding, self.to_vertical_embedding = get_to_embedding(
             "axial", image_height=image_height, image_width=image_width, numCh=numCh, d_model=d_model,
-            row_stride=row_stride, is_complex=self.is_complex, flattening_order=flattening_order)
+            row_stride=row_stride, is_complex=self.is_complex, flattening_order=flattening_order,
+            col_segments=col_segments)
         self.to_horizontal_embedding = horizontal_embedding if token_axis == "both" else None
 
         horizontal_head, self.vertical_mlp_head = get_mlp_head(
             "axial", d_model, numCh=numCh, image_height=image_height, image_width=image_width,
             row_stride=row_stride, is_complex=self.is_complex, flattening_order=flattening_order,
-            layer_norm_eps=layer_norm_eps)
+            layer_norm_eps=layer_norm_eps, col_segments=col_segments)
         self.horizontal_mlp_head = horizontal_head if token_axis == "both" else None
 
         self.dropout = ComplexDropout(dropout) if self.is_complex else nn.Dropout(dropout)
@@ -316,11 +335,12 @@ class axialEncoder(nn.Module):
             ape_dtype = torch.cfloat if self.is_complex else None
             if token_axis == "both":
                 self.horizontal_pos_embedding = nn.Parameter(torch.randn(1, h_tokens, d_model, dtype=ape_dtype))
-            self.vertical_pos_embedding = nn.Parameter(torch.randn(1, image_width, d_model, dtype=ape_dtype))
+            self.vertical_pos_embedding = nn.Parameter(torch.randn(1, v_tokens, d_model, dtype=ape_dtype))
 
         elif pos_emb_type in ("Rope-Axial", "Rope-Mixed"):
             freqs_h = cis_fn(dim=head_dim, end_x=h_tokens,    end_y=1, theta=rope_theta)
-            freqs_v = cis_fn(dim=head_dim, end_x=image_width, end_y=1, theta=rope_theta)
+            # 2-D over the (segment, column) grid; with col_segments=1 this is the original 1-D column RoPE
+            freqs_v = cis_fn(dim=head_dim, end_x=image_width, end_y=col_segments, theta=rope_theta)
 
         if shared_ffn is None and ffn_sharing == "per_stage":
             shared_ffn = FeedForward(d_model, dim_feedforward, dropout, activation, self.is_complex)
@@ -334,7 +354,8 @@ class axialEncoder(nn.Module):
             self.horizontalEncoder = None
         v_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation,
                                           layer_norm_eps, freqs_cis=freqs_v, attn_type=attn_type,
-                                          ff=shared_ffn, attn_scales=attn_scales)
+                                          ff=shared_ffn, attn_scales=attn_scales,
+                                          token_grid=self.vertical_token_grid if col_segments > 1 else None)
         self.verticalEncoder = TransformerEncoder(v_layer, numLayers, tie_ffn=shared_ffn is not None)
 
     def forward(self, img, col_mask=None):
@@ -357,9 +378,10 @@ class axialEncoder(nn.Module):
             x = x + self.vertical_pos_embedding
         x = self.dropout(x)
         if col_mask is not None and self.mask_vertical_attn != "none":
-            W = x.shape[1]
+            W = x.shape[1] // self.col_segments
             sampled = _extract_shared_column_mask(col_mask, W)
-            attn_mask = _build_vertical_attn_mask(sampled, self.mask_vertical_attn)
+            # every segment of a column shares that column's sampled flag (tokens are segment-major)
+            attn_mask = _build_vertical_attn_mask(sampled.repeat(self.col_segments), self.mask_vertical_attn)
             x = self.verticalEncoder(x, attn_mask=attn_mask)
         else:
             x = self.verticalEncoder(x)

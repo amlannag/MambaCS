@@ -130,6 +130,7 @@ _ENCODER_ARGS = {
             row_stride=cfg.axial_row_stride,
             mask_vertical_attn=cfg.mask_vertical_attn,
             token_axis=getattr(cfg, "axial_token_axis", "both"),
+            col_segments=getattr(cfg, "axial_col_segments", 1),
             attn_scales=tuple(getattr(cfg, "attn_scales", (1, 3))),
             kspace_stem=_kspace_stem_args(cfg),
         ),
