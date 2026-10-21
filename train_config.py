@@ -52,5 +52,8 @@ EXPERIMENTS += [
     dict(_BRAIN_FNET_NBR_AXIAL3, name="equi_fnet_percoil_nbr_axial3_seg4_apt3_ms3_pixdc_r4_100ep",
          encoders=["fnet","neighbourhood", "cross_axial_per_coil"] + ["axial"] * 3 + ["fixed_apt"] * 3,
          loss_mode="intermediate_unweighted",
-         attn_type="complex_ms", attn_scales=(1, 3)),
+         attn_type="complex_ms", attn_scales=(1, 3),
+         # continue the run cut off by the 24h limit (job 30218089); same W&B run as the first leg
+         resume="../Experiments/brain_equi_fnet_percoil_nbr_axial3_seg4_apt3_ms3_pixdc_r4_100ep/latest.pth",
+         wandb_run_id="8r0qynli"),
 ]

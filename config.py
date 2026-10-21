@@ -32,6 +32,9 @@ class Config:
     # Set to a checkpoint path (e.g. "../Experiments/dctnn_baseline/latest.pth")
     # to resume a stopped run; leave as None to start fresh
     resume: Optional[str] = None
+    # W&B run to continue when resuming. None = use the run id stored in the resume checkpoint
+    # (new runs save it automatically); set explicitly for checkpoints written before that was recorded.
+    wandb_run_id: Optional[str] = None
 
     # ---------------------------------------------------------------------------
     # Data

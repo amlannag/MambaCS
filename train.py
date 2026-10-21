@@ -1338,15 +1338,20 @@ def main():
             json.dump(grouped_config, f, indent=2)
 
     _WANDB_PROJECT = {"fastmri": "fastMRI", "fastmri_brain": "fastMRI-brain", "oasis": "OASIS"}
+    wandb_run_id = None
     if is_primary:
         phase("Initializing Weights & Biases...")
         t_wandb = time.time()
+        resume_run_id = cfg.wandb_run_id or (checkpoint.get('wandb_run_id') if checkpoint is not None else None)
         wandb.init(
             project=_WANDB_PROJECT.get(cfg.dataset, "MambaCS"),
             name=f"{cfg.prefix}_{cfg.name}",
             config=grouped_config,
+            id=resume_run_id,
+            resume="allow" if resume_run_id else None,
         )
-        phase(f"W&B ready in {time.time() - t_wandb:.1f}s")
+        wandb_run_id = wandb.run.id
+        phase(f"W&B ready in {time.time() - t_wandb:.1f}s" + (f" (resumed run {resume_run_id})" if resume_run_id else ""))
 
         print(f"Experiment : {cfg.prefix}_{cfg.name}")
         print(f"Encoders   : {cfg.encoders}")
@@ -1595,6 +1600,7 @@ def main():
                 'best_val_psnr':  val_metrics['psnr'],
                 'val_psnr':       val_metrics['psnr'],
                 'val_volume_psnr': val_metrics['volume_psnr'],
+                'wandb_run_id':  wandb_run_id,
             }, best_path)
             print(f"  -> Best model saved  ({cfg.checkpoint_metric}={best_val_metric:.4f})")
 
@@ -1610,6 +1616,7 @@ def main():
             'best_val_metric': best_val_metric,
             'best_val_psnr': val_metrics['psnr'],
             'val_volume_psnr': val_metrics['volume_psnr'],
+            'wandb_run_id':  wandb_run_id,
         }, latest_path)
 
         if epoch == cfg.epochs - 1:
