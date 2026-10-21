@@ -6,10 +6,44 @@ import torch.nn.functional as F
 from .dc import KSpace_DC
 from .vit import TokenVIT, axVIT, CrossAttentionVIT, PerCoilCrossAttentionVIT, NeighbourhoodVIT, FNetVIT, PCAVIT
 from .fixed_apt import FixedAPTVIT
+from .band_split import BandSplitVIT, FreqSplitSigmas
 from .encoders import TokenEncoder, axialEncoder, crossAxialEncoder, pair
 from .util import FeedForward, _COMPLEX_ATTN_TYPES, validate_flattening_order
 
-__all__ = ['cascadeNet', 'TokenVIT', 'axVIT', 'CrossAttentionVIT', 'FNetVIT', 'FixedAPTVIT', 'TokenEncoder', 'axialEncoder', 'crossAxialEncoder']
+__all__ = ['cascadeNet', 'TokenVIT', 'axVIT', 'CrossAttentionVIT', 'FNetVIT', 'FixedAPTVIT', 'BandSplitVIT', 'TokenEncoder', 'axialEncoder', 'crossAxialEncoder']
+
+
+def _flatten_stages(encList, encArgs):
+    """
+    Leaf (cls, args) pairs of a cascade: a BandSplitVIT stage contributes its two experts (args["low"], args["high"],
+    each a (cls, args) pair) instead of itself. Returns (leaf classes, leaf args, layout) where layout[i] is None for a
+    plain stage or (low_leaf_index, high_leaf_index) for a split stage, so `_unflatten_stages` can rebuild the lists.
+    """
+    leaf_cls, leaf_args, layout = [], [], []
+    for cls, args in zip(encList, encArgs):
+        if cls is BandSplitVIT:
+            layout.append((len(leaf_cls), len(leaf_cls) + 1))
+            for key in ("low", "high"):
+                sub_cls, sub_args = args[key]
+                leaf_cls.append(sub_cls)
+                leaf_args.append(sub_args)
+        else:
+            layout.append(len(leaf_cls))
+            leaf_cls.append(cls)
+            leaf_args.append(args)
+    return leaf_cls, leaf_args, layout
+
+
+def _unflatten_stages(encArgs, leaf_cls, leaf_args, layout):
+    """Inverse of _flatten_stages: stage args with (possibly updated) leaf args put back in place."""
+    out = []
+    for args, slot in zip(encArgs, layout):
+        if isinstance(slot, tuple):
+            low, high = slot
+            out.append(dict(args, low=(leaf_cls[low], leaf_args[low]), high=(leaf_cls[high], leaf_args[high])))
+        else:
+            out.append(leaf_args[slot])
+    return out
 
 
 def _stage_ffn_spec(N, cls, args):
@@ -37,7 +71,14 @@ def _apply_ffn_sharing(N, encList, encArgs, ffn_sharing):
     FNet stages are excluded from FFN sharing by default: their per-token FFN is all they learn, and their hidden
     width may differ from the attention stages (un-embedded tokens), so they keep their own FFNs unless the stage
     args set `share_ffn=True` (requires embedded tokens so the width matches the attention stages).
+    The experts of a BandSplitVIT stage take part individually (an axial expert shares with the other axial stages, ...).
     """
+    leaf_cls, leaf_args, layout = _flatten_stages(encList, encArgs)
+    leaf_args = _apply_ffn_sharing_flat(N, leaf_cls, leaf_args, ffn_sharing)
+    return _unflatten_stages(encArgs, leaf_cls, leaf_args, layout)
+
+
+def _apply_ffn_sharing_flat(N, encList, encArgs, ffn_sharing):
     encArgs = [dict(args) for args in encArgs]
     share_flags = [args.pop("share_ffn", False) for args in encArgs]
     if ffn_sharing == "none":
@@ -91,15 +132,32 @@ class cascadeNet(nn.Module):
                                 of the complex k-space, instead of a complex [B, 1, H, W] tensor. Encoders
                                 must then be real-valued with numCh doubled. The complex k-space is only
                                 recovered at the cascade output so the loss/validation path is unchanged.
+        freq_split_sigma_init / _learned / _bounds
+                                sigma of every BandSplitVIT stage in cascade order (DcTNN/band_split.py): the
+                                Gaussian partition boundaries, non-decreasing along the cascade, learned or fixed.
+                                A BandSplitVIT stage's args hold its experts as args["low"] / args["high"] = (cls, args).
     """
     def __init__(self, N, encList, encArgs, lamb=True, learning="k_space", ffn_sharing="none", real_channels=False,
-                 dc_type="scalar", dc_lambda_init=0.5):
+                 dc_type="scalar", dc_lambda_init=0.5, freq_split_sigma_init=None, freq_split_sigma_learned=True,
+                 freq_split_sigma_bounds=(0.05, math.sqrt(2.0))):
         super().__init__()
         self.real_channels = bool(real_channels)
+        self.split_stage_index = {i: n for n, i in enumerate(i for i, cls in enumerate(encList) if cls is BandSplitVIT)}
+        self.freq_split_sigmas = None
+        if self.split_stage_index:
+            if learning != "k_space":
+                raise ValueError("freq_split stages require learning='k_space'")
+            if self.real_channels:
+                raise ValueError("freq_split stages cannot be used with real_channels")
+            if freq_split_sigma_init is None or len(freq_split_sigma_init) != len(self.split_stage_index):
+                raise ValueError(f"freq_split_sigma_init needs one value per freq_split stage ({len(self.split_stage_index)})")
+            self.freq_split_sigmas = FreqSplitSigmas(freq_split_sigma_init, learned=freq_split_sigma_learned,
+                                                     bounds=freq_split_sigma_bounds)
+        leaf_cls, leaf_args, _ = _flatten_stages(encList, encArgs)
         if self.real_channels:
             if learning != "k_space":
                 raise ValueError("real_channels requires learning='k_space'")
-            for cls, args in zip(encList, encArgs):
+            for cls, args in zip(leaf_cls, leaf_args):
                 if cls in (FixedAPTVIT, CrossAttentionVIT, PerCoilCrossAttentionVIT, NeighbourhoodVIT, PCAVIT):
                     raise ValueError(f"{cls.__name__} is complex-only and cannot be used with real_channels")
                 if args.get("attn_type", "standard") in _COMPLEX_ATTN_TYPES:
@@ -133,9 +191,9 @@ class cascadeNet(nn.Module):
                 f"Unknown ffn_sharing '{ffn_sharing}'. Choose from: none, per_stage, global"
             )
         self.ffn_sharing = ffn_sharing
-        if FixedAPTVIT in encList and learning != 'k_space':
+        if FixedAPTVIT in leaf_cls and learning != 'k_space':
             raise ValueError("fixed_apt requires learning='k_space'")
-        for args in encArgs:
+        for args in leaf_args:
             order = args.get('flattening_order', 'row_major')
             validate_flattening_order(order, args.get('tokenizer_type'))
             if order == 'dc_radial' and learning != 'k_space':
@@ -143,11 +201,27 @@ class cascadeNet(nn.Module):
         encArgs = _apply_ffn_sharing(N, encList, encArgs, ffn_sharing)
 
         self.transformers = nn.ModuleList(
-            enc(N, **args) for enc, args in zip(encList, encArgs)
+            BandSplitVIT(N, args["low"][0](N, **args["low"][1]), args["high"][0](N, **args["high"][1]))
+            if enc is BandSplitVIT else enc(N, **args)
+            for enc, args in zip(encList, encArgs)
         )
 
     def set_scheduled_lamb(self, value):
         self.scheduled_lamb = value
+
+    def freq_split_sigma_values(self):
+        """{stage index: sigma} of the BandSplitVIT stages (empty when the cascade has none)."""
+        if self.freq_split_sigmas is None:
+            return {}
+        values = self.freq_split_sigmas.values()
+        return {stage: values[n] for stage, n in self.split_stage_index.items()}
+
+    def _stage_residual(self, i, transformer, x, sampleMask, volume_id=None):
+        if isinstance(transformer, PCAVIT):
+            return transformer(x, col_mask=sampleMask, volume_id=volume_id)
+        if isinstance(transformer, BandSplitVIT):
+            return transformer(x, col_mask=sampleMask, sigma=self.freq_split_sigmas()[self.split_stage_index[i]])
+        return transformer(x, col_mask=sampleMask)
 
     def forward(self, xPrev, y, sampleMask, return_intermediates=False, stats=None, volume_id=None):
         """
@@ -197,10 +271,7 @@ class cascadeNet(nn.Module):
         intermediates = []
         for i, transformer in enumerate(self.transformers):
             lamb_i = self._lamb_for_stage(i)
-            if isinstance(transformer, PCAVIT):
-                candidate = x + transformer(x, col_mask=sampleMask, volume_id=volume_id)
-            else:
-                candidate = x + transformer(x, col_mask=sampleMask)
+            candidate = x + self._stage_residual(i, transformer, x, sampleMask, volume_id)
             if use_normalized_dc:
                 candidate_kspace = candidate if dc_domain_is_k_space else fft_2d(candidate)
                 if lamb_i is None:

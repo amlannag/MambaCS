@@ -450,7 +450,7 @@ def _build_criteria(cfg, device=None):
     return final, intermediate
 
 
-_NO_WEIGHT_DECAY_PARAM_NAMES = ("kspace_stem", "global_filter_mid")
+_NO_WEIGHT_DECAY_PARAM_NAMES = ("kspace_stem", "global_filter_mid", "freq_split_sigmas")
 
 
 def _optimizer_param_groups(cfg, model, extra_parameters=()):
@@ -1530,13 +1530,16 @@ def main():
             f"E{i+1}:{loss:.6f}" for i, loss in enumerate(val_metrics["stage_losses"])
         )
 
+        freq_split_sigmas = base_model.freq_split_sigma_values() if hasattr(base_model, "freq_split_sigma_values") else {}
+        sigma_str = ("  |  freq_split sigma [" + " ".join(f"S{i+1}:{s:.4f}" for i, s in freq_split_sigmas.items()) + "]"
+                     if freq_split_sigmas else "")
         print(f"Epoch {epoch+1:03d}/{cfg.epochs}  |  "
               f"Train final: {train_metrics['final_loss']:.6f}  Train total: {train_metrics['total_loss']:.6f}  "
               f"Train PSNR: {train_metrics['psnr']:.2f} dB  |  "
               f"Val final: {val_metrics['final_loss']:.6f}  Val total: {val_metrics['total_loss']:.6f}  "
               f"Val volume PSNR: {val_metrics['volume_psnr']:.2f} dB  (ZF: {val_metrics['zf_volume_psnr']:.2f} dB)  |  "
               f"Train stages [{train_stage_str}]  |  Val stages [{val_stage_str}]  |  "
-              f"LR: {lr:.2e}  |  {elapsed:.1f}s")
+              f"LR: {lr:.2e}  |  {elapsed:.1f}s{sigma_str}")
 
         metrics = {
             'epoch':        epoch + 1,
@@ -1581,6 +1584,8 @@ def main():
             metrics['lambda_scheduled'] = round(base_model.scheduled_lamb, 6)
         if cfg.perpendicular_mag_weighting:
             metrics['perpendicular_mag_weight_m'] = round(current_perp_m, 6)
+        for i, sigma in freq_split_sigmas.items():
+            metrics[f'freq_split_sigma_{i+1}'] = round(sigma, 6)
         append_metrics(metrics_path, metrics)
         wandb.log(metrics, step=epoch + 1)
 

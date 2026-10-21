@@ -45,6 +45,9 @@ _MODEL_KEYS = {
     "image_conv", "image_conv_channels", "image_conv_layers", "image_conv_kernel",
     "mask_vertical_attn", "ffn_sharing", "flattening_order",
     "apt_layout", "apt_embed_dim", "apt_rope_ref_grid", "apt_use_abs_pos_emb",
+    "freq_split_encoders", "freq_split_pairs", "freq_split_sigma_learned", "freq_split_sigma_schedule",
+    "freq_split_sigma_start", "freq_split_sigma_end", "freq_split_sigma_init", "freq_split_sigma_bounds",
+    "window_col_segments", "window_height", "window_width", "window_shift", "window_d_model", "window_nhead",
 }
 
 
@@ -96,8 +99,11 @@ def _flat_to_cfg(flat: dict) -> Config:
             "image_size", "patch_size", "reconformer_num_ch", "reconformer_down_scales",
             "reconformer_num_heads", "reconformer_depths", "reconformer_window_sizes",
             "reconformer_use_checkpoint", "apt_rope_ref_grid", "attn_scales", "spirit_conv_kernels",
+            "freq_split_encoders", "freq_split_sigma_bounds",
         } and isinstance(v, list):
             v = tuple(v)
+        if k == "freq_split_pairs" and isinstance(v, list):
+            v = [tuple(pair) for pair in v]
         if k == "spirit_conv_kernels" and isinstance(v, int):
             v = (v,)
         setattr(cfg, k, v)

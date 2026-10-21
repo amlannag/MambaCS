@@ -8,6 +8,8 @@ Encoder options for `encoders`:
     "cross_axial"   — vertical-only sampled/unsampled complex cross-attention
     "cross_axial_per_coil" — cross_axial run on every coil independently (shared weights + coil-ID embedding)
     "neighbourhood" — GRAPPA-style per-coil local cross-attention to the nearest acquired columns in all coils
+    "freq_split"    — two experts (freq_split_encoders) combined by a radial Gaussian partition of unity G*low + (1-G)*high
+    "window_axial"  — full self-attention inside shifted windows of column-segment tokens, sampled + unsampled columns
     "fnet"          — FNet Fourier token mixing over vertical column tokens (no attention)
     "axial"         — axial row/column transformer (global structure)
     "kaleidoscope"  — kaleidoscope patch transformer (non-local features)
@@ -153,7 +155,9 @@ class Config:
     # "neighbourhood" stage (DcTNN/neighbourhood_attention.py): GRAPPA-style local cross-attention over per-coil
     # kx-strip tokens. Each unsampled (coil, strip, column) token attends to the neighbourhood_n_neighbours nearest
     # acquired columns on each side, in all coils, in the strips s-kx_halo..s+kx_halo. strip_len = image height gives
-    # one token per coil and column. Ignored by every other encoder. d_model / nhead come from axial_d_model /
+    # one token per coil and column. Works unchanged for single-coil data (num_channels=1, e.g. fastMRI knee with
+    # random masks): the key set is then the nearest acquired columns in the neighbouring kx strips, i.e. plain local
+    # k-space attention. Ignored by every other encoder. d_model / nhead come from axial_d_model /
     # nhead_axial; "cross_axial_per_coil" takes the same values and has no options of its own.
     neighbourhood_strip_len: int = 16
     neighbourhood_n_neighbours: int = 3
@@ -163,6 +167,34 @@ class Config:
     # Scoring rule: "complex" (Hermitian, dual softmax, as cross_axial), "real_valued" (real softmax of
     # Re(q.conj(k))) or "phase_aware" (phase-damped scores, coherent aggregation).
     neighbourhood_attn_type: str = "complex"
+    # "freq_split" stage (DcTNN/band_split.py): two expert stages combined by a radial Gaussian partition of unity,
+    # out = G*low(x) + (1-G)*high(x) with G = exp(-(r/sigma)^2/2) on the normalised k-space radius (0 = DC, 1 = edge,
+    # sqrt2 = corner). Both experts see the full k-space; the low expert can only write (and only gets gradient) near
+    # the centre, the high expert only in the tails. Requires learning="k_space".
+    # (low expert, high expert) encoder names for every freq_split stage; freq_split_pairs overrides per split stage.
+    freq_split_encoders: Tuple[str, str] = ("axial", "neighbourhood")
+    freq_split_pairs: Optional[List[Tuple[str, str]]] = None
+    # sigma is one value per freq_split stage, NON-DECREASING along the cascade (cumulative softplus increments) and
+    # clamped to freq_split_sigma_bounds. Initialised from sigma_start..sigma_end (linear | geometric spacing) or
+    # explicitly via freq_split_sigma_init (must be non-decreasing); learned unless freq_split_sigma_learned=False.
+    freq_split_sigma_learned: bool = True
+    freq_split_sigma_schedule: str = "geometric"
+    freq_split_sigma_start: float = 0.15
+    freq_split_sigma_end: float = 1.0
+    freq_split_sigma_init: Optional[List[float]] = None
+    freq_split_sigma_bounds: Tuple[float, float] = (0.05, 1.4142135623730951)
+    # "window_axial" stage (DcTNN/window_attention.py): every column is cut into window_col_segments kx segments
+    # (token = H / segments values of all coils on a (segments, W) grid); each layer runs full self-attention inside
+    # window_height x window_width windows of that grid over sampled AND unsampled tokens (current estimate, no mask
+    # routing); odd layers use half-window shifted windows (Swin) when window_shift. Own width/heads because the
+    # tokens are small: window_d_model=None falls back to axial_d_model. attn_type follows the non-axial rule
+    # (complex_ms -> complex). Requires image height % segments == 0 and the window to tile the grid.
+    window_col_segments: int = 20
+    window_height: int = 5
+    window_width: int = 16
+    window_shift: bool = True
+    window_d_model: Optional[int] = 64
+    window_nhead: int = 4
     # Optional per-stage override of num_encoder_layers (one int per entry of `encoders`),
     # e.g. [1, 2, 1, 2] for a cross_axial/axial cascade with 1 layer per cross stage and 2 per axial.
     stage_encoder_layers: Optional[List[int]] = None

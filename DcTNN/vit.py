@@ -4,6 +4,7 @@ Defines ViT denoising blocks — cascades of encoder instances with a shared for
 from torch import nn
 from .encoders import TokenEncoder, axialEncoder, crossAxialEncoder, fnetEncoder, pcaEncoder, pair
 from .neighbourhood_attention import NeighbourhoodEncoder, PerCoilCrossAxialEncoder
+from .window_attention import WindowAxialEncoder
 
 
 class BaseVIT(nn.Module):
@@ -232,6 +233,42 @@ class NeighbourhoodVIT(BaseVIT):
                 strip_len=strip_len, n_neighbours=n_neighbours, kx_halo=kx_halo,
                 keys_acquired_only=keys_acquired_only, ffn_sharing=ffn_sharing, shared_ffn=shared_ffn,
                 kspace_stem=kspace_stem,
+            )
+            for _ in range(layerNo)
+        ])
+        super().__init__(N, layerNo, numCh, transformers)
+
+    def forward(self, xPrev, col_mask=None):
+        im = xPrev
+        for transformer in self.transformers:
+            im = transformer(im, col_mask=col_mask)
+        return im
+
+
+class WindowAxialVIT(BaseVIT):
+    """
+    Cascade of WindowAxialEncoder blocks: full self-attention inside shifted windows of column-segment tokens over
+    sampled AND unsampled columns (DcTNN/window_attention.py). Args beyond axVIT:
+        col_segments (int)    -  kx segments per column (token = H / col_segments values of all coils)
+        window_height (int)   -  window size in segments
+        window_width (int)    -  window size in columns
+        window_shift (bool)   -  Swin-style half-window shift on odd layers
+    """
+    def __init__(self, N, layerNo=2, numCh=1, d_model=64, nhead=4, num_encoder_layers=2,
+                    dim_feedforward=None, dropout=0.1, activation='relu', layer_norm_eps=1e-05,
+                    pos_emb_type="Rope-Axial", rope_theta=100.0, rope_mixed_rotate=True, attn_type="complex",
+                    ffn_sharing="none", shared_ffn=None, flattening_order="row_major", kspace_stem=None,
+                    col_segments=20, window_height=5, window_width=16, window_shift=True):
+        if flattening_order != "row_major":
+            raise ValueError("WindowAxialVIT requires flattening_order='row_major'")
+        if dim_feedforward is None:
+            dim_feedforward = int(d_model * 4)
+        transformers = nn.ModuleList([
+            WindowAxialEncoder(
+                N, numCh, d_model, nhead, num_encoder_layers, dim_feedforward, dropout, activation, layer_norm_eps,
+                pos_emb_type=pos_emb_type, rope_theta=rope_theta, attn_type=attn_type, col_segments=col_segments,
+                window_height=window_height, window_width=window_width, window_shift=window_shift,
+                ffn_sharing=ffn_sharing, shared_ffn=shared_ffn, kspace_stem=kspace_stem,
             )
             for _ in range(layerNo)
         ])

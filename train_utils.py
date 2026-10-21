@@ -11,6 +11,8 @@ from fastmri.data.subsample import EquiSpacedMaskFunc, EquispacedMaskFractionFun
 from fastmri.data.transforms import apply_mask
 
 from DcTNN.model import TokenVIT, axVIT, CrossAttentionVIT, PerCoilCrossAttentionVIT, NeighbourhoodVIT, FNetVIT, FixedAPTVIT, PCAVIT, cascadeNet
+from DcTNN.band_split import BandSplitVIT, freq_split_sigma_init
+from DcTNN.vit import WindowAxialVIT
 from DcTNN.fixed_apt import resolve_fixed_apt_layout
 from DcTNN.util import _COMPLEX_ATTN_TYPES
 from ReconFormer import ReconFormerBaseline
@@ -170,6 +172,27 @@ _ENCODER_ARGS = {
             attn_type=_non_axial_attn_type(cfg),
             row_stride=cfg.axial_row_stride,
             kspace_stem=_kspace_stem_args(cfg),
+        ),
+    ),
+    "window_axial": lambda cfg: (
+        WindowAxialVIT,
+        dict(
+            layerNo=cfg.layer_no,
+            numCh=cfg.num_channels,
+            d_model=getattr(cfg, "window_d_model", None) or getattr(cfg, "axial_d_model", None) or cfg.image_size[1] * cfg.num_channels,
+            nhead=getattr(cfg, "window_nhead", 4),
+            num_encoder_layers=cfg.num_encoder_layers,
+            layer_norm_eps=getattr(cfg, "layer_norm_eps", 1e-5),
+            dim_feedforward=None,
+            pos_emb_type=cfg.pos_emb_type,
+            rope_theta=cfg.rope_theta,
+            rope_mixed_rotate=cfg.rope_mixed_rotate,
+            attn_type=_non_axial_attn_type(cfg),
+            kspace_stem=_kspace_stem_args(cfg),
+            col_segments=getattr(cfg, "window_col_segments", 20),
+            window_height=getattr(cfg, "window_height", 5),
+            window_width=getattr(cfg, "window_width", 16),
+            window_shift=getattr(cfg, "window_shift", True),
         ),
     ),
     "neighbourhood": lambda cfg: (
@@ -414,7 +437,7 @@ def _build_model_impl(cfg):
         if cfg.attn_type in _COMPLEX_ATTN_TYPES:
             raise ValueError("kspace_real_channels needs a real-valued attn_type ('standard'); "
                              f"got {cfg.attn_type!r}")
-        unsupported = {"fixed_apt", "cross_axial", "cross_axial_per_coil", "neighbourhood", "pca"} & set(cfg.encoders)
+        unsupported = {"fixed_apt", "cross_axial", "cross_axial_per_coil", "neighbourhood", "pca", "freq_split", "window_axial"} & set(cfg.encoders)
         if unsupported:
             raise ValueError(f"kspace_real_channels does not support complex-only encoders: {sorted(unsupported)}")
         num_ch = 2 * num_ch
@@ -425,16 +448,26 @@ def _build_model_impl(cfg):
             f"stage_encoder_layers has {len(stage_layers)} entries but encoders has {len(cfg.encoders)}"
         )
 
-    enc_list = []
-    enc_args = []
-    for i, name in enumerate(cfg.encoders):
+    def stage_spec(name, layers):
         if name not in _ENCODER_ARGS:
-            raise ValueError(f"Unknown encoder '{name}'. Choose from: {list(_ENCODER_ARGS)}")
+            raise ValueError(f"Unknown encoder '{name}'. Choose from: {list(_ENCODER_ARGS) + ['freq_split']}")
         cls, args = _ENCODER_ARGS[name](cfg)
         args["numCh"] = num_ch
         args["flattening_order"] = flattening_order
-        if stage_layers is not None and "num_encoder_layers" in args:
-            args["num_encoder_layers"] = int(stage_layers[i])
+        if layers is not None and "num_encoder_layers" in args:
+            args["num_encoder_layers"] = int(layers)
+        return cls, args
+
+    split_pairs = _freq_split_pairs(cfg)
+    enc_list = []
+    enc_args = []
+    for i, name in enumerate(cfg.encoders):
+        layers = None if stage_layers is None else stage_layers[i]
+        if name == "freq_split":
+            low_name, high_name = split_pairs[len([c for c in enc_list if c is BandSplitVIT])]
+            cls, args = BandSplitVIT, {"low": stage_spec(low_name, layers), "high": stage_spec(high_name, layers)}
+        else:
+            cls, args = stage_spec(name, layers)
         enc_list.append(cls)
         enc_args.append(args)
 
@@ -449,7 +482,48 @@ def _build_model_impl(cfg):
         real_channels=real_channels,
         dc_type=getattr(cfg, "dc_type", "scalar"),
         dc_lambda_init=getattr(cfg, "dc_lambda_init", 0.5),
+        freq_split_sigma_init=freq_split_sigmas(cfg) if split_pairs else None,
+        freq_split_sigma_learned=getattr(cfg, "freq_split_sigma_learned", True),
+        freq_split_sigma_bounds=tuple(getattr(cfg, "freq_split_sigma_bounds", (0.05, 2 ** 0.5))),
     )
+
+
+_FREQ_SPLIT_EXPERT_BLACKLIST = ("freq_split", "pca")
+
+
+def _freq_split_pairs(cfg):
+    """(low, high) encoder names for every freq_split stage of cfg.encoders, in cascade order."""
+    n_split = sum(1 for name in cfg.encoders if name == "freq_split")
+    if not n_split:
+        return []
+    pairs = getattr(cfg, "freq_split_pairs", None)
+    if pairs is None:
+        pairs = [tuple(getattr(cfg, "freq_split_encoders", ("axial", "neighbourhood")))] * n_split
+    pairs = [tuple(pair) for pair in pairs]
+    if len(pairs) != n_split:
+        raise ValueError(f"freq_split_pairs has {len(pairs)} entries but encoders has {n_split} freq_split stages")
+    for pair in pairs:
+        if len(pair) != 2:
+            raise ValueError(f"freq_split pairs must be (low, high) encoder names, got {pair}")
+        bad = [name for name in pair if name in _FREQ_SPLIT_EXPERT_BLACKLIST or name not in _ENCODER_ARGS]
+        if bad:
+            raise ValueError(f"freq_split experts must be plain encoders, got {bad}")
+    if cfg.learning != "k_space":
+        raise ValueError("freq_split stages require learning='k_space'")
+    return pairs
+
+
+def freq_split_sigmas(cfg):
+    """Initial sigma per freq_split stage: explicit freq_split_sigma_init, else the start..end schedule."""
+    n_split = sum(1 for name in cfg.encoders if name == "freq_split")
+    explicit = getattr(cfg, "freq_split_sigma_init", None)
+    if explicit is not None:
+        if len(explicit) != n_split:
+            raise ValueError(f"freq_split_sigma_init has {len(explicit)} values but encoders has {n_split} freq_split stages")
+        return [float(v) for v in explicit]
+    return freq_split_sigma_init(
+        n_split, getattr(cfg, "freq_split_sigma_start", 0.15), getattr(cfg, "freq_split_sigma_end", 1.0),
+        getattr(cfg, "freq_split_sigma_schedule", "geometric"), tuple(getattr(cfg, "freq_split_sigma_bounds", (0.05, 2 ** 0.5))))
 
 
 def build_model(cfg):

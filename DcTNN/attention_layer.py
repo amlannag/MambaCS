@@ -1,10 +1,77 @@
 import copy
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .rope_vit import apply_rotary_emb, apply_rotary_emb_complex, reshape_for_broadcast
 from .util import FeedForward, ComplexLayerNorm, ComplexDropout, get_attention, _COMPLEX_ATTN_TYPES
 from .complex_init import apply_trabelsi_, trabelsi_init_
+
+# ---------------------------------------------------------------------------
+# Attention backend
+# ---------------------------------------------------------------------------
+#
+# "sdpa"  (default) : the complex Hermitian scores are decomposed into real dot products over a doubled head dim,
+#                     Re(q k^H) = qr.kr + qi.ki and Im(q k^H) = qi.kr - qr.ki, so each softmax plus the A@V product
+#                     runs through F.scaled_dot_product_attention (fused flash / memory-efficient kernels, no
+#                     [B, nhead, N, N] score matrix materialised, autocast-able since all tensors are real).
+# "naive"           : the original explicit complex matmul -> two softmaxes -> complex matmul.
+#
+# Both backends give the same output (fp32 differences ~1e-7) in eval mode. With attention dropout active during
+# training, "naive" drops the same weights in the real and imaginary softmax outputs (ComplexDropout) while "sdpa"
+# drops them independently.
+_ATTENTION_BACKENDS = ("sdpa", "naive")
+_attention_backend = os.environ.get("DCTNN_ATTENTION_BACKEND", "sdpa")
+
+
+def set_attention_backend(backend: str):
+    global _attention_backend
+    if backend not in _ATTENTION_BACKENDS:
+        raise ValueError(f"attention backend must be one of {_ATTENTION_BACKENDS}, got {backend!r}")
+    _attention_backend = backend
+
+
+def get_attention_backend() -> str:
+    if _attention_backend not in _ATTENTION_BACKENDS:
+        raise ValueError(f"DCTNN_ATTENTION_BACKEND must be one of {_ATTENTION_BACKENDS}, got {_attention_backend!r}")
+    return _attention_backend
+
+
+def _sdpa_mask(attn_mask, dtype):
+    """Additive float masks are passed through as the SDPA attn_mask in the (real) dtype of the stacked q/k."""
+    if attn_mask is None:
+        return None
+    return attn_mask.to(dtype) if attn_mask.is_floating_point() else attn_mask
+
+
+def _complex_softmax_attention(q, k, v, scale, attn_mask=None, dropout_p=0.0):
+    """
+    softmax(Re(q k^H) * scale) @ v  +  i * softmax(Im(q k^H) * scale) @ v   with complex q, k, v  (B, nhead, N, d).
+    Two real SDPA calls over stacked [real | imag] features; the complex A @ v product is reassembled from the
+    four real products (Ar vr - Ai vi) + i (Ar vi + Ai vr).
+    """
+    kk = torch.cat([k.real, k.imag], dim=-1)
+    vv = torch.cat([v.real, v.imag], dim=-1)
+    mask = _sdpa_mask(attn_mask, kk.dtype)
+    out_r = F.scaled_dot_product_attention(torch.cat([q.real, q.imag], dim=-1), kk, vv, attn_mask=mask,
+                                           dropout_p=dropout_p, scale=scale)
+    out_i = F.scaled_dot_product_attention(torch.cat([q.imag, -q.real], dim=-1), kk, vv, attn_mask=mask,
+                                           dropout_p=dropout_p, scale=scale)
+    ar_vr, ar_vi = out_r.chunk(2, dim=-1)
+    ai_vr, ai_vi = out_i.chunk(2, dim=-1)
+    return torch.complex(ar_vr - ai_vi, ar_vi + ai_vr)
+
+
+def _real_softmax_attention(q, k, v, scale, attn_mask=None, dropout_p=0.0):
+    """softmax(Re(q k^H) * scale) @ v with complex q, k, v: one real SDPA call over stacked [real | imag] features."""
+    kk = torch.cat([k.real, k.imag], dim=-1)
+    vv = torch.cat([v.real, v.imag], dim=-1)
+    out = F.scaled_dot_product_attention(torch.cat([q.real, q.imag], dim=-1), kk, vv,
+                                         attn_mask=_sdpa_mask(attn_mask, kk.dtype), dropout_p=dropout_p, scale=scale)
+    out_r, out_i = out.chunk(2, dim=-1)
+    return torch.complex(out_r, out_i)
+
+
 # ---------------------------------------------------------------------------
 # Attention classes
 # ---------------------------------------------------------------------------
@@ -103,6 +170,9 @@ class ComplexMultiHeadAttention(BaseAttention):
         super().__init__(d_model, nhead, dropout, freqs_cis, dtype=torch.cfloat)
 
     def _attend(self, q, k, v, attn_mask=None):
+        if get_attention_backend() == "sdpa":
+            return _complex_softmax_attention(q, k, v, self.scale, attn_mask,
+                                              dropout_p=self.dropout_p if self.training else 0.0)
         attn = torch.matmul(q, k.transpose(-2, -1).conj()) * self.scale
         if attn_mask is not None:
             # Add mask directly to real/imag before softmax — avoids a [B,nhead,W,W] intermediate allocation
@@ -187,6 +257,9 @@ class RealValuedAttention(BaseAttention):
         super().__init__(d_model, nhead, dropout, freqs_cis, dtype=torch.cfloat)
 
     def _attend(self, q, k, v, attn_mask=None):
+        if get_attention_backend() == "sdpa":
+            return _real_softmax_attention(q, k, v, self.scale, attn_mask,
+                                           dropout_p=self.dropout_p if self.training else 0.0)
         scores = torch.matmul(q, k.transpose(-2, -1).conj()).real * self.scale
         if attn_mask is not None:
             scores = scores + attn_mask
@@ -271,6 +344,8 @@ class ComplexCrossAttention(nn.Module):
         return q, k
 
     def _attend(self, q, k, v):
+        if get_attention_backend() == "sdpa":
+            return _complex_softmax_attention(q, k, v, self.scale, dropout_p=self.dropout_p if self.training else 0.0)
         attn = torch.matmul(q, k.transpose(-2, -1).conj()) * self.scale
         attn_r = F.softmax(attn.real, dim=-1)
         attn_i = F.softmax(attn.imag, dim=-1)
