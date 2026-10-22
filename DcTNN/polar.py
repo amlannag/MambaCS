@@ -69,7 +69,7 @@ class PolarResampler(nn.Module):
         """Fraction of Cartesian pixels touched by at least one polar sample."""
         return float((self.inv_density > 0).float().mean())
 
-    def _apply(self, x, src, dst, n_out, scale=None):
+    def _resample(self, x, src, dst, n_out, scale=None):
         """y[..., dst] += vals * x[..., src]  over the last axis; complex-safe via the real view."""
         is_complex = x.is_complex()
         xr = torch.view_as_real(x) if is_complex else x.unsqueeze(-1)              # (..., n_in, 2|1)
@@ -86,14 +86,14 @@ class PolarResampler(nn.Module):
         B, C, H, W = kspace.shape
         if (H, W) != self.image_size:
             raise ValueError(f"expected {self.image_size} k-space, got {(H, W)}")
-        polar = self._apply(kspace.reshape(B, C, H * W), self.cols, self.rows, self.num_spokes * self.num_radii)
+        polar = self._resample(kspace.reshape(B, C, H * W), self.cols, self.rows, self.num_spokes * self.num_radii)
         return polar.view(B, C, self.num_spokes, self.num_radii)
 
     def adjoint(self, polar):
         """(B, C, num_spokes, num_radii) -> (B, C, H, W): density-normalised adjoint (weighted average per pixel)."""
         B, C = polar.shape[:2]
         H, W = self.image_size
-        cart = self._apply(polar.reshape(B, C, -1), self.rows, self.cols, H * W, scale=self.inv_density)
+        cart = self._resample(polar.reshape(B, C, -1), self.rows, self.cols, H * W, scale=self.inv_density)
         return cart.view(B, C, H, W)
 
     def spoke_coordinates(self, radius=None):
