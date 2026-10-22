@@ -112,3 +112,17 @@ EXPERIMENTS.append({
     "banded_loss_sigma_schedule": "geometric",
     "banded_loss_floor": 0.0,
 })
+
+# ---------------------------------------------------------------------------
+# Exp 4: control for exps 0 and 3 - the same band-split cascade (4x4-patch radial-window high expert, whole-column axial
+# low expert) with the ORIGINAL sigma schedule 0.15 -> 1.0 (window expert owns most of k-space early, axial takes over
+# later) and the plain final-only loss, no intermediate terms. Together with exp 0 (reversed sigma, final-only) and
+# exp 3 (reversed sigma + low -> high banded loss) this separates the effect of the gate ordering from the loss curriculum.
+# ---------------------------------------------------------------------------
+EXPERIMENTS.append({
+    **EXPERIMENTS[0],
+    "name": "random_split4_msaxial_seg1_winpatch4_radial5x5_sigmafwd_scalardc_l2final_r4_100ep",
+    "freq_split_sigma_start": 0.15,
+    "freq_split_sigma_end": 1.0,
+    "loss_mode": "final_only",
+})
