@@ -1,7 +1,8 @@
 
 # ---------------------------------------------------------------------------
 # fastMRI single-coil knee, random R=4 (8% ACS), 100 epochs: band-split cascade only (no openers).
-#   stage 1-4 freq_split      low expert  = multi-scale axial (whole-column tokens, both axes, Q/K conv scales 1 & 3)
+#   stage 1-4 freq_split      low expert  = multi-scale axial (column tokens split into 10 segments -> (10, 320) grid,
+#                                           both axes, 2-D RoPE, 2-D Q/K conv scales 1 & 3)
 #                             high expert = window_axial: full self-attention in shifted 5-segment x 16-column windows of
 #                                           20-segment column tokens over sampled + unsampled columns, d_model 64 / 4 heads
 #             combined as G*low + (1-G)*high with G = exp(-(r/sigma)^2/2); sigma (one per split stage) learned,
@@ -13,7 +14,7 @@
 EXPERIMENTS = [
     {
         "prefix": "fastmri",
-        "name": "random_split4_msaxial_window20x5x16_scalardc_l2final_r4_100ep",
+        "name": "random_split4_msaxial_seg10_window20x5x16_scalardc_l2final_r4_100ep",
         "dataset": "fastmri",
         "num_channels": 1,
         "image_size": (320, 320),
@@ -26,7 +27,7 @@ EXPERIMENTS = [
         "encoders": ["freq_split"] * 4,
         "axial_d_model": 320,
         "axial_token_axis": "both",
-        "axial_col_segments": 1,
+        "axial_col_segments": 10,            # each k-space column split into 10 segments of 32 rows -> (10, 320) token grid
         "attn_type": "complex_ms",            # multi-scale Q/K reaches the axial experts only; other stages use complex
         "attn_scales": (1, 3),
         "sdpa_dtype": "bfloat16",             # fused flash attention on ROCm (fp32 SDPA has no fused kernel there)
