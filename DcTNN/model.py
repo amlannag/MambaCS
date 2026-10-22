@@ -271,7 +271,8 @@ class cascadeNet(nn.Module):
         intermediates = []
         for i, transformer in enumerate(self.transformers):
             lamb_i = self._lamb_for_stage(i)
-            candidate = x + self._stage_residual(i, transformer, x, sampleMask, volume_id)
+            with torch.profiler.record_function(f"stage{i + 1}:{type(transformer).__name__}"):
+                candidate = x + self._stage_residual(i, transformer, x, sampleMask, volume_id)
             if use_normalized_dc:
                 candidate_kspace = candidate if dc_domain_is_k_space else fft_2d(candidate)
                 if lamb_i is None:

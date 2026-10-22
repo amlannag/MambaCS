@@ -23,6 +23,13 @@ from .complex_init import apply_trabelsi_, trabelsi_init_
 _ATTENTION_BACKENDS = ("sdpa", "naive")
 _attention_backend = os.environ.get("DCTNN_ATTENTION_BACKEND", "sdpa")
 
+# Compute dtype of the real SDPA calls. The stacked [real | imag] q/k/v are cast to this dtype just for the fused
+# kernel and the output is cast back, so the complex Linear / LayerNorm / FFN maths stays in fp32. On ROCm the fused
+# flash / CK kernels only exist for fp16 / bf16; fp32 SDPA falls back to the unfused math path (~8x slower on MI300/
+# MI355). The fused kernels accumulate the softmax in fp32 regardless of the input dtype.
+_SDPA_DTYPES = {"float32": torch.float32, "bfloat16": torch.bfloat16, "float16": torch.float16}
+_sdpa_dtype = os.environ.get("DCTNN_SDPA_DTYPE", "float32")
+
 
 def set_attention_backend(backend: str):
     global _attention_backend
@@ -37,11 +44,35 @@ def get_attention_backend() -> str:
     return _attention_backend
 
 
+def set_sdpa_dtype(dtype: str):
+    global _sdpa_dtype
+    if dtype not in _SDPA_DTYPES:
+        raise ValueError(f"sdpa dtype must be one of {tuple(_SDPA_DTYPES)}, got {dtype!r}")
+    _sdpa_dtype = dtype
+
+
+def get_sdpa_dtype() -> torch.dtype:
+    if _sdpa_dtype not in _SDPA_DTYPES:
+        raise ValueError(f"DCTNN_SDPA_DTYPE must be one of {tuple(_SDPA_DTYPES)}, got {_sdpa_dtype!r}")
+    return _SDPA_DTYPES[_sdpa_dtype]
+
+
 def _sdpa_mask(attn_mask, dtype):
     """Additive float masks are passed through as the SDPA attn_mask in the (real) dtype of the stacked q/k."""
     if attn_mask is None:
         return None
     return attn_mask.to(dtype) if attn_mask.is_floating_point() else attn_mask
+
+
+def _sdpa(q, k, v, scale, attn_mask=None, dropout_p=0.0):
+    """F.scaled_dot_product_attention in the configured compute dtype; the result is returned in q's dtype."""
+    dtype = get_sdpa_dtype()
+    if dtype == q.dtype:
+        return F.scaled_dot_product_attention(q, k, v, attn_mask=_sdpa_mask(attn_mask, q.dtype),
+                                              dropout_p=dropout_p, scale=scale)
+    out = F.scaled_dot_product_attention(q.to(dtype), k.to(dtype), v.to(dtype), attn_mask=_sdpa_mask(attn_mask, dtype),
+                                         dropout_p=dropout_p, scale=scale)
+    return out.to(q.dtype)
 
 
 def _complex_softmax_attention(q, k, v, scale, attn_mask=None, dropout_p=0.0):
@@ -52,11 +83,8 @@ def _complex_softmax_attention(q, k, v, scale, attn_mask=None, dropout_p=0.0):
     """
     kk = torch.cat([k.real, k.imag], dim=-1)
     vv = torch.cat([v.real, v.imag], dim=-1)
-    mask = _sdpa_mask(attn_mask, kk.dtype)
-    out_r = F.scaled_dot_product_attention(torch.cat([q.real, q.imag], dim=-1), kk, vv, attn_mask=mask,
-                                           dropout_p=dropout_p, scale=scale)
-    out_i = F.scaled_dot_product_attention(torch.cat([q.imag, -q.real], dim=-1), kk, vv, attn_mask=mask,
-                                           dropout_p=dropout_p, scale=scale)
+    out_r = _sdpa(torch.cat([q.real, q.imag], dim=-1), kk, vv, scale, attn_mask, dropout_p)
+    out_i = _sdpa(torch.cat([q.imag, -q.real], dim=-1), kk, vv, scale, attn_mask, dropout_p)
     ar_vr, ar_vi = out_r.chunk(2, dim=-1)
     ai_vr, ai_vi = out_i.chunk(2, dim=-1)
     return torch.complex(ar_vr - ai_vi, ar_vi + ai_vr)
@@ -66,8 +94,7 @@ def _real_softmax_attention(q, k, v, scale, attn_mask=None, dropout_p=0.0):
     """softmax(Re(q k^H) * scale) @ v with complex q, k, v: one real SDPA call over stacked [real | imag] features."""
     kk = torch.cat([k.real, k.imag], dim=-1)
     vv = torch.cat([v.real, v.imag], dim=-1)
-    out = F.scaled_dot_product_attention(torch.cat([q.real, q.imag], dim=-1), kk, vv,
-                                         attn_mask=_sdpa_mask(attn_mask, kk.dtype), dropout_p=dropout_p, scale=scale)
+    out = _sdpa(torch.cat([q.real, q.imag], dim=-1), kk, vv, scale, attn_mask, dropout_p)
     out_r, out_i = out.chunk(2, dim=-1)
     return torch.complex(out_r, out_i)
 
@@ -153,10 +180,7 @@ class MultiHeadAttention(BaseAttention):
         super().__init__(d_model, nhead, dropout, freqs_cis, dtype=None)
 
     def _attend(self, q, k, v, attn_mask=None):
-        return F.scaled_dot_product_attention(
-            q, k, v, attn_mask=attn_mask,
-            dropout_p=self.dropout_p if self.training else 0.0,
-        )
+        return _sdpa(q, k, v, self.scale, attn_mask, dropout_p=self.dropout_p if self.training else 0.0)
 
 
 class ComplexMultiHeadAttention(BaseAttention):

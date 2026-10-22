@@ -31,6 +31,7 @@ EXPERIMENTS = [
         "axial_col_segments": 1,
         "attn_type": "complex_ms",            # multi-scale Q/K reaches the axial experts only; other stages use complex
         "attn_scales": (1, 3),
+        "sdpa_dtype": "bfloat16",             # fused flash attention on ROCm (fp32 SDPA has no fused kernel there)
         "ffn_sharing": "global",
 
         "fnet_token_axis": "both",

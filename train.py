@@ -28,6 +28,7 @@ from config import Config
 from progress import phase, progress_iter
 from train_config import EXPERIMENTS
 from DcTNN.lambda_scheduler import LambdaScheduler
+from DcTNN.attention_layer import set_sdpa_dtype
 from train_utils import (FastMRIMaskGenerator, GrappaWeightCache, build_model, resolve_data_dirs, is_h5_dataset,
                          is_multicoil_dataset, simulate_undersampling, unique_model_parameters,
                          validate_resume_flattening_order, validate_resume_fixed_apt_config)
@@ -53,6 +54,12 @@ _parser = argparse.ArgumentParser()
 _parser.add_argument('--exp_idx', type=int, default=0)
 _parser.add_argument('--num_gpus', type=int, default=None,
                      help='Override the experiment GPU count; multi-GPU runs must be launched with torchrun.')
+_parser.add_argument('--batch_size', type=int, default=None,
+                     help='Pin the global batch size and skip the automatic batch-size search.')
+_parser.add_argument('--profile', type=int, default=None, metavar='STEPS',
+                     help='Profile STEPS training steps (after 1 warm-up step) with torch.profiler, print the '
+                          'per-kernel and per-stage tables, write a Chrome trace to the experiment dir and exit. '
+                          'W&B is disabled.')
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -106,7 +113,7 @@ def config_to_dict(cfg):
         "reconformer_num_ch", "reconformer_num_iter", "reconformer_down_scales",
         "reconformer_num_heads", "reconformer_depths", "reconformer_window_sizes",
         "reconformer_mlp_ratio", "reconformer_resi_connection", "reconformer_use_checkpoint",
-        "lambda_schedule", "lambda_start", "lambda_end", "pos_emb_type", "attn_type", "attn_scales",
+        "lambda_schedule", "lambda_start", "lambda_end", "pos_emb_type", "attn_type", "attn_scales", "sdpa_dtype",
         "fnet_share_ffn", "global_filter", "global_filter_mid", "kspace_conv", "kspace_conv_channels", "kspace_conv_kernel",
         "spirit_conv", "spirit_conv_kernels", "spirit_conv_mode",
         "image_conv", "image_conv_channels", "image_conv_layers", "image_conv_kernel",
@@ -683,8 +690,61 @@ def _resolve_batch_size(cfg, dataset, device, checkpoint=None, starting_batch_si
     )
 
 
+def profile_training(cfg, out_dir, steps, train_step_kwargs, device):
+    """
+    Run 1 warm-up + `steps` profiled training steps under torch.profiler and report where the step time goes:
+    top kernels/ops by device time, then the per-stage breakdown from the record_function scopes in the model
+    forward ("stage{i}:{Encoder}"), backward included. The Chrome trace goes to <out_dir>/profile_trace.json
+    (open in chrome://tracing or https://ui.perfetto.dev).
+    """
+    from torch.profiler import ProfilerActivity, profile, schedule
+
+    activities = [ProfilerActivity.CPU]
+    if device.type == "cuda":
+        activities.append(ProfilerActivity.CUDA)
+    trace_path = os.path.join(out_dir, "profile_trace.json")
+    phase(f"Profiling 1 warm-up + {steps} step(s); trace -> {trace_path}")
+    with profile(
+        activities=activities,
+        schedule=schedule(wait=0, warmup=1, active=steps, repeat=1),
+        record_shapes=True,
+        profile_memory=True,
+    ) as prof:
+        train_one_epoch(**train_step_kwargs, max_batches=steps + 1, step_callback=prof.step)
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+    averages = prof.key_averages()
+    if device.type != "cuda":
+        device_time, total_time = "self_cpu_time_total", "cpu_time_total"
+    elif hasattr(averages[0], "self_device_time_total"):
+        device_time, total_time = "self_device_time_total", "device_time_total"
+    else:
+        device_time, total_time = "self_cuda_time_total", "cuda_time_total"
+    print(f"\n==== Top ops by self device time ({steps} step(s)) ====", flush=True)
+    print(averages.table(sort_by=device_time, row_limit=40), flush=True)
+
+    stage_rows = sorted(
+        (entry for entry in averages if entry.key.startswith("stage")),
+        key=lambda entry: entry.key,
+    )
+    if stage_rows:
+        stage_total = sum(getattr(entry, total_time) for entry in stage_rows)
+        print("\n==== Per-stage device time (encoder forward + backward, excludes DC / loss / optimizer) ====", flush=True)
+        for entry in stage_rows:
+            t_ms = getattr(entry, total_time) / 1e3 / steps
+            print(f"  {entry.key:40s} {t_ms:9.1f} ms/step   {100 * getattr(entry, total_time) / max(stage_total, 1):5.1f}%",
+                  flush=True)
+        print(f"  {'all stages':40s} {stage_total / 1e3 / steps:9.1f} ms/step", flush=True)
+    if device.type == "cuda":
+        print(f"\nPeak device memory: {torch.cuda.max_memory_allocated(device) / 2**30:.2f} GiB", flush=True)
+    prof.export_chrome_trace(trace_path)
+    phase("Profiling done")
+
+
 def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer,
-                    final_criterion, intermediate_criterion, loss_mode, device, epoch, grappa_cache=None):
+                    final_criterion, intermediate_criterion, loss_mode, device, epoch, grappa_cache=None,
+                    max_batches=None, step_callback=None):
     model.train()
     total_loss = 0.0
     total_final_loss = 0.0
@@ -699,10 +759,12 @@ def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer
     data_accum = 0.0
     compute_accum = 0.0
     t_wait = time.perf_counter()
-    num_batches = len(loader)
+    num_batches = len(loader) if max_batches is None else min(len(loader), max_batches)
     next_report = 0.1
     epoch_bar = progress_iter(loader, desc=f"Epoch {epoch + 1} train", unit="batch")
     for batch_idx, batch in enumerate(epoch_bar):
+        if batch_idx >= num_batches:
+            break
         data_time = time.perf_counter() - t_wait
         t_compute = time.perf_counter()
         kspace_full, fnames = _unpack_kspace_batch(batch)
@@ -767,6 +829,14 @@ def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer
         compute_time = time.perf_counter() - t_compute
         data_accum += data_time
         compute_accum += compute_time
+        if batch_idx < 5:
+            phase(
+                f"Epoch {epoch + 1} batch {batch_idx + 1}/{num_batches}: "
+                f"step {data_time + compute_time:.2f}s (data {data_time:.2f}s, compute {compute_time:.2f}s), "
+                f"batch size {batch_size}"
+            )
+        if step_callback is not None:
+            step_callback()
         t_wait = time.perf_counter()
         epoch_bar.set_postfix(
             loss=f"{total_batch_loss.item():.4f}",
@@ -1206,6 +1276,11 @@ def main():
     cfg = build_cfg(args.exp_idx)
     if args.num_gpus is not None:
         cfg.num_gpus = args.num_gpus
+    if args.batch_size is not None:
+        cfg.batch_size, cfg.auto_batch_size = args.batch_size, False
+    set_sdpa_dtype(cfg.sdpa_dtype)
+    if args.profile is not None:
+        os.environ.setdefault("WANDB_MODE", "disabled")
     device, rank, world_size, distributed = _init_distributed(cfg)
     is_primary = rank == 0
     if is_primary:
@@ -1357,6 +1432,9 @@ def main():
         print(f"Encoders   : {cfg.encoders}")
         print(f"Output dir : {out_dir}")
         print(f"Device     : {device}")
+        if device.type == "cuda":
+            backend = f"ROCm/HIP {torch.version.hip}" if torch.version.hip else f"CUDA {torch.version.cuda}"
+            print(f"Backend    : {torch.cuda.get_device_name(device)}  |  {backend}  |  torch {torch.__version__}")
         print(f"Image size : {cfg.image_size}")
         print(f"Batch size : {cfg.batch_size} global ({local_batch_size} per GPU)")
         print(f"Accel      : R = {cfg.acceleration_factors}  |  mask={cfg.mask_type}  |  center_fractions={cfg.center_fractions}")
@@ -1486,6 +1564,20 @@ def main():
             cfg.perpendicular_mag_weight_m_end,
             cfg.epochs,
         )
+
+    if args.profile is not None:
+        if distributed:
+            raise ValueError("--profile is single-process only; launch without torchrun / with num_gpus=1")
+        profile_training(
+            cfg, out_dir, args.profile, device=device,
+            train_step_kwargs=dict(
+                cfg=cfg, model=model, loader=train_loader, accel_factors=cfg.acceleration_factors,
+                mask_generator=mask_generator, optimizer=optimizer, final_criterion=final_criterion,
+                intermediate_criterion=intermediate_criterion, loss_mode=cfg.loss_mode, device=device,
+                epoch=start_epoch, grappa_cache=train_grappa_cache,
+            ),
+        )
+        return
 
     # ---- Training loop ----
     phase(f"Starting training: epochs {start_epoch + 1} to {cfg.epochs}")

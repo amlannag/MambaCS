@@ -242,6 +242,10 @@ class Config:
     # evenly across these odd conv kernel sizes over the token neighbourhood (1 = pointwise). nhead must be
     # divisible by len(attn_scales).
     attn_scales: Tuple[int, ...] = (1, 3)
+    # Compute dtype of the fused scaled_dot_product_attention calls ("float32", "bfloat16", "float16"). Only the
+    # stacked real q/k/v handed to the kernel are cast; projections, LayerNorm and FFNs stay fp32. On ROCm fp32 SDPA
+    # has no fused kernel and is ~8x slower than bf16, which gets flash attention with fp32 softmax accumulation.
+    sdpa_dtype: str = "float32"
     # Learnable k-space stems applied to each encoder's input before tokenisation (patch/axial encoders),
     # in the order GlobalFilter -> KSpaceConvStem. Both are exact identities at initialisation.
     # global_filter: per-cell complex Hadamard mask over the full k-space grid (= image-domain convolution).
