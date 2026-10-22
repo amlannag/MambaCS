@@ -134,6 +134,8 @@ _ENCODER_ARGS = {
             mask_vertical_attn=cfg.mask_vertical_attn,
             token_axis=getattr(cfg, "axial_token_axis", "both"),
             col_segments=getattr(cfg, "axial_col_segments", 1),
+            radial_num_spokes=getattr(cfg, "radial_num_spokes", 320),
+            radial_spacing=getattr(cfg, "radial_spacing", 1.0),
             attn_scales=tuple(getattr(cfg, "attn_scales", (1, 3))),
             kspace_stem=_kspace_stem_args(cfg),
         ),

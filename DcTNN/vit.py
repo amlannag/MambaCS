@@ -96,7 +96,8 @@ class axVIT(BaseVIT):
                     layer_norm_eps=1e-05, batch_first=True, device=None, dtype=None,
                     pos_emb_type="APE", rope_theta=100.0, rope_mixed_rotate=True, attn_type="standard",
                     row_stride=1, mask_vertical_attn="none", ffn_sharing="none", shared_ffn=None, flattening_order="row_major",
-                    attn_scales=(1, 3), kspace_stem=None, token_axis="both", col_segments=1):
+                    attn_scales=(1, 3), kspace_stem=None, token_axis="both", col_segments=1,
+                    radial_num_spokes=320, radial_spacing=1.0):
         if d_model is None:
             _, image_width = N if isinstance(N, (tuple, list)) else (N, N)
             d_model = image_width * numCh
@@ -109,7 +110,8 @@ class axVIT(BaseVIT):
                          row_stride=row_stride, mask_vertical_attn=mask_vertical_attn,
                          ffn_sharing=ffn_sharing, shared_ffn=shared_ffn,
                          flattening_order=flattening_order, attn_scales=attn_scales, kspace_stem=kspace_stem,
-                         token_axis=token_axis, col_segments=col_segments)
+                         token_axis=token_axis, col_segments=col_segments,
+                         radial_num_spokes=radial_num_spokes, radial_spacing=radial_spacing)
             for _ in range(layerNo)
         ])
         super().__init__(N, layerNo, numCh, transformers)

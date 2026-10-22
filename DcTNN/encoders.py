@@ -21,6 +21,8 @@ from .util import (
 )
 from .complex_init import apply_trabelsi_
 from .kspace_ops import build_kspace_stem, build_axial_kspace_stems
+from .polar import PolarResampler
+from .rope_vit import axial_cis_complex_from_coords
 
 def _build_vertical_attn_mask(sampled: torch.Tensor, mode: str) -> torch.Tensor:
     """
@@ -266,20 +268,33 @@ class axialEncoder(nn.Module):
                     pos_emb_type="APE", rope_theta=100.0, attn_type="standard", row_stride=1,
                     mask_vertical_attn="none", ffn_sharing="none", shared_ffn=None,
                     flattening_order="row_major", attn_scales=(1, 3), kspace_stem=None, token_axis="both",
-                    col_segments=1):
+                    col_segments=1, radial_num_spokes=320, radial_spacing=1.0):
         """
         col_segments : split every k-space column into this many equal vertical segments; each segment is one
                        vertical token (S*W tokens of H/S*numCh values instead of W tokens of H*numCh). Tokens are laid
                        out as a row-major (S, W) grid: RoPE is 2-D over (segment, column) and, with
                        attn_type='complex_ms', the multi-scale Q/K convolutions are 2-D, so a scale-3 head sees the
                        neighbouring columns (left/right) AND the segments above/below. 1 = whole-column tokens.
+        token_axis   : "both" (rows then columns), "vertical" (columns only) or "both+radial": rows, columns, then a
+                       third RADIAL pass whose tokens are half-spokes from DC (DcTNN/polar.py: radial_num_spokes
+                       half-lines at angles 2*pi*i/N, radial_spacing px between samples, out to the inscribed circle).
+                       A streak at any orientation lies inside one spoke token. The radial pass is a RESIDUAL on the
+                       k-space left by the column pass (k + D*P^T(head(encoder(embed(P*k))))): the bilinear polar
+                       round trip apodises FOV-filling k-space, so it must never replace the Cartesian state.
+                       Spoke RoPE uses points on a circle, so the angle axis is periodic.
         """
         super().__init__()
 
-        if token_axis not in ("both", "vertical"):
-            raise ValueError(f"token_axis must be 'both' or 'vertical', got '{token_axis}'")
+        if token_axis not in ("both", "vertical", "both+radial"):
+            raise ValueError(f"token_axis must be 'both', 'vertical' or 'both+radial', got '{token_axis}'")
         if token_axis == "vertical" and row_stride != 1:
             raise ValueError("row_stride only applies to horizontal tokens; use row_stride=1 with token_axis='vertical'")
+        self.radial = token_axis == "both+radial"
+        if self.radial and pos_emb_type not in ("Rope-Axial", "Rope-Mixed"):
+            raise ValueError("token_axis='both+radial' needs RoPE positions (pos_emb_type 'Rope-Axial' / 'Rope-Mixed')")
+        if self.radial and flattening_order != "row_major":
+            raise ValueError("token_axis='both+radial' requires flattening_order='row_major'")
+        token_axis = "both" if self.radial else token_axis
         col_segments = int(col_segments)
         if col_segments < 1:
             raise ValueError(f"col_segments must be >= 1, got {col_segments}")
@@ -358,6 +373,35 @@ class axialEncoder(nn.Module):
                                           token_grid=self.vertical_token_grid if col_segments > 1 else None)
         self.verticalEncoder = TransformerEncoder(v_layer, numLayers, tie_ffn=shared_ffn is not None)
 
+        if self.radial:
+            self.polar = PolarResampler(image_size, radial_num_spokes, radial_spacing)
+            spoke_dim = self.polar.num_radii * numCh
+            param_dtype = torch.cfloat if self.is_complex else None
+            norm_cls = ComplexLayerNorm if self.is_complex else nn.LayerNorm
+            self.to_radial_embedding = nn.Linear(spoke_dim, d_model, dtype=param_dtype)
+            self.radial_mlp_head = nn.Sequential(norm_cls(d_model, eps=layer_norm_eps),
+                                                 nn.Linear(d_model, spoke_dim, dtype=param_dtype))
+            if self.is_complex:
+                apply_trabelsi_(self.to_radial_embedding, criterion="glorot")
+                apply_trabelsi_(self.radial_mlp_head[1], criterion="glorot")
+            # spokes placed on a circle (arc spacing 1 between neighbours) -> periodic RoPE over the angle
+            t_x, t_y = self.polar.spoke_coordinates()
+            freqs_r = (axial_cis_complex_from_coords(t_x, t_y, head_dim, rope_theta) if self.is_complex
+                       else _axial_cis_from_coords(t_x, t_y, head_dim, rope_theta))
+            r_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation,
+                                              layer_norm_eps, freqs_cis=freqs_r, attn_type=attn_type,
+                                              ff=shared_ffn, attn_scales=attn_scales)
+            self.radialEncoder = TransformerEncoder(r_layer, numLayers, tie_ffn=shared_ffn is not None)
+
+    def _radial_residual(self, x):
+        """Residual from the spoke pass: D*P^T(head(encoder(embed(P*x)))), zero on pixels no spoke touches."""
+        B, C = x.shape[:2]
+        tokens = self.polar(x).permute(0, 2, 1, 3).reshape(B, self.polar.num_spokes, -1)     # (B, spokes, radii*C)
+        tokens = self.dropout(self.to_radial_embedding(tokens))
+        tokens = self.radial_mlp_head(self.radialEncoder(tokens))
+        polar = tokens.view(B, self.polar.num_spokes, C, self.polar.num_radii).permute(0, 2, 1, 3)
+        return self.polar.adjoint(polar)
+
     def forward(self, img, col_mask=None):
         if self.kspace_stem is not None:
             img = self.kspace_stem(img)
@@ -388,7 +432,16 @@ class axialEncoder(nn.Module):
 
         x = self.vertical_mlp_head(x)
 
+        if self.radial:
+            x = x + self._radial_residual(x)
         return x
+
+
+def _axial_cis_from_coords(t_x, t_y, dim, theta=100.0):
+    """Real-valued counterpart of axial_cis_complex_from_coords (layout of compute_axial_cis: dim//4 x- then y-rotations)."""
+    freq = 1.0 / (theta ** (torch.arange(0, dim, 4)[: (dim // 4)].float() / dim))
+    ang_x, ang_y = torch.outer(t_x.float(), freq), torch.outer(t_y.float(), freq)
+    return torch.cat([torch.polar(torch.ones_like(ang_x), ang_x), torch.polar(torch.ones_like(ang_y), ang_y)], dim=-1)
 
 
 class crossAxialEncoder(nn.Module):
