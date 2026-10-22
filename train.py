@@ -724,18 +724,33 @@ def profile_training(cfg, out_dir, steps, train_step_kwargs, device):
     print(f"\n==== Top ops by self device time ({steps} step(s)) ====", flush=True)
     print(averages.table(sort_by=device_time, row_limit=40), flush=True)
 
-    stage_rows = sorted(
-        (entry for entry in averages if entry.key.startswith("stage")),
-        key=lambda entry: entry.key,
-    )
+    # Matmuls by input shape: (M, K) x (K, N) identifies the nn.Linear (forward: tokens x in -> out; backward
+    # weight grad: in x tokens -> out, i.e. a tiny output with a huge reduction when there are many tokens).
+    matmul_rows = sorted(
+        (entry for entry in prof.key_averages(group_by_input_shape=True)
+         if entry.key in ("aten::mm", "aten::bmm", "aten::addmm", "aten::baddbmm")),
+        key=lambda entry: -getattr(entry, device_time),
+    )[:20]
+    if matmul_rows:
+        print("\n==== Matmuls by input shape (per step) ====", flush=True)
+        for entry in matmul_rows:
+            t_ms = getattr(entry, device_time) / 1e3 / steps
+            calls = entry.count / steps
+            print(f"  {t_ms:8.1f} ms  {calls:5.0f} calls  {t_ms / max(calls, 1):7.2f} ms/call  "
+                  f"{entry.key:12s} {entry.input_shapes}", flush=True)
+
+    # record_function scopes show up twice (CPU op + device user annotation); keep the larger per name.
+    stage_rows = {}
+    for entry in averages:
+        if entry.key.startswith("stage"):
+            stage_rows[entry.key] = max(stage_rows.get(entry.key, 0.0), getattr(entry, total_time))
     if stage_rows:
-        stage_total = sum(getattr(entry, total_time) for entry in stage_rows)
-        print("\n==== Per-stage device time (encoder forward + backward, excludes DC / loss / optimizer) ====", flush=True)
-        for entry in stage_rows:
-            t_ms = getattr(entry, total_time) / 1e3 / steps
-            print(f"  {entry.key:40s} {t_ms:9.1f} ms/step   {100 * getattr(entry, total_time) / max(stage_total, 1):5.1f}%",
-                  flush=True)
-        print(f"  {'all stages':40s} {stage_total / 1e3 / steps:9.1f} ms/step", flush=True)
+        stage_total = sum(stage_rows.values())
+        print("\n==== Per-stage device time, FORWARD only (backward is attributed to autograd nodes, not stages) ====",
+              flush=True)
+        for key, t_us in sorted(stage_rows.items()):
+            print(f"  {key:40s} {t_us / 1e3 / steps:9.1f} ms/step   {100 * t_us / max(stage_total, 1):5.1f}%", flush=True)
+        print(f"  {'all stages (forward)':40s} {stage_total / 1e3 / steps:9.1f} ms/step", flush=True)
     if device.type == "cuda":
         print(f"\nPeak device memory: {torch.cuda.max_memory_allocated(device) / 2**30:.2f} GiB", flush=True)
     prof.export_chrome_trace(trace_path)
