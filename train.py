@@ -1716,7 +1716,7 @@ def main():
             'wandb_run_id':  wandb_run_id,
         }, latest_path)
 
-        if epoch == cfg.epochs - 1:
+        if epoch == cfg.epochs - 1 and cfg.final_full_validation:
             phase("Last epoch: running full validation-set inference over every file...")
             final_metrics = evaluate_validation_set(cfg, base_model, device)
             _print_final_val_summary(final_metrics["means"])

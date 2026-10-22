@@ -79,6 +79,7 @@ _SPEED_TEST_BASE = {
     "auto_batch_size": False,
     "batch_size": 81,
     "epochs": 1,
+    "final_full_validation": False,   # skip the end-of-training inference over all 199 val volumes
 }
 EXPERIMENTS += [
     {**_SPEED_TEST_BASE, "name": "speedtest_sdpa_bf16", "sdpa_dtype": "bfloat16"},

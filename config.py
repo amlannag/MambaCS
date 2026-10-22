@@ -70,6 +70,9 @@ class Config:
     seed: int = 42
     max_train_files: Optional[int] = None
     max_val_files: Optional[int] = 15
+    # After the last epoch, run inference over EVERY file in the validation directory (ignores max_val_files) and
+    # write final_validation_metrics.json. Disable for speed tests / smoke runs.
+    final_full_validation: bool = True
     # Drop the first / last N slices of every fastMRI volume from the TRAINING set only (edge slices are often
     # noisy / low signal). Validation and inference always use every slice. 0 = keep all.
     skip_starting_slice: int = 0
