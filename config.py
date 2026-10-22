@@ -394,6 +394,10 @@ class Config:
     auto_batch_size: bool = True
     batch_size_search_start: int = 128
     batch_size_probe_steps: int = 3
+    # A probed batch size is only accepted if its peak allocation stays below this fraction of device memory. The
+    # probe runs a bare model on rank 0; the real run adds DDP gradient buckets, mask-dependent tensor shapes and
+    # allocator fragmentation (and other ranks never probe), so a batch that merely survives the probe OOMs later.
+    batch_size_memory_fraction: float = 0.85
     optimizer_type: str = "adam"   # "adam" (coupled L2) or "adamw" (decoupled); stem params always get weight_decay=0
     scheduler_type: str = "cosine"
     lr: float = 2e-4

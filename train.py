@@ -531,6 +531,10 @@ def _clear_cuda_memory():
 BATCH_SIZE_BACKOFF = 0.8   # multiply the batch size by this after every OOM (always shrinks by at least 1)
 
 
+class BatchMemoryHeadroomExceeded(RuntimeError):
+    """The probe ran, but its peak allocation left less headroom than cfg.batch_size_memory_fraction allows."""
+
+
 def _find_executable_batch_size(starting_batch_size, probe, backoff=BATCH_SIZE_BACKOFF):
     if starting_batch_size < 1:
         raise ValueError("starting_batch_size must be at least 1")
@@ -543,7 +547,7 @@ def _find_executable_batch_size(starting_batch_size, probe, backoff=BATCH_SIZE_B
         try:
             probe(batch_size)
         except RuntimeError as error:
-            if not _is_oom_error(error):
+            if not (_is_oom_error(error) or isinstance(error, BatchMemoryHeadroomExceeded)):
                 raise
             message = str(error)
             error.__traceback__ = None
@@ -660,7 +664,14 @@ def _probe_batch_candidate(cfg, dataset, batch_size, device, checkpoint=None):
             f"in {time.time() - t_probe:.1f}s"
         )
         if peak_gb is not None:
-            summary += f" (peak GPU memory {peak_gb:.2f} GB)"
+            total_gb = torch.cuda.get_device_properties(device).total_memory / 1e9
+            summary += f" (peak GPU memory {peak_gb:.2f} / {total_gb:.0f} GB = {100 * peak_gb / total_gb:.0f}%)"
+            if peak_gb > cfg.batch_size_memory_fraction * total_gb:
+                raise BatchMemoryHeadroomExceeded(
+                    f"peak {peak_gb:.1f} GB is {100 * peak_gb / total_gb:.0f}% of the {total_gb:.0f} GB device, over the "
+                    f"{100 * cfg.batch_size_memory_fraction:.0f}% headroom limit (batch_size_memory_fraction); the full "
+                    f"run adds DDP buckets, mask-dependent shapes and allocator fragmentation on top of the probe"
+                )
         phase(summary)
     finally:
         if optimizer is not None:
