@@ -1,52 +1,44 @@
 
 # ---------------------------------------------------------------------------
-# fastMRI single-coil knee, random R=4 (8% ACS), 100 epochs: 4-stage multi-scale axial cascade with a RADIAL pass.
-#   stage 1-4 axial           multi-scale axial, three passes per stage:
-#                               rows    -> whole-row tokens
-#                               columns -> whole-column tokens
-#                               spokes  -> 320 half-spoke tokens from DC (160 lines through DC, split at DC into their
-#                                          two halves), 160 samples each at 1 px out to the inscribed circle, periodic
-#                                          RoPE over the angle; added as a RESIDUAL to the column-pass k-space
-#                             d_model 320, both Q/K conv scales 1 & 3
-#   data consistency: one learned scalar lambda per stage
-#   loss: complex L2 on the final output only
+# Shared settings (NOT submitted on their own): fastMRI single-coil knee, random R=4 (8% ACS), 100 epochs,
+# multi-scale axial stages with three passes each (rows, columns, and the 320 half-spoke RADIAL pass added as a
+# residual to the column pass), d_model 320, Q/K conv scales 1 & 3, scalar learned lambda DC, final-only complex L2.
+# The axial4 + radial run itself (random_axial4_msaxial_seg1_radial320_...) has already been trained.
 # ---------------------------------------------------------------------------
-EXPERIMENTS = [
-    {
-        "prefix": "fastmri",
-        "name": "random_axial4_msaxial_seg1_radial320_scalardc_l2final_r4_100ep",
-        "dataset": "fastmri",
-        "num_channels": 1,
-        "image_size": (320, 320),
-        "mask_type": "random",
-        "acceleration_factors": [4],
-        "center_fractions": [0.08],
-        "learning": "k_space",
-        "norm": "fastmri_magnitude",
+_AXIAL_RADIAL_BASE = {
+    "prefix": "fastmri",
+    "name": "random_axial4_msaxial_seg1_radial320_scalardc_l2final_r4_100ep",
+    "dataset": "fastmri",
+    "num_channels": 1,
+    "image_size": (320, 320),
+    "mask_type": "random",
+    "acceleration_factors": [4],
+    "center_fractions": [0.08],
+    "learning": "k_space",
+    "norm": "fastmri_magnitude",
 
-        "encoders": ["axial"] * 4,
-        "axial_d_model": 320,
-        "axial_token_axis": "both+radial",
-        "radial_num_spokes": 320,
-        "radial_spacing": 1.0,
-        "axial_col_segments": 1,              # whole-column tokens
-        "attn_type": "complex_ms",
-        "attn_scales": (1, 3),
-        "sdpa_dtype": "bfloat16",             # fused flash attention on ROCm (fp32 SDPA has no fused kernel there)
-        "ffn_sharing": "global",
+    "encoders": ["axial"] * 4,
+    "axial_d_model": 320,
+    "axial_token_axis": "both+radial",
+    "radial_num_spokes": 320,
+    "radial_spacing": 1.0,
+    "axial_col_segments": 1,              # whole-column tokens
+    "attn_type": "complex_ms",
+    "attn_scales": (1, 3),
+    "sdpa_dtype": "bfloat16",             # fused flash attention on ROCm (fp32 SDPA has no fused kernel there)
+    "ffn_sharing": "global",
 
-        "lambda_schedule": "none",
-        "learned_lambda": True,
-        "dc_type": "scalar",
+    "lambda_schedule": "none",
+    "learned_lambda": True,
+    "dc_type": "scalar",
 
-        "final_loss_type": "complex_l2",
-        "loss_mode": "final_only",
+    "final_loss_type": "complex_l2",
+    "loss_mode": "final_only",
 
-        "epochs": 100,
-        "num_gpus": 1,
-        "batch_size_search_start": 128,
-    },
-]
+    "epochs": 100,
+    "num_gpus": 1,
+    "batch_size_search_start": 128,
+}
 
 # ---------------------------------------------------------------------------
 # Band-split cascade with the sigma schedule REVERSED: sigma 1.0 -> 0.15 along the cascade (non-increasing), so the
@@ -54,8 +46,8 @@ EXPERIMENTS = [
 # 5x5 / 10x10 / 20x20 windows) takes over progressively more of the high band in the later stages. Otherwise identical
 # to the split4 patch-window run (whole-column axial low expert, scalar lambda DC, final-only complex L2).
 # ---------------------------------------------------------------------------
-EXPERIMENTS.append({
-    **{k: v for k, v in EXPERIMENTS[0].items() if not k.startswith("radial_")},
+EXPERIMENTS = [{
+    **{k: v for k, v in _AXIAL_RADIAL_BASE.items() if not k.startswith("radial_")},
     "name": "random_split4_msaxial_seg1_winpatch4_radial5x5_sigmarev_scalardc_l2final_r4_100ep",
     "encoders": ["freq_split"] * 4,
     "axial_token_axis": "both",
@@ -73,7 +65,7 @@ EXPERIMENTS.append({
     "window_radial_bands": (0.3, 0.6),
     "window_d_model": 64,
     "window_nhead": 4,
-})
+}]
 
 # ---------------------------------------------------------------------------
 # Exp 2: learned-GRAPPA neighbourhood cross-attention opener (acquired columns only: strip 16, 2 neighbours per side,
@@ -81,7 +73,7 @@ EXPERIMENTS.append({
 #   NOTE: the neighbourhood stage costs ~1.6 s/step at batch 81 on an MI355X (7x the three axial stages together).
 # ---------------------------------------------------------------------------
 EXPERIMENTS.append({
-    **EXPERIMENTS[0],
+    **_AXIAL_RADIAL_BASE,
     "name": "random_nbr_axial3_msaxial_seg1_radial320_scalardc_l2final_r4_100ep",
     "encoders": ["neighbourhood"] + ["axial"] * 3,
     "neighbourhood_strip_len": 16,
@@ -96,7 +88,7 @@ EXPERIMENTS.append({
 # of 53 samples ((320, 3) token grid, 2-D RoPE at the segment's k-space position; the outermost radius is dropped).
 # ---------------------------------------------------------------------------
 EXPERIMENTS.append({
-    **EXPERIMENTS[0],
+    **_AXIAL_RADIAL_BASE,
     "name": "random_axial4_msaxial_seg4_radial320_rseg3_scalardc_l2final_r4_100ep",
     "axial_col_segments": 4,
     "radial_segments": 3,
