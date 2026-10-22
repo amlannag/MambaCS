@@ -86,4 +86,8 @@ EXPERIMENTS += [
     {**_SPEED_TEST_BASE, "name": "speedtest_sdpa_fp32", "sdpa_dtype": "float32"},
     # exp 3: how fast is a plain 3-stage axial cascade (same axial settings as the freq_split low expert)?
     {**_SPEED_TEST_BASE, "name": "speedtest_axial3", "encoders": ["axial"] * 3},
+    # exp 4: the 4 freq_split stages (multi-scale axial + window_axial experts) alone, no openers
+    {**_SPEED_TEST_BASE, "name": "speedtest_split4", "encoders": ["freq_split"] * 4},
+    # exp 5: the single neighbourhood stage alone
+    {**_SPEED_TEST_BASE, "name": "speedtest_nbr1", "encoders": ["neighbourhood"]},
 ]
