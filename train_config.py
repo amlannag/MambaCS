@@ -68,7 +68,7 @@ EXPERIMENTS = [{
 }]
 
 # ---------------------------------------------------------------------------
-# Exp 2: learned-GRAPPA neighbourhood cross-attention opener (acquired columns only: strip 16, 2 neighbours per side,
+# Exp 1: learned-GRAPPA neighbourhood cross-attention opener (acquired columns only: strip 16, 2 neighbours per side,
 # kx halo 1) followed by 3 axial stages that each run rows, columns AND the 320 half-spoke radial pass.
 #   NOTE: the neighbourhood stage costs ~1.6 s/step at batch 81 on an MI355X (7x the three axial stages together).
 # ---------------------------------------------------------------------------
@@ -83,7 +83,7 @@ EXPERIMENTS.append({
 })
 
 # ---------------------------------------------------------------------------
-# Exp 3: 4 axial stages with SEGMENTED tokens on both the Cartesian and the radial pass: every column cut into 4
+# Exp 2: 4 axial stages with SEGMENTED tokens on both the Cartesian and the radial pass: every column cut into 4
 # segments of 80 rows ((4, 320) token grid, 2-D RoPE, 2-D Q/K convs) and every half-spoke cut into 3 radial segments
 # of 53 samples ((320, 3) token grid, 2-D RoPE at the segment's k-space position; the outermost radius is dropped).
 # ---------------------------------------------------------------------------
@@ -95,16 +95,20 @@ EXPERIMENTS.append({
 })
 
 # ---------------------------------------------------------------------------
-# Exp 3: the reversed-sigma band-split cascade (exp 0) trained with the BANDED intermediate loss: every stage output is
-# penalised with complex L2 weighted by its own high band 1 - G_i(r) (sigma 1.0 -> 0.15, so stage 1 answers for the
-# outermost frequencies only and later stages for progressively more of k-space), plus the plain final loss. The gates
-# are detached in the loss; the window expert therefore has to earn its band instead of the split staying nominal.
+# Exp 3: the reversed-sigma band-split cascade (exp 0) with LOW -> HIGH banded supervision. The loss bands are fixed
+# and independent of the gates: stage i's intermediate complex L2 is weighted by the disc G(r; s_i) with s = 0.3 -> 1.5
+# (geometric), so stage 1 answers for the k-space centre, each later stage for a wider disc and the last for nearly all
+# of k-space; plus the plain final loss. The gate sigmas stay learnable (init 1.0 -> 0.15: global axial first) and are
+# free to settle wherever that supervision is best served.
 # ---------------------------------------------------------------------------
 EXPERIMENTS.append({
     **EXPERIMENTS[0],
-    "name": "random_split4_msaxial_seg1_winpatch4_radial5x5_sigmarev_bandedloss_r4_100ep",
+    "name": "random_split4_msaxial_seg1_winpatch4_radial5x5_sigmarev_bandedlow_r4_100ep",
     "loss_mode": "intermediate_banded",
     "intermediate_loss_type": "complex_l2",
-    "banded_loss_band": "high",
+    "banded_loss_band": "low",
+    "banded_loss_sigma_start": 0.3,
+    "banded_loss_sigma_end": 1.5,
+    "banded_loss_sigma_schedule": "geometric",
     "banded_loss_floor": 0.0,
 })

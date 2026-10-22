@@ -320,15 +320,22 @@ class Config:
     # ---------------------------------------------------------------------------
     # "final_only"              loss on the final output
     # "intermediate_unweighted" + the intermediate loss on every post-DC stage output
-    # "intermediate_banded"     + the intermediate loss on every stage output, each freq_split stage weighted radially by
-    #                           its own gate: 1 - G_i (banded_loss_band="high", the stage's window-expert region) or G_i
-    #                           ("low"), lifted to banded_loss_floor and normalised to mean 1; non-split stages keep the
-    #                           plain loss. Makes each stage responsible for the band the architecture assigns it (with a
-    #                           decreasing sigma schedule: high frequencies first). Gates are detached in the loss.
-    #                           Needs a per-cell intermediate loss (complex_l2 / complex_l2_nmse).
+    # "intermediate_banded"     + the intermediate loss on every stage output, each stage weighted radially by a band
+    #                           window lifted to banded_loss_floor and normalised to mean 1, so stage i is held
+    #                           responsible for its band of k-space. Needs a per-cell intermediate loss (complex_l2 /
+    #                           complex_l2_nmse).
+    #                           The bands come from banded_loss_sigmas (one per stage) or the banded_loss_sigma_start ..
+    #                           _end schedule over ALL stages (independent of the learnable gate sigmas, which then adapt
+    #                           to the supervision); with neither, the freq_split gates themselves define the bands.
+    #                           banded_loss_band="low": stage i weighted by the disc G(r; sigma_i) (growing schedule =
+    #                           low -> high supervision); "high": by 1 - G.
     loss_mode: str = "final_only"
-    banded_loss_band: str = "high"
+    banded_loss_band: str = "low"
     banded_loss_floor: float = 0.0
+    banded_loss_sigmas: Optional[List[float]] = None
+    banded_loss_sigma_start: Optional[float] = None
+    banded_loss_sigma_end: Optional[float] = None
+    banded_loss_sigma_schedule: str = "geometric"
     # Region of k-space the reconstruction loss is computed over:
     #   "all_kspace"       — every k-space location (default)
     #   "unsampled_kspace" — only locations NOT acquired by the sampling mask; the

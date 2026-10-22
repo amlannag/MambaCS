@@ -28,6 +28,7 @@ from config import Config
 from progress import phase, progress_iter
 from train_config import EXPERIMENTS
 from DcTNN.lambda_scheduler import LambdaScheduler
+from DcTNN.band_split import freq_split_sigma_init
 from DcTNN.attention_layer import set_sdpa_dtype
 from train_utils import (FastMRIMaskGenerator, GrappaWeightCache, build_model, resolve_data_dirs, is_h5_dataset,
                          is_multicoil_dataset, simulate_undersampling, unique_model_parameters,
@@ -328,16 +329,34 @@ def _loss_mask_for(cfg, mask):
 LOSS_MODES = ("final_only", "intermediate_unweighted", "intermediate_banded")
 
 
+def _banded_loss_sigmas(cfg, n_stages):
+    """Explicit per-stage loss-band sigmas (list, or start..end schedule over all stages); None = use the gates."""
+    explicit = getattr(cfg, "banded_loss_sigmas", None)
+    if explicit is not None:
+        if len(explicit) != n_stages:
+            raise ValueError(f"banded_loss_sigmas has {len(explicit)} values but the cascade has {n_stages} stages")
+        return [float(s) for s in explicit]
+    start, end = getattr(cfg, "banded_loss_sigma_start", None), getattr(cfg, "banded_loss_sigma_end", None)
+    if start is None and end is None:
+        return None
+    if start is None or end is None:
+        raise ValueError("set both banded_loss_sigma_start and banded_loss_sigma_end (or banded_loss_sigmas)")
+    return freq_split_sigma_init(n_stages, start, end, getattr(cfg, "banded_loss_sigma_schedule", "geometric"),
+                                 bounds=(1e-3, 1e3))
+
+
 def _band_weights_for(cfg, model):
-    """Per-stage radial loss weights from the cascade's freq_split gates (loss_mode='intermediate_banded'), else None."""
+    """Per-stage radial loss weights for loss_mode='intermediate_banded' (explicit sigma schedule, else the gates)."""
     if cfg.loss_mode != "intermediate_banded":
         return None
     base = _unwrap_distributed(model)
     if not hasattr(base, "stage_band_weights"):
-        raise ValueError("loss_mode='intermediate_banded' needs a cascadeNet with freq_split stages")
-    weights = base.stage_band_weights(band=cfg.banded_loss_band, floor=cfg.banded_loss_floor)
+        raise ValueError("loss_mode='intermediate_banded' needs a cascadeNet")
+    weights = base.stage_band_weights(band=cfg.banded_loss_band, floor=cfg.banded_loss_floor,
+                                      sigmas=_banded_loss_sigmas(cfg, len(base.transformers)))
     if all(w is None for w in weights):
-        raise ValueError("loss_mode='intermediate_banded' needs at least one freq_split stage to define the bands")
+        raise ValueError("loss_mode='intermediate_banded' needs banded_loss_sigma_start/end (or banded_loss_sigmas), "
+                         "or at least one freq_split stage whose gate defines the band")
     return weights
 
 

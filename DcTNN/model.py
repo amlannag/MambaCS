@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from .dc import KSpace_DC
 from .vit import TokenVIT, axVIT, CrossAttentionVIT, PerCoilCrossAttentionVIT, NeighbourhoodVIT, FNetVIT, PCAVIT
 from .fixed_apt import FixedAPTVIT
-from .band_split import BandSplitVIT, FreqSplitSigmas
+from .band_split import BandSplitVIT, FreqSplitSigmas, gaussian_partition, normalized_radius_grid
 from .encoders import TokenEncoder, axialEncoder, crossAxialEncoder, pair
 from .util import FeedForward, _COMPLEX_ATTN_TYPES, validate_flattening_order
 
@@ -216,27 +216,38 @@ class cascadeNet(nn.Module):
         values = self.freq_split_sigmas.values()
         return {stage: values[n] for stage, n in self.split_stage_index.items()}
 
-    def stage_band_weights(self, band="high", floor=0.0):
+    def stage_band_weights(self, band="low", floor=0.0, sigmas=None):
         """
-        Per-stage radial loss weights for loss_mode='intermediate_banded': one [1, 1, H, W] map per stage, or None for
-        stages that are not freq_split (those keep the unweighted loss). A split stage with gate G_i = exp(-(r/sigma_i)^2/2)
-        is weighted by 1 - G_i (band='high': its window-expert region) or G_i (band='low': its axial-expert region),
-        lifted to at least `floor`, and normalised to mean 1 over the grid so stage losses stay comparable. The gate is
-        detached: the loss must not be able to shrink a stage's responsibility by moving sigma.
+        Per-stage radial loss weights for loss_mode='intermediate_banded': one [1, 1, H, W] map per stage.
+
+        With explicit `sigmas` (one per stage, independent of the gates) every stage i is weighted by the disc
+        G(r; sigma_i) = exp(-(r/sigma_i)^2/2) (band='low': the stage answers for frequencies inside sigma_i; a growing
+        schedule gives low -> high supervision along the cascade) or by 1 - G (band='high'). Without `sigmas` the
+        freq_split gates themselves are used (detached) and non-split stages get None (plain loss). Weights are lifted
+        to at least `floor` and normalised to mean 1 over the grid so stage losses stay comparable.
         """
         if band not in ("high", "low"):
             raise ValueError(f"band must be 'high' or 'low', got {band!r}")
-        if self.freq_split_sigmas is None:
-            return [None] * len(self.transformers)
-        sigmas = self.freq_split_sigmas().detach()
+        n = len(self.transformers)
+        radius = normalized_radius_grid(self.N, device=next(self.parameters()).device)
+        if sigmas is not None:
+            if len(sigmas) != n:
+                raise ValueError(f"banded loss needs one sigma per stage ({n}), got {len(sigmas)}")
+            gates = [gaussian_partition(radius, float(s)).unsqueeze(0).unsqueeze(0) for s in sigmas]
+        else:
+            if self.freq_split_sigmas is None:
+                return [None] * n
+            learned = self.freq_split_sigmas().detach()
+            gates = [
+                transformer.partition(learned[self.split_stage_index[i]]) if isinstance(transformer, BandSplitVIT) else None
+                for i, transformer in enumerate(self.transformers)
+            ]
         weights = []
-        for i, transformer in enumerate(self.transformers):
-            if not isinstance(transformer, BandSplitVIT):
+        for g in gates:
+            if g is None:
                 weights.append(None)
                 continue
-            g = transformer.partition(sigmas[self.split_stage_index[i]])
-            w = (1.0 - g) if band == "high" else g
-            w = w.clamp_min(floor)
+            w = ((1.0 - g) if band == "high" else g).clamp_min(floor)
             weights.append(w / w.mean().clamp_min(1e-12))
         return weights
 
