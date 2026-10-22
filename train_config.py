@@ -41,38 +41,11 @@ _AXIAL_RADIAL_BASE = {
 }
 
 # ---------------------------------------------------------------------------
-# Band-split cascade with the sigma schedule REVERSED: sigma 1.0 -> 0.15 along the cascade (non-increasing), so the
-# early stages are almost entirely the axial expert over the whole grid and the window expert (4x4 patch tokens, radial
-# 5x5 / 10x10 / 20x20 windows) takes over progressively more of the high band in the later stages. Otherwise identical
-# to the split4 patch-window run (whole-column axial low expert, scalar lambda DC, final-only complex L2).
-# ---------------------------------------------------------------------------
-EXPERIMENTS = [{
-    **{k: v for k, v in _AXIAL_RADIAL_BASE.items() if not k.startswith("radial_")},
-    "name": "random_split4_msaxial_seg1_winpatch4_radial5x5_sigmarev_scalardc_l2final_r4_100ep",
-    "encoders": ["freq_split"] * 4,
-    "axial_token_axis": "both",
-    "freq_split_encoders": ("axial", "window_axial"),
-    "freq_split_sigma_learned": True,
-    "freq_split_sigma_schedule": "geometric",
-    "freq_split_sigma_start": 1.0,          # reversed: large low band first ...
-    "freq_split_sigma_end": 0.15,           # ... small low band last
-
-    "window_patch_size": (4, 4),
-    "window_height": 5,
-    "window_width": 5,
-    "window_shift": True,
-    "window_radial_scales": (1, 2, 4),
-    "window_radial_bands": (0.3, 0.6),
-    "window_d_model": 64,
-    "window_nhead": 4,
-}]
-
-# ---------------------------------------------------------------------------
-# Exp 1: learned-GRAPPA neighbourhood cross-attention opener (acquired columns only: strip 16, 2 neighbours per side,
+# Exp 0: learned-GRAPPA neighbourhood cross-attention opener (acquired columns only: strip 16, 2 neighbours per side,
 # kx halo 1) followed by 3 axial stages that each run rows, columns AND the 320 half-spoke radial pass.
 #   NOTE: the neighbourhood stage costs ~1.6 s/step at batch 81 on an MI355X (7x the three axial stages together).
 # ---------------------------------------------------------------------------
-EXPERIMENTS.append({
+EXPERIMENTS = [{
     **_AXIAL_RADIAL_BASE,
     "name": "random_nbr_axial3_msaxial_seg1_radial320_scalardc_l2final_r4_100ep",
     "encoders": ["neighbourhood"] + ["axial"] * 3,
@@ -80,10 +53,10 @@ EXPERIMENTS.append({
     "neighbourhood_n_neighbours": 2,
     "neighbourhood_kx_halo": 1,
     "neighbourhood_attn_type": "complex",
-})
+}]
 
 # ---------------------------------------------------------------------------
-# Exp 2: 4 axial stages with SEGMENTED tokens on both the Cartesian and the radial pass: every column cut into 4
+# Exp 1: 4 axial stages with SEGMENTED tokens on both the Cartesian and the radial pass: every column cut into 4
 # segments of 80 rows ((4, 320) token grid, 2-D RoPE, 2-D Q/K convs) and every half-spoke cut into 3 radial segments
 # of 53 samples ((320, 3) token grid, 2-D RoPE at the segment's k-space position; the outermost radius is dropped).
 # ---------------------------------------------------------------------------
@@ -95,15 +68,38 @@ EXPERIMENTS.append({
 })
 
 # ---------------------------------------------------------------------------
-# Exp 3: the reversed-sigma band-split cascade (exp 0) with LOW -> HIGH banded supervision. The loss bands are fixed
-# and independent of the gates: stage i's intermediate complex L2 is weighted by the disc G(r; s_i) with s = 0.3 -> 1.5
-# (geometric), so stage 1 answers for the k-space centre, each later stage for a wider disc and the last for nearly all
-# of k-space; plus the plain final loss. The gate sigmas stay learnable (init 1.0 -> 0.15: global axial first) and are
-# free to settle wherever that supervision is best served.
+# Exp 2: band-split cascade, reversed gates + LOW -> HIGH banded loss, with the strong high expert.
+#   stage 1-4 freq_split    low expert  = multi-scale axial, whole-column tokens, d_model 320
+#                           high expert = window attention over isotropic 4x4 k-space patch tokens (80x80 grid), 4 encoder
+#                                         layers per stage, 10x10-patch base windows (40x40 k-space) growing to 20x20
+#                                         patches beyond r = 0.6, Swin half-window shift on odd layers, d_model 64 / 4 heads
+#   gates: G = exp(-(r/sigma)^2/2), sigma LEARNABLE, init reversed 1.0 -> 0.15 (global axial owns k-space early, the window
+#          expert takes over the high band in the later stages); the gates are not used by the loss
+#   loss:  final complex L2 + per-stage complex L2 weighted by the fixed discs G(r; s_i), s = 0.3 -> 1.5 geometric
+#          (stage 1 answers for the k-space centre, each later stage for a wider disc) -- low -> high supervision
+#   FFNs:  one shared across the axial experts, a separate one across the window experts (ffn_sharing="global")
 # ---------------------------------------------------------------------------
 EXPERIMENTS.append({
-    **EXPERIMENTS[0],
-    "name": "random_split4_msaxial_seg1_winpatch4_radial5x5_sigmarev_bandedlow_r4_100ep",
+    **{k: v for k, v in _AXIAL_RADIAL_BASE.items() if not k.startswith("radial_")},
+    "name": "random_split4_msaxial_seg1_winpatch4_radial10x10_l4_sigmarev_bandedlow_r4_100ep",
+    "encoders": ["freq_split"] * 4,
+    "axial_token_axis": "both",
+    "freq_split_encoders": ("axial", "window_axial"),
+    "freq_split_sigma_learned": True,
+    "freq_split_sigma_schedule": "geometric",
+    "freq_split_sigma_start": 1.0,          # reversed: large low band first ...
+    "freq_split_sigma_end": 0.15,           # ... small low band last
+
+    "window_patch_size": (4, 4),
+    "window_num_layers": 4,
+    "window_height": 10,
+    "window_width": 10,
+    "window_shift": True,
+    "window_radial_scales": (1, 2, 4),
+    "window_radial_bands": (0.3, 0.6),
+    "window_d_model": 64,
+    "window_nhead": 4,
+
     "loss_mode": "intermediate_banded",
     "intermediate_loss_type": "complex_l2",
     "banded_loss_band": "low",
@@ -111,34 +107,4 @@ EXPERIMENTS.append({
     "banded_loss_sigma_end": 1.5,
     "banded_loss_sigma_schedule": "geometric",
     "banded_loss_floor": 0.0,
-})
-
-# ---------------------------------------------------------------------------
-# Exp 4: control for exps 0 and 3 - the same band-split cascade (4x4-patch radial-window high expert, whole-column axial
-# low expert) with the ORIGINAL sigma schedule 0.15 -> 1.0 (window expert owns most of k-space early, axial takes over
-# later) and the plain final-only loss, no intermediate terms. Together with exp 0 (reversed sigma, final-only) and
-# exp 3 (reversed sigma + low -> high banded loss) this separates the effect of the gate ordering from the loss curriculum.
-# ---------------------------------------------------------------------------
-EXPERIMENTS.append({
-    **EXPERIMENTS[0],
-    "name": "random_split4_msaxial_seg1_winpatch4_radial5x5_sigmafwd_scalardc_l2final_r4_100ep",
-    "freq_split_sigma_start": 0.15,
-    "freq_split_sigma_end": 1.0,
-    "loss_mode": "final_only",
-})
-
-# ---------------------------------------------------------------------------
-# Exp 5: exp 3 (reversed gates, low -> high banded loss) with a DEEPER, WIDER-WINDOWED high expert: 4 encoder layers per
-# window stage instead of 2, and 10x10-patch base windows (40x40 k-space) growing to 20x20 / 40x40 patches with radius,
-# so every attention group sees a longer run of any streak. FFNs stay shared the existing way: one across the axial
-# experts, a separate one across the window experts (ffn_sharing="global" shares per encoder type).
-# ---------------------------------------------------------------------------
-EXPERIMENTS.append({
-    **EXPERIMENTS[3],
-    "name": "random_split4_msaxial_seg1_winpatch4_radial10x10_l4_sigmarev_bandedlow_r4_100ep",
-    "window_num_layers": 4,
-    "window_height": 10,
-    "window_width": 10,
-    "window_radial_scales": (1, 2, 4),
-    "window_radial_bands": (0.3, 0.6),
 })
