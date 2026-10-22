@@ -8,8 +8,11 @@ Both experts read the full current k-space; the partition only decides which exp
 low expert cannot write (and receives no gradient from) the high-frequency region and vice versa.
 
 sigma is a cascade-level parameter vector (one value per freq_split stage) owned by `FreqSplitSigmas`, parameterised
-so the boundaries are NON-DECREASING along the cascade: sigma_1 = lo + softplus(d_1), sigma_i = sigma_{i-1} + softplus(d_i),
-clamped at the upper bound. Initialised from a linear / geometric schedule from sigma_start to sigma_end; learned or fixed.
+so the boundaries are MONOTONE along the cascade: sigma_1 = lo + softplus(d_1), sigma_i = sigma_{i-1} + softplus(d_i),
+clamped at the upper bound. The direction follows the initialisation: sigma_start < sigma_end gives a non-decreasing
+cascade (small low band first, the window expert owning most of k-space early), sigma_start > sigma_end a non-increasing
+one (the chain is built on the reversed order and flipped back). Initialised from a linear / geometric schedule from
+sigma_start to sigma_end; learned or fixed.
 """
 import math
 
@@ -37,13 +40,14 @@ def gaussian_partition(radius, sigma):
 
 
 def freq_split_sigma_init(n_stages, start, end, schedule="geometric", bounds=(0.05, math.sqrt(2.0))):
-    """Initial sigma per freq_split stage: `start` .. `end` spaced linearly or geometrically (a single stage gets `end`)."""
+    """Initial sigma per freq_split stage: `start` .. `end` spaced linearly or geometrically (a single stage gets `end`).
+    start > end gives a decreasing schedule (large low band first)."""
     if n_stages < 1:
         raise ValueError("freq_split needs at least one stage")
     if schedule not in FREQ_SPLIT_SIGMA_SCHEDULES:
         raise ValueError(f"freq_split_sigma_schedule must be one of {FREQ_SPLIT_SIGMA_SCHEDULES}, got {schedule!r}")
-    if start <= 0 or end <= 0 or start > end:
-        raise ValueError(f"need 0 < sigma_start <= sigma_end, got {start}, {end}")
+    if start <= 0 or end <= 0:
+        raise ValueError(f"need sigma_start > 0 and sigma_end > 0, got {start}, {end}")
     if n_stages == 1:
         values = np.array([end], dtype=np.float64)
     elif schedule == "linear":
@@ -61,10 +65,12 @@ def _inverse_softplus(y):
 
 class FreqSplitSigmas(nn.Module):
     """
-    Non-decreasing sigma vector for the freq_split stages of a cascade.
+    Monotone sigma vector for the freq_split stages of a cascade.
 
     sigma_1 = lo + softplus(d_1);  sigma_i = sigma_{i-1} + softplus(d_i);  all clamped to `hi`.
-    `sigma_init` must itself be non-decreasing and within (lo, hi]. With learned=False the raw increments are a buffer.
+    `sigma_init` must be monotone (non-decreasing or non-increasing) and within (lo, hi]; a non-increasing init is
+    parameterised as the non-decreasing chain over the reversed stage order and flipped back on output, so the state
+    dict layout (`raw`) is identical in both directions. With learned=False the raw increments are a buffer.
     """
     def __init__(self, sigma_init, learned=True, bounds=(0.05, math.sqrt(2.0))):
         super().__init__()
@@ -74,11 +80,15 @@ class FreqSplitSigmas(nn.Module):
         sigma_init = [float(s) for s in sigma_init]
         if not sigma_init:
             raise ValueError("sigma_init must not be empty")
-        if any(b < a for a, b in zip(sigma_init, sigma_init[1:])):
-            raise ValueError(f"freq_split sigma initialisation must be non-decreasing along the cascade, got {sigma_init}")
-        if sigma_init[0] <= lo or sigma_init[-1] > hi + 1e-6:
+        non_decreasing = all(b >= a for a, b in zip(sigma_init, sigma_init[1:]))
+        non_increasing = all(b <= a for a, b in zip(sigma_init, sigma_init[1:]))
+        if not (non_decreasing or non_increasing):
+            raise ValueError(f"freq_split sigma initialisation must be monotone along the cascade, got {sigma_init}")
+        self.decreasing = non_increasing and not non_decreasing
+        chain = sigma_init[::-1] if self.decreasing else sigma_init
+        if chain[0] <= lo or chain[-1] > hi + 1e-6:
             raise ValueError(f"sigma_init must lie in ({lo}, {hi}], got {sigma_init}")
-        increments = torch.tensor([sigma_init[0] - lo] + [b - a for a, b in zip(sigma_init, sigma_init[1:])])
+        increments = torch.tensor([chain[0] - lo] + [b - a for a, b in zip(chain, chain[1:])])
         raw = _inverse_softplus(increments)
         self.lo, self.hi = lo, hi
         self.learned = bool(learned)
@@ -88,7 +98,8 @@ class FreqSplitSigmas(nn.Module):
             self.register_buffer("raw", raw)
 
     def forward(self):
-        return (self.lo + torch.cumsum(F.softplus(self.raw), dim=0)).clamp(max=self.hi)
+        sigma = (self.lo + torch.cumsum(F.softplus(self.raw), dim=0)).clamp(max=self.hi)
+        return sigma.flip(0) if self.decreasing else sigma
 
     def values(self):
         return [float(v) for v in self.forward().detach().cpu()]
@@ -97,7 +108,8 @@ class FreqSplitSigmas(nn.Module):
         return self.raw.shape[0]
 
     def extra_repr(self):
-        return f"n={len(self)}, learned={self.learned}, bounds=({self.lo}, {self.hi:.4f}), init={[round(v, 4) for v in self.values()]}"
+        return (f"n={len(self)}, learned={self.learned}, {'non-increasing' if self.decreasing else 'non-decreasing'}, "
+                f"bounds=({self.lo}, {self.hi:.4f}), init={[round(v, 4) for v in self.values()]}")
 
 
 class BandSplitVIT(nn.Module):

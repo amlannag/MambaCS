@@ -182,9 +182,11 @@ class Config:
     # (low expert, high expert) encoder names for every freq_split stage; freq_split_pairs overrides per split stage.
     freq_split_encoders: Tuple[str, str] = ("axial", "neighbourhood")
     freq_split_pairs: Optional[List[Tuple[str, str]]] = None
-    # sigma is one value per freq_split stage, NON-DECREASING along the cascade (cumulative softplus increments) and
-    # clamped to freq_split_sigma_bounds. Initialised from sigma_start..sigma_end (linear | geometric spacing) or
-    # explicitly via freq_split_sigma_init (must be non-decreasing); learned unless freq_split_sigma_learned=False.
+    # sigma is one value per freq_split stage, MONOTONE along the cascade (cumulative softplus increments) and clamped
+    # to freq_split_sigma_bounds. Initialised from sigma_start..sigma_end (linear | geometric spacing) or explicitly
+    # via freq_split_sigma_init (must be monotone); the direction follows the init: start < end = non-decreasing
+    # (small low band first), start > end = non-increasing (large low band first, the window expert takes over the
+    # high band only in the later stages). Learned unless freq_split_sigma_learned=False.
     freq_split_sigma_learned: bool = True
     freq_split_sigma_schedule: str = "geometric"
     freq_split_sigma_start: float = 0.15
