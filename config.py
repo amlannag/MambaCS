@@ -198,6 +198,15 @@ class Config:
     window_shift: bool = True
     window_d_model: Optional[int] = 64
     window_nhead: int = 4
+    # Isotropic (ph, pw) k-space patch tokens instead of the H/segments x 1 column-segment tokens: the token grid becomes
+    # (H/ph, W/pw) and window_height / window_width count patches. None = column-segment tokens (window_col_segments).
+    window_patch_size: Optional[Tuple[int, int]] = None
+    # Radius-dependent window sizes: window multipliers (1, 2, 4, ...; each twice the previous, quad-tree split) and
+    # the outer radius of every scale but the largest, as a fraction of half the token grid's shorter side with DC at
+    # the centre. E.g. scales (1, 2, 4), bands (0.3, 0.6): base windows for |k| < 0.3, 2x windows to 0.6, 4x beyond.
+    # The largest window must tile the token grid. (1,) / () = uniform windows.
+    window_radial_scales: Tuple[int, ...] = (1,)
+    window_radial_bands: Tuple[float, ...] = ()
     # Optional per-stage override of num_encoder_layers (one int per entry of `encoders`),
     # e.g. [1, 2, 1, 2] for a cross_axial/axial cascade with 1 layer per cross stage and 2 per axial.
     stage_encoder_layers: Optional[List[int]] = None

@@ -250,15 +250,19 @@ class WindowAxialVIT(BaseVIT):
     Cascade of WindowAxialEncoder blocks: full self-attention inside shifted windows of column-segment tokens over
     sampled AND unsampled columns (DcTNN/window_attention.py). Args beyond axVIT:
         col_segments (int)    -  kx segments per column (token = H / col_segments values of all coils)
-        window_height (int)   -  window size in segments
-        window_width (int)    -  window size in columns
+        window_height (int)   -  window size in tokens (segments, or patch rows)
+        window_width (int)    -  window size in tokens (columns, or patch columns)
         window_shift (bool)   -  Swin-style half-window shift on odd layers
+        patch_size            -  (ph, pw): isotropic ph x pw k-space patch tokens instead of column segments
+        radial_scales         -  (1, 2, 4, ...) window multipliers for radius-dependent window sizes (quad-tree)
+        radial_bands          -  outer radius of every scale but the largest (fraction of half the grid's short side)
     """
     def __init__(self, N, layerNo=2, numCh=1, d_model=64, nhead=4, num_encoder_layers=2,
                     dim_feedforward=None, dropout=0.1, activation='relu', layer_norm_eps=1e-05,
                     pos_emb_type="Rope-Axial", rope_theta=100.0, rope_mixed_rotate=True, attn_type="complex",
                     ffn_sharing="none", shared_ffn=None, flattening_order="row_major", kspace_stem=None,
-                    col_segments=20, window_height=5, window_width=16, window_shift=True):
+                    col_segments=20, window_height=5, window_width=16, window_shift=True,
+                    patch_size=None, radial_scales=(1,), radial_bands=()):
         if flattening_order != "row_major":
             raise ValueError("WindowAxialVIT requires flattening_order='row_major'")
         if dim_feedforward is None:
@@ -269,6 +273,7 @@ class WindowAxialVIT(BaseVIT):
                 pos_emb_type=pos_emb_type, rope_theta=rope_theta, attn_type=attn_type, col_segments=col_segments,
                 window_height=window_height, window_width=window_width, window_shift=window_shift,
                 ffn_sharing=ffn_sharing, shared_ffn=shared_ffn, kspace_stem=kspace_stem,
+                patch_size=patch_size, radial_scales=radial_scales, radial_bands=radial_bands,
             )
             for _ in range(layerNo)
         ])

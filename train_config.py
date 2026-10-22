@@ -39,3 +39,28 @@ EXPERIMENTS = [
         "batch_size_search_start": 128,
     },
 ]
+
+# ---------------------------------------------------------------------------
+# Band-split cascade with a redesigned high-frequency expert: same axial low expert as experiment 0, high expert =
+# window attention over ISOTROPIC 4x4 k-space patch tokens (80x80 token grid, no vertical bias) with RADIAL window
+# sizes: 5x5-patch windows (20x20 k-space) for |k| < 0.3, 10x10 patches to 0.6, 20x20 patches (80x80 k-space) beyond.
+# ---------------------------------------------------------------------------
+EXPERIMENTS.append({
+    **EXPERIMENTS[0],
+    "name": "random_split4_msaxial_seg1_winpatch4_radial5x5_scalardc_l2final_r4_100ep",
+    "encoders": ["freq_split"] * 4,
+    "freq_split_encoders": ("axial", "window_axial"),
+    "freq_split_sigma_learned": True,
+    "freq_split_sigma_schedule": "geometric",
+    "freq_split_sigma_start": 0.15,
+    "freq_split_sigma_end": 1.0,
+
+    "window_patch_size": (4, 4),
+    "window_height": 5,
+    "window_width": 5,
+    "window_shift": True,
+    "window_radial_scales": (1, 2, 4),
+    "window_radial_bands": (0.3, 0.6),
+    "window_d_model": 64,
+    "window_nhead": 4,
+})

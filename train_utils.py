@@ -194,6 +194,9 @@ _ENCODER_ARGS = {
             window_height=getattr(cfg, "window_height", 5),
             window_width=getattr(cfg, "window_width", 16),
             window_shift=getattr(cfg, "window_shift", True),
+            patch_size=getattr(cfg, "window_patch_size", None),
+            radial_scales=tuple(getattr(cfg, "window_radial_scales", (1,))),
+            radial_bands=tuple(getattr(cfg, "window_radial_bands", ())),
         ),
     ),
     "neighbourhood": lambda cfg: (
