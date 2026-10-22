@@ -72,7 +72,7 @@ EXPERIMENTS.append({
 #   stage 1-4 freq_split    low expert  = multi-scale axial, whole-column tokens, d_model 320
 #                           high expert = window attention over isotropic 4x4 k-space patch tokens (80x80 grid), 4 encoder
 #                                         layers per stage, 10x10-patch base windows (40x40 k-space) growing to 20x20
-#                                         patches beyond r = 0.6, Swin half-window shift on odd layers, d_model 64 / 4 heads
+#                                         patches beyond r = 0.6, Swin half-window shift on odd layers, d_model 128 / 8 heads
 #   gates: G = exp(-(r/sigma)^2/2), sigma LEARNABLE, init reversed 1.0 -> 0.15 (global axial owns k-space early, the window
 #          expert takes over the high band in the later stages); the gates are not used by the loss
 #   loss:  final complex L2 + per-stage complex L2 weighted by the fixed discs G(r; s_i), s = 0.3 -> 1.5 geometric
@@ -81,7 +81,7 @@ EXPERIMENTS.append({
 # ---------------------------------------------------------------------------
 EXPERIMENTS.append({
     **{k: v for k, v in _AXIAL_RADIAL_BASE.items() if not k.startswith("radial_")},
-    "name": "random_split4_msaxial_seg1_winpatch4_radial10x10_l4_sigmarev_bandedlow_r4_100ep",
+    "name": "random_split4_msaxial_seg1_winpatch4_radial10x10_l4_d128_sigmarev_bandedlow_r4_100ep",
     "encoders": ["freq_split"] * 4,
     "axial_token_axis": "both",
     "freq_split_encoders": ("axial", "window_axial"),
@@ -97,8 +97,8 @@ EXPERIMENTS.append({
     "window_shift": True,
     "window_radial_scales": (1, 2, 4),
     "window_radial_bands": (0.3, 0.6),
-    "window_d_model": 64,
-    "window_nhead": 4,
+    "window_d_model": 128,
+    "window_nhead": 8,                     # head_dim 16, twice the attention patterns of the 64 / 4 expert
 
     "loss_mode": "intermediate_banded",
     "intermediate_loss_type": "complex_l2",
