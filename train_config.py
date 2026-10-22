@@ -68,4 +68,6 @@ EXPERIMENTS.append({
     **{k: v for k, v in EXPERIMENTS[0].items() if k not in _WINDOW_KEYS},
     "name": "random_axial4_msaxial_seg10_scalardc_l2final_r4_100ep",
     "encoders": ["axial"] * 4,
+    "num_gpus": 1,
+    "batch_size_search_start": 128,       # per GPU (single process)
 })
