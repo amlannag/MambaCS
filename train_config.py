@@ -54,5 +54,7 @@ EXPERIMENTS = [
         "loss_mode": "final_only",
 
         "epochs": 100,
+        "num_gpus": 2,                        # DDP via launch.sh / torchrun
+        "batch_size_search_start": 256,       # global; the search starts from 256 / 2 = 128 per GPU
     },
 ]
