@@ -208,6 +208,9 @@ class Config:
     window_shift: bool = True
     window_d_model: Optional[int] = 64
     window_nhead: int = 4
+    # Encoder layers per window_axial stage (None = num_encoder_layers, shared with the axial stages). The window expert
+    # is small (d_model 64); extra depth is cheap (~0.05 s/step per layer) and is where Swin-style models get their power.
+    window_num_layers: Optional[int] = None
     # Isotropic (ph, pw) k-space patch tokens instead of the H/segments x 1 column-segment tokens: the token grid becomes
     # (H/ph, W/pw) and window_height / window_width count patches. None = column-segment tokens (window_col_segments).
     window_patch_size: Optional[Tuple[int, int]] = None

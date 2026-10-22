@@ -126,3 +126,19 @@ EXPERIMENTS.append({
     "freq_split_sigma_end": 1.0,
     "loss_mode": "final_only",
 })
+
+# ---------------------------------------------------------------------------
+# Exp 5: exp 3 (reversed gates, low -> high banded loss) with a DEEPER, WIDER-WINDOWED high expert: 4 encoder layers per
+# window stage instead of 2, and 10x10-patch base windows (40x40 k-space) growing to 20x20 / 40x40 patches with radius,
+# so every attention group sees a longer run of any streak. FFNs stay shared the existing way: one across the axial
+# experts, a separate one across the window experts (ffn_sharing="global" shares per encoder type).
+# ---------------------------------------------------------------------------
+EXPERIMENTS.append({
+    **EXPERIMENTS[3],
+    "name": "random_split4_msaxial_seg1_winpatch4_radial10x10_l4_sigmarev_bandedlow_r4_100ep",
+    "window_num_layers": 4,
+    "window_height": 10,
+    "window_width": 10,
+    "window_radial_scales": (1, 2, 4),
+    "window_radial_bands": (0.3, 0.6),
+})
