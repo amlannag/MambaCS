@@ -15,6 +15,7 @@ from DcTNN.band_split import BandSplitVIT, freq_split_sigma_init
 from DcTNN.vit import WindowAxialVIT
 from DcTNN.fixed_apt import resolve_fixed_apt_layout
 from DcTNN.util import _COMPLEX_ATTN_TYPES
+from DcTNN.complex_linear import convert_complex_linears
 from ReconFormer import ReconFormerBaseline
 import normalizer as _norm
 
@@ -527,7 +528,10 @@ def freq_split_sigmas(cfg):
 
 
 def build_model(cfg):
-    return _build_model_impl(cfg)
+    model = _build_model_impl(cfg)
+    if isinstance(model, torch.nn.Module):
+        convert_complex_linears(model)
+    return model
 
 
 def unique_model_parameters(model):
