@@ -58,3 +58,14 @@ EXPERIMENTS = [
         "batch_size_search_start": 256,       # global; the search starts from 256 / 2 = 128 per GPU
     },
 ]
+
+# ---------------------------------------------------------------------------
+# Ablation: same data / DC / loss / schedule, but a plain 4-stage multi-scale axial cascade (10 column segments)
+# instead of the band-split stages -> isolates what the window_axial high-frequency expert adds.
+# ---------------------------------------------------------------------------
+_WINDOW_KEYS = {k for k in EXPERIMENTS[0] if k.startswith(("freq_split", "window_"))}
+EXPERIMENTS.append({
+    **{k: v for k, v in EXPERIMENTS[0].items() if k not in _WINDOW_KEYS},
+    "name": "random_axial4_msaxial_seg10_scalardc_l2final_r4_100ep",
+    "encoders": ["axial"] * 4,
+})
