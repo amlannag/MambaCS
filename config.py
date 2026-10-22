@@ -115,6 +115,9 @@ class Config:
     axial_token_axis: str = "both"
     radial_num_spokes: int = 320
     radial_spacing: float = 1.0
+    # Cut every half-spoke into this many radial segments, each its own token (spokes x segments grid, 2-D RoPE at the
+    # segment's k-space position); 1 = whole-spoke tokens. Outermost radii not filling a whole segment are dropped.
+    radial_segments: int = 1
     # Axial encoder token width. None = image_width * num_channels (no projection for single-coil 320 data).
     # With several virtual coils a row token is width * num_channels wide; set e.g. 320 to project it down so the
     # transformer / FFN stay the single-coil size.

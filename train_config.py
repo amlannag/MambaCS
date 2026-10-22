@@ -74,3 +74,30 @@ EXPERIMENTS.append({
     "window_d_model": 64,
     "window_nhead": 4,
 })
+
+# ---------------------------------------------------------------------------
+# Exp 2: learned-GRAPPA neighbourhood cross-attention opener (acquired columns only: strip 16, 2 neighbours per side,
+# kx halo 1) followed by 3 axial stages that each run rows, columns AND the 320 half-spoke radial pass.
+#   NOTE: the neighbourhood stage costs ~1.6 s/step at batch 81 on an MI355X (7x the three axial stages together).
+# ---------------------------------------------------------------------------
+EXPERIMENTS.append({
+    **EXPERIMENTS[0],
+    "name": "random_nbr_axial3_msaxial_seg1_radial320_scalardc_l2final_r4_100ep",
+    "encoders": ["neighbourhood"] + ["axial"] * 3,
+    "neighbourhood_strip_len": 16,
+    "neighbourhood_n_neighbours": 2,
+    "neighbourhood_kx_halo": 1,
+    "neighbourhood_attn_type": "complex",
+})
+
+# ---------------------------------------------------------------------------
+# Exp 3: 4 axial stages with SEGMENTED tokens on both the Cartesian and the radial pass: every column cut into 4
+# segments of 80 rows ((4, 320) token grid, 2-D RoPE, 2-D Q/K convs) and every half-spoke cut into 3 radial segments
+# of 53 samples ((320, 3) token grid, 2-D RoPE at the segment's k-space position; the outermost radius is dropped).
+# ---------------------------------------------------------------------------
+EXPERIMENTS.append({
+    **EXPERIMENTS[0],
+    "name": "random_axial4_msaxial_seg4_radial320_rseg3_scalardc_l2final_r4_100ep",
+    "axial_col_segments": 4,
+    "radial_segments": 3,
+})

@@ -268,7 +268,7 @@ class axialEncoder(nn.Module):
                     pos_emb_type="APE", rope_theta=100.0, attn_type="standard", row_stride=1,
                     mask_vertical_attn="none", ffn_sharing="none", shared_ffn=None,
                     flattening_order="row_major", attn_scales=(1, 3), kspace_stem=None, token_axis="both",
-                    col_segments=1, radial_num_spokes=320, radial_spacing=1.0):
+                    col_segments=1, radial_num_spokes=320, radial_spacing=1.0, radial_segments=1):
         """
         col_segments : split every k-space column into this many equal vertical segments; each segment is one
                        vertical token (S*W tokens of H/S*numCh values instead of W tokens of H*numCh). Tokens are laid
@@ -281,7 +281,9 @@ class axialEncoder(nn.Module):
                        A streak at any orientation lies inside one spoke token. The radial pass is a RESIDUAL on the
                        k-space left by the column pass (k + D*P^T(head(encoder(embed(P*k))))): the bilinear polar
                        round trip apodises FOV-filling k-space, so it must never replace the Cartesian state.
-                       Spoke RoPE uses points on a circle, so the angle axis is periodic.
+                       Spoke RoPE uses points on a circle, so the angle axis is periodic. radial_segments > 1 cuts
+                       every half-spoke into that many radial segments, each its own token on a (spokes, segments)
+                       grid with 2-D RoPE at the segment's k-space position.
         """
         super().__init__()
 
@@ -374,8 +376,19 @@ class axialEncoder(nn.Module):
         self.verticalEncoder = TransformerEncoder(v_layer, numLayers, tie_ffn=shared_ffn is not None)
 
         if self.radial:
+            radial_segments = int(radial_segments)
+            if radial_segments < 1:
+                raise ValueError(f"radial_segments must be >= 1, got {radial_segments}")
             self.polar = PolarResampler(image_size, radial_num_spokes, radial_spacing)
-            spoke_dim = self.polar.num_radii * numCh
+            # radial_segments > 1: every half-spoke is cut into equal radial segments, each one token on a
+            # (spokes, segments) grid (spoke-major). The outermost radii that do not fill a whole segment are dropped
+            # from the tokens (they get a zero residual).
+            self.radial_segments = radial_segments
+            self.radial_used = (self.polar.num_radii // radial_segments) * radial_segments
+            if self.radial_used < radial_segments:
+                raise ValueError(f"radial_segments={radial_segments} leaves no samples per segment")
+            seg_len = self.radial_used // radial_segments
+            spoke_dim = seg_len * numCh
             param_dtype = torch.cfloat if self.is_complex else None
             norm_cls = ComplexLayerNorm if self.is_complex else nn.LayerNorm
             self.to_radial_embedding = nn.Linear(spoke_dim, d_model, dtype=param_dtype)
@@ -384,22 +397,35 @@ class axialEncoder(nn.Module):
             if self.is_complex:
                 apply_trabelsi_(self.to_radial_embedding, criterion="glorot")
                 apply_trabelsi_(self.radial_mlp_head[1], criterion="glorot")
-            # spokes placed on a circle (arc spacing 1 between neighbours) -> periodic RoPE over the angle
-            t_x, t_y = self.polar.spoke_coordinates()
+            if radial_segments == 1:
+                # whole spokes placed on a circle (arc spacing 1 between neighbours) -> periodic RoPE over the angle
+                t_x, t_y = self.polar.spoke_coordinates()
+                token_grid = None
+            else:
+                # segment tokens sit at their k-space position (segment mid-radius along the spoke): 2-D RoPE in
+                # pixel units, periodic in the angle for free, radius differences meaningful across segments
+                r_mid = (torch.arange(radial_segments, dtype=torch.float32) + 0.5) * seg_len * self.polar.spacing
+                t_x = (r_mid[None, :] * torch.cos(self.polar.theta)[:, None]).reshape(-1)
+                t_y = (r_mid[None, :] * torch.sin(self.polar.theta)[:, None]).reshape(-1)
+                token_grid = (self.polar.num_spokes, radial_segments)
             freqs_r = (axial_cis_complex_from_coords(t_x, t_y, head_dim, rope_theta) if self.is_complex
                        else _axial_cis_from_coords(t_x, t_y, head_dim, rope_theta))
             r_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, activation,
                                               layer_norm_eps, freqs_cis=freqs_r, attn_type=attn_type,
-                                              ff=shared_ffn, attn_scales=attn_scales)
+                                              ff=shared_ffn, attn_scales=attn_scales, token_grid=token_grid)
             self.radialEncoder = TransformerEncoder(r_layer, numLayers, tie_ffn=shared_ffn is not None)
 
     def _radial_residual(self, x):
         """Residual from the spoke pass: D*P^T(head(encoder(embed(P*x)))), zero on pixels no spoke touches."""
         B, C = x.shape[:2]
-        tokens = self.polar(x).permute(0, 2, 1, 3).reshape(B, self.polar.num_spokes, -1)     # (B, spokes, radii*C)
+        S, G, R = self.polar.num_spokes, self.radial_segments, self.radial_used
+        polar = self.polar(x)[..., :R]                                                       # (B, C, S, R)
+        tokens = polar.view(B, C, S, G, R // G).permute(0, 2, 3, 1, 4).reshape(B, S * G, -1)  # (B, S*G, C*R/G)
         tokens = self.dropout(self.to_radial_embedding(tokens))
         tokens = self.radial_mlp_head(self.radialEncoder(tokens))
-        polar = tokens.view(B, self.polar.num_spokes, C, self.polar.num_radii).permute(0, 2, 1, 3)
+        polar = tokens.view(B, S, G, C, R // G).permute(0, 3, 1, 2, 4).reshape(B, C, S, R)
+        if R < self.polar.num_radii:
+            polar = torch.nn.functional.pad(polar, (0, self.polar.num_radii - R))
         return self.polar.adjoint(polar)
 
     def forward(self, img, col_mask=None):
