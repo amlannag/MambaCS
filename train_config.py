@@ -84,4 +84,6 @@ _SPEED_TEST_BASE = {
 EXPERIMENTS += [
     {**_SPEED_TEST_BASE, "name": "speedtest_sdpa_bf16", "sdpa_dtype": "bfloat16"},
     {**_SPEED_TEST_BASE, "name": "speedtest_sdpa_fp32", "sdpa_dtype": "float32"},
+    # exp 3: how fast is a plain 3-stage axial cascade (same axial settings as the freq_split low expert)?
+    {**_SPEED_TEST_BASE, "name": "speedtest_axial3", "encoders": ["axial"] * 3},
 ]
