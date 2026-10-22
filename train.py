@@ -325,9 +325,55 @@ def _loss_mask_for(cfg, mask):
     return mask if domain == "unsampled_kspace" else None
 
 
-def _compute_losses(recon, intermediates, target, final_criterion, intermediate_criterion, loss_mode, stats=None, zf_recon=None, mask=None):
+LOSS_MODES = ("final_only", "intermediate_unweighted", "intermediate_banded")
+
+
+def _band_weights_for(cfg, model):
+    """Per-stage radial loss weights from the cascade's freq_split gates (loss_mode='intermediate_banded'), else None."""
+    if cfg.loss_mode != "intermediate_banded":
+        return None
+    base = _unwrap_distributed(model)
+    if not hasattr(base, "stage_band_weights"):
+        raise ValueError("loss_mode='intermediate_banded' needs a cascadeNet with freq_split stages")
+    weights = base.stage_band_weights(band=cfg.banded_loss_band, floor=cfg.banded_loss_floor)
+    if all(w is None for w in weights):
+        raise ValueError("loss_mode='intermediate_banded' needs at least one freq_split stage to define the bands")
+    return weights
+
+
+def _banded_stage_loss(criterion, stage_out, target, stats, mask, band_weight):
+    """
+    Stage loss as the band-weighted mean of the criterion's per-cell error: sum(err * w) / sum(w), with
+    w = band_weight (radial, mean 1) times the unsampled-region indicator when loss_function_domain='unsampled_kspace'.
+    Needs a criterion exposing `elementwise` (complex_l2 and the other _ElementwiseComplexLoss types).
+    """
+    criterion = _unwrap_distributed(criterion)
+    if not hasattr(criterion, "elementwise"):
+        raise ValueError(
+            f"loss_mode='intermediate_banded' needs an intermediate loss with a per-cell form (complex_l2 / "
+            f"complex_l2_nmse), got {type(criterion).__name__}"
+        )
+    error = criterion.elementwise(stage_out, target, stats, mask)
+    weight = band_weight.to(error.dtype)
+    if mask is not None:
+        weight = weight * (1.0 - mask).to(error.dtype)
+    weight = weight.expand_as(error)
+    return (error * weight).sum() / weight.sum().clamp_min(1.0)
+
+
+def _compute_losses(recon, intermediates, target, final_criterion, intermediate_criterion, loss_mode, stats=None,
+                    zf_recon=None, mask=None, band_weights=None):
     final_loss = final_criterion(recon, target, stats=stats, mask=mask)
-    stage_losses = [intermediate_criterion(stage_out, target, stats=stats, mask=mask) for stage_out in intermediates]
+    if loss_mode == "intermediate_banded":
+        if band_weights is None or len(band_weights) != len(intermediates):
+            raise ValueError("loss_mode='intermediate_banded' needs one band weight (or None) per stage output")
+        stage_losses = [
+            intermediate_criterion(stage_out, target, stats=stats, mask=mask) if w is None
+            else _banded_stage_loss(intermediate_criterion, stage_out, target, stats, mask, w)
+            for stage_out, w in zip(intermediates, band_weights)
+        ]
+    else:
+        stage_losses = [intermediate_criterion(stage_out, target, stats=stats, mask=mask) for stage_out in intermediates]
     if stage_losses:
         intermediate_loss_sum = torch.stack(stage_losses).sum()
     else:
@@ -335,12 +381,10 @@ def _compute_losses(recon, intermediates, target, final_criterion, intermediate_
 
     if loss_mode == "final_only":
         total_loss = final_loss
-    elif loss_mode == "intermediate_unweighted":
+    elif loss_mode in ("intermediate_unweighted", "intermediate_banded"):
         total_loss = final_loss + intermediate_loss_sum
     else:
-        raise ValueError(
-            f"Unknown loss_mode '{loss_mode}'. Choose from: ['final_only', 'intermediate_unweighted']"
-        )
+        raise ValueError(f"Unknown loss_mode '{loss_mode}'. Choose from: {list(LOSS_MODES)}")
 
     stage_psnr_gains = []
     if zf_recon is not None and stage_losses:
@@ -650,6 +694,7 @@ def _probe_batch_candidate(cfg, dataset, batch_size, device, checkpoint=None):
                 stats=stats,
                 zf_recon=model_input,
                 mask=_loss_mask_for(cfg, mask),
+                band_weights=_band_weights_for(cfg, model),
             )
             total_loss.backward()
             _clip_gradients(model, cfg.grad_clip)
@@ -833,6 +878,7 @@ def train_one_epoch(cfg, model, loader, accel_factors, mask_generator, optimizer
         total_batch_loss, final_loss, intermediate_loss_sum, stage_losses, stage_psnr_gains = _compute_losses(
             recon, intermediates, target, final_criterion, intermediate_criterion, loss_mode,
             stats=stats, zf_recon=model_input, mask=_loss_mask_for(cfg, mask),
+            band_weights=_band_weights_for(cfg, model),
         )
         total_batch_loss.backward()
         _clip_gradients(model, cfg.grad_clip)
@@ -976,6 +1022,7 @@ def validate(cfg, model, loader, accel_factors, image_size, final_criterion,
         total_batch_loss, final_loss, intermediate_loss_sum, stage_losses, stage_psnr_gains = _compute_losses(
             recon, intermediates, target, final_criterion, intermediate_criterion, loss_mode,
             stats=stats, zf_recon=model_input, mask=_loss_mask_for(cfg, mask),
+            band_weights=_band_weights_for(cfg, model),
         )
 
         gt_image = _gt_image_tensor(target)

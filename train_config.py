@@ -93,3 +93,18 @@ EXPERIMENTS.append({
     "axial_col_segments": 4,
     "radial_segments": 3,
 })
+
+# ---------------------------------------------------------------------------
+# Exp 3: the reversed-sigma band-split cascade (exp 0) trained with the BANDED intermediate loss: every stage output is
+# penalised with complex L2 weighted by its own high band 1 - G_i(r) (sigma 1.0 -> 0.15, so stage 1 answers for the
+# outermost frequencies only and later stages for progressively more of k-space), plus the plain final loss. The gates
+# are detached in the loss; the window expert therefore has to earn its band instead of the split staying nominal.
+# ---------------------------------------------------------------------------
+EXPERIMENTS.append({
+    **EXPERIMENTS[0],
+    "name": "random_split4_msaxial_seg1_winpatch4_radial5x5_sigmarev_bandedloss_r4_100ep",
+    "loss_mode": "intermediate_banded",
+    "intermediate_loss_type": "complex_l2",
+    "banded_loss_band": "high",
+    "banded_loss_floor": 0.0,
+})

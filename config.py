@@ -318,7 +318,17 @@ class Config:
     # ---------------------------------------------------------------------------
     # Training hyperparameters
     # ---------------------------------------------------------------------------
+    # "final_only"              loss on the final output
+    # "intermediate_unweighted" + the intermediate loss on every post-DC stage output
+    # "intermediate_banded"     + the intermediate loss on every stage output, each freq_split stage weighted radially by
+    #                           its own gate: 1 - G_i (banded_loss_band="high", the stage's window-expert region) or G_i
+    #                           ("low"), lifted to banded_loss_floor and normalised to mean 1; non-split stages keep the
+    #                           plain loss. Makes each stage responsible for the band the architecture assigns it (with a
+    #                           decreasing sigma schedule: high frequencies first). Gates are detached in the loss.
+    #                           Needs a per-cell intermediate loss (complex_l2 / complex_l2_nmse).
     loss_mode: str = "final_only"
+    banded_loss_band: str = "high"
+    banded_loss_floor: float = 0.0
     # Region of k-space the reconstruction loss is computed over:
     #   "all_kspace"       — every k-space location (default)
     #   "unsampled_kspace" — only locations NOT acquired by the sampling mask; the

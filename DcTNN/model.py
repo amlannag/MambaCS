@@ -216,6 +216,30 @@ class cascadeNet(nn.Module):
         values = self.freq_split_sigmas.values()
         return {stage: values[n] for stage, n in self.split_stage_index.items()}
 
+    def stage_band_weights(self, band="high", floor=0.0):
+        """
+        Per-stage radial loss weights for loss_mode='intermediate_banded': one [1, 1, H, W] map per stage, or None for
+        stages that are not freq_split (those keep the unweighted loss). A split stage with gate G_i = exp(-(r/sigma_i)^2/2)
+        is weighted by 1 - G_i (band='high': its window-expert region) or G_i (band='low': its axial-expert region),
+        lifted to at least `floor`, and normalised to mean 1 over the grid so stage losses stay comparable. The gate is
+        detached: the loss must not be able to shrink a stage's responsibility by moving sigma.
+        """
+        if band not in ("high", "low"):
+            raise ValueError(f"band must be 'high' or 'low', got {band!r}")
+        if self.freq_split_sigmas is None:
+            return [None] * len(self.transformers)
+        sigmas = self.freq_split_sigmas().detach()
+        weights = []
+        for i, transformer in enumerate(self.transformers):
+            if not isinstance(transformer, BandSplitVIT):
+                weights.append(None)
+                continue
+            g = transformer.partition(sigmas[self.split_stage_index[i]])
+            w = (1.0 - g) if band == "high" else g
+            w = w.clamp_min(floor)
+            weights.append(w / w.mean().clamp_min(1e-12))
+        return weights
+
     def _stage_residual(self, i, transformer, x, sampleMask, volume_id=None):
         if isinstance(transformer, PCAVIT):
             return transformer(x, col_mask=sampleMask, volume_id=volume_id)
