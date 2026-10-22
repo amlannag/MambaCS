@@ -66,3 +66,21 @@ EXPERIMENTS = [
         "epochs": 400,
     },
 ]
+
+# ---------------------------------------------------------------------------
+# Speed test: experiment 0 on a 20-volume subset, 1 epoch, fixed batch 81 (no batch-size search), with the fused
+# attention in bf16 (exp 1) vs fp32 (exp 2). Run either as a short training job or with `--profile 5` for the
+# per-stage breakdown; compare the "batch N/..: step ... compute ..." lines between the two.
+# ---------------------------------------------------------------------------
+_SPEED_TEST_BASE = {
+    **EXPERIMENTS[0],
+    "max_train_files": 20,
+    "max_val_files": 2,
+    "auto_batch_size": False,
+    "batch_size": 81,
+    "epochs": 1,
+}
+EXPERIMENTS += [
+    {**_SPEED_TEST_BASE, "name": "speedtest_sdpa_bf16", "sdpa_dtype": "bfloat16"},
+    {**_SPEED_TEST_BASE, "name": "speedtest_sdpa_fp32", "sdpa_dtype": "float32"},
+]
