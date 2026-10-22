@@ -1,15 +1,14 @@
 
 # ---------------------------------------------------------------------------
 # fastMRI single-coil knee, random R=4 (8% ACS), 100 epochs: plain 4-stage multi-scale axial cascade.
-#   stage 1-4 axial           multi-scale axial: column tokens split into 10 segments -> (10, 320) token grid,
-#                             both axes, 2-D RoPE, 2-D Q/K conv scales 1 & 3, d_model 320
+#   stage 1-4 axial           multi-scale axial: whole-column tokens, both axes, Q/K conv scales 1 & 3, d_model 320
 #   data consistency: one learned scalar lambda per stage
 #   loss: complex L2 on the final output only
 # ---------------------------------------------------------------------------
 EXPERIMENTS = [
     {
         "prefix": "fastmri",
-        "name": "random_axial4_msaxial_seg10_scalardc_l2final_r4_100ep",
+        "name": "random_axial4_msaxial_seg1_scalardc_l2final_r4_100ep",
         "dataset": "fastmri",
         "num_channels": 1,
         "image_size": (320, 320),
@@ -22,7 +21,7 @@ EXPERIMENTS = [
         "encoders": ["axial"] * 4,
         "axial_d_model": 320,
         "axial_token_axis": "both",
-        "axial_col_segments": 10,            # each k-space column split into 10 segments of 32 rows -> (10, 320) token grid
+        "axial_col_segments": 1,              # whole-column tokens
         "attn_type": "complex_ms",
         "attn_scales": (1, 3),
         "sdpa_dtype": "bfloat16",             # fused flash attention on ROCm (fp32 SDPA has no fused kernel there)
