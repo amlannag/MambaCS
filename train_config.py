@@ -41,22 +41,22 @@ _AXIAL_RADIAL_BASE = {
 }
 
 # ---------------------------------------------------------------------------
-# Pure window-attention cascade, no axial expert and no gates. In the band-split runs the learnable gate sigmas
-# collapsed to the lower bound: the window expert ended up writing all of k-space except a ~16 px disc around DC that
-# lies inside the ACS region (and is restored by DC anyway), so the axial expert (>90% of the parameters and compute)
-# contributed nothing. This run makes that model explicit.
+# Pure window-attention cascade (no axial expert, no gates): in the band-split runs the learnable gate sigmas collapsed
+# to the lower bound, i.e. the window expert wrote all of k-space except a ~16 px disc inside the ACS region, so the
+# axial expert (>90% of the parameters and compute) contributed nothing. These three runs make that model explicit and
+# ablate the loss curriculum on it.
 #   stage 1-4 window_axial   isotropic 4x4 k-space patch tokens (80x80 grid), d_model 128 / 8 heads, 4 encoder layers,
 #                            10x10-patch base windows (40x40 k-space) growing to 20x20 patches beyond r = 0.6,
 #                            Swin half-window shift on odd layers; one FFN shared across the window stages
 #   data consistency: one learned scalar lambda per stage
-#   loss: final complex L2 + RING-banded intermediate complex L2 with fixed s = 0.3 -> 1.5 (geometric): stage 1 is
-#         weighted on the centre disc, stage 2 on the shell 0.3..0.51, stage 3 on 0.51..0.88 and stage 4 on everything
-#         OUTSIDE 0.88 -- a true low -> high curriculum that ends by prioritising the high frequencies (edge 1.5x,
-#         corner 2.2x, DC 0), while the uniform final loss keeps the whole spectrum consistent
+#   exp 0  standard : final complex L2 only
+#   exp 1  low      : + per-stage complex L2 weighted by growing discs G(r; s_i), s = 0.3 -> 1.5 (low -> high, the high
+#                     band is included late but never emphasised)
+#   exp 2  ring     : + per-stage complex L2 weighted by the annulus each stage newly owns (centre disc, shell 0.3..0.51,
+#                     shell 0.51..0.88, everything outside 0.88) -- ends by prioritising the high frequencies
 # ---------------------------------------------------------------------------
-EXPERIMENTS = [{
+_WINDOW_BASE = {
     **{k: v for k, v in _AXIAL_RADIAL_BASE.items() if not k.startswith(("radial_", "axial_"))},
-    "name": "random_window4_patch4_radial10x10_l4_d128_bandedring_r4_100ep",
     "encoders": ["window_axial"] * 4,
 
     "window_patch_size": (4, 4),
@@ -69,11 +69,18 @@ EXPERIMENTS = [{
     "window_d_model": 128,
     "window_nhead": 8,
 
-    "loss_mode": "intermediate_banded",
     "intermediate_loss_type": "complex_l2",
-    "banded_loss_band": "ring",
     "banded_loss_sigma_start": 0.3,
     "banded_loss_sigma_end": 1.5,
     "banded_loss_sigma_schedule": "geometric",
     "banded_loss_floor": 0.0,
-}]
+}
+
+EXPERIMENTS = [
+    {**_WINDOW_BASE, "name": "random_window4_patch4_radial10x10_l4_d128_l2final_r4_100ep",
+     "loss_mode": "final_only"},
+    {**_WINDOW_BASE, "name": "random_window4_patch4_radial10x10_l4_d128_bandedlow_r4_100ep",
+     "loss_mode": "intermediate_banded", "banded_loss_band": "low"},
+    {**_WINDOW_BASE, "name": "random_window4_patch4_radial10x10_l4_d128_bandedring_r4_100ep",
+     "loss_mode": "intermediate_banded", "banded_loss_band": "ring"},
+]
