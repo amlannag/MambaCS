@@ -331,7 +331,10 @@ class Config:
     #                           _end schedule over ALL stages (independent of the learnable gate sigmas, which then adapt
     #                           to the supervision); with neither, the freq_split gates themselves define the bands.
     #                           banded_loss_band="low": stage i weighted by the disc G(r; sigma_i) (growing schedule =
-    #                           low -> high supervision); "high": by 1 - G.
+    #                           low -> high supervision, but the last stages merely include the high band); "high": by
+    #                           1 - G; "ring": by the annulus between consecutive sigmas (stage 1 the centre disc, stage
+    #                           i the shell s_{i-1}..s_i, the LAST stage everything outside s_{n-1}) so the cascade ends
+    #                           by prioritising the high frequencies. Needs explicit sigmas.
     loss_mode: str = "final_only"
     banded_loss_band: str = "low"
     banded_loss_floor: float = 0.0

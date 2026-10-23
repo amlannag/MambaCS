@@ -222,12 +222,15 @@ class cascadeNet(nn.Module):
 
         With explicit `sigmas` (one per stage, independent of the gates) every stage i is weighted by the disc
         G(r; sigma_i) = exp(-(r/sigma_i)^2/2) (band='low': the stage answers for frequencies inside sigma_i; a growing
-        schedule gives low -> high supervision along the cascade) or by 1 - G (band='high'). Without `sigmas` the
-        freq_split gates themselves are used (detached) and non-split stages get None (plain loss). Weights are lifted
-        to at least `floor` and normalised to mean 1 over the grid so stage losses stay comparable.
+        schedule gives low -> high supervision along the cascade), by 1 - G (band='high'), or by the ANNULUS the stage
+        is newly responsible for (band='ring': w_1 = G(r; s_1), w_i = G(r; s_i) - G(r; s_{i-1}), and the LAST stage gets
+        everything outside the previous disc, w_n = 1 - G(r; s_{n-1}), so the cascade ends by prioritising the high
+        frequencies instead of merely including them; needs explicit sigmas). Without `sigmas` the freq_split gates
+        themselves are used (detached) and non-split stages get None (plain loss). Weights are lifted to at least
+        `floor` and normalised to mean 1 over the grid so stage losses stay comparable.
         """
-        if band not in ("high", "low"):
-            raise ValueError(f"band must be 'high' or 'low', got {band!r}")
+        if band not in ("high", "low", "ring"):
+            raise ValueError(f"band must be 'high', 'low' or 'ring', got {band!r}")
         n = len(self.transformers)
         radius = normalized_radius_grid(self.N, device=next(self.parameters()).device)
         if sigmas is not None:
@@ -235,6 +238,8 @@ class cascadeNet(nn.Module):
                 raise ValueError(f"banded loss needs one sigma per stage ({n}), got {len(sigmas)}")
             gates = [gaussian_partition(radius, float(s)).unsqueeze(0).unsqueeze(0) for s in sigmas]
         else:
+            if band == "ring":
+                raise ValueError("band='ring' needs explicit banded loss sigmas (banded_loss_sigma_start/end or banded_loss_sigmas)")
             if self.freq_split_sigmas is None:
                 return [None] * n
             learned = self.freq_split_sigmas().detach()
@@ -243,11 +248,16 @@ class cascadeNet(nn.Module):
                 for i, transformer in enumerate(self.transformers)
             ]
         weights = []
-        for g in gates:
+        for i, g in enumerate(gates):
             if g is None:
                 weights.append(None)
                 continue
-            w = ((1.0 - g) if band == "high" else g).clamp_min(floor)
+            if band == "ring":
+                inner = gates[i - 1] if i > 0 else torch.zeros_like(g)
+                w = (1.0 - inner) if i == n - 1 and n > 1 else (g - inner)
+            else:
+                w = (1.0 - g) if band == "high" else g
+            w = w.clamp_min(floor)
             weights.append(w / w.mean().clamp_min(1e-12))
         return weights
 
