@@ -542,6 +542,36 @@ def build_model(cfg):
     return model
 
 
+def load_stage_weights(model, checkpoint_path, stages=None):
+    """
+    Warm start: copy the parameters / buffers of the cascade stages `stages` (indices into model.transformers;
+    None = all) from another run's checkpoint into `model`. The source stage must have the same architecture at the
+    same index. Only the stage modules are copied (DC lambdas, freq_split sigmas, ... keep their init).
+    Returns the number of tensors copied.
+    """
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    source = checkpoint["model"] if isinstance(checkpoint, dict) and "model" in checkpoint else checkpoint
+    transformers = getattr(model, "transformers", None)
+    if transformers is None:
+        raise ValueError("init_stages_from requires a cascade model with a `transformers` stage list")
+    stages = list(range(len(transformers))) if stages is None else [int(s) for s in stages]
+    for s in stages:
+        if not 0 <= s < len(transformers):
+            raise ValueError(f"init_stages index {s} out of range for {len(transformers)} stages")
+    # Load strictly on each stage module (not model.load_state_dict(strict=False) on the whole cascade: modules with
+    # custom _load_from_state_dict, e.g. ComplexLayerNorm's whitening state, would reset in the stages NOT being copied).
+    copied = 0
+    for s in stages:
+        prefix = f"transformers.{s}."
+        subset = {k[len(prefix):]: v for k, v in source.items() if k.startswith(prefix)}
+        try:
+            transformers[s].load_state_dict(subset, strict=True)
+        except RuntimeError as error:
+            raise ValueError(f"init_stages_from: stage {s} in {checkpoint_path} does not match the model: {error}") from error
+        copied += len(subset)
+    return copied
+
+
 def unique_model_parameters(model):
     """
     Yield trainable parameters once each, deduplicating tied/shared weights.

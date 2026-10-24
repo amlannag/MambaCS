@@ -37,6 +37,11 @@ class Config:
     # W&B run to continue when resuming. None = use the run id stored in the resume checkpoint
     # (new runs save it automatically); set explicitly for checkpoints written before that was recorded.
     wandb_run_id: Optional[str] = None
+    # Warm start: before training, copy the weights of selected cascade stages from another run's checkpoint
+    # (same stage index and architecture in both runs). init_stages lists the stage indices into `encoders`
+    # (None = every stage). Ignored when resuming. The copied weights stay trainable.
+    init_stages_from: Optional[str] = None
+    init_stages: Optional[List[int]] = None
 
     # ---------------------------------------------------------------------------
     # Data

@@ -31,7 +31,7 @@ from DcTNN.lambda_scheduler import LambdaScheduler
 from DcTNN.band_split import freq_split_sigma_init
 from DcTNN.attention_layer import set_sdpa_dtype
 from train_utils import (FastMRIMaskGenerator, GrappaWeightCache, build_model, resolve_data_dirs, is_h5_dataset,
-                         is_multicoil_dataset, simulate_undersampling, unique_model_parameters,
+                         is_multicoil_dataset, load_stage_weights, simulate_undersampling, unique_model_parameters,
                          validate_resume_flattening_order, validate_resume_fixed_apt_config)
 from DcTNN.fixed_apt import resolve_fixed_apt_layout
 from DcTNN.loss import LOSS_FUNCTION_DOMAINS, PerpendicularLoss, build_loss
@@ -1594,6 +1594,12 @@ def main():
     phase(f"Model ready in {time.time() - t_model:.1f}s")
     if is_primary:
         print(f"Parameters : {n_params:,}")
+    if cfg.init_stages_from and checkpoint is None:
+        if not os.path.exists(cfg.init_stages_from):
+            raise FileNotFoundError(f"init_stages_from checkpoint not found: {cfg.init_stages_from}")
+        n_copied = load_stage_weights(base_model, cfg.init_stages_from, cfg.init_stages)
+        phase(f"Initialised stage(s) {cfg.init_stages if cfg.init_stages is not None else 'all'} "
+              f"({n_copied} tensors) from {cfg.init_stages_from}")
     mask_generator = FastMRIMaskGenerator(
         cfg.acceleration_factors,
         center_fractions=cfg.center_fractions,
