@@ -216,7 +216,7 @@ class cascadeNet(nn.Module):
         values = self.freq_split_sigmas.values()
         return {stage: values[n] for stage, n in self.split_stage_index.items()}
 
-    def stage_band_weights(self, band="low", floor=0.0, sigmas=None):
+    def stage_band_weights(self, band="low", floor=0.0, sigmas=None, normalise="mean"):
         """
         Per-stage radial loss weights for loss_mode='intermediate_banded': one [1, 1, H, W] map per stage.
 
@@ -227,10 +227,14 @@ class cascadeNet(nn.Module):
         everything outside the previous disc, w_n = 1 - G(r; s_{n-1}), so the cascade ends by prioritising the high
         frequencies instead of merely including them; needs explicit sigmas). Without `sigmas` the freq_split gates
         themselves are used (detached) and non-split stages get None (plain loss). Weights are lifted to at least
-        `floor` and normalised to mean 1 over the grid so stage losses stay comparable.
+        `floor` and then normalised: "mean" -> mean 1 over the grid (every stage gets an equal vote regardless of its
+        band's area: the curriculum re-weights the spectrum), "none" -> raw values (ring bands form a partition of
+        unity, so the stage terms are an unbiased split of the plain loss; no cell counted twice), "max" -> peak 1.
         """
         if band not in ("high", "low", "ring"):
             raise ValueError(f"band must be 'high', 'low' or 'ring', got {band!r}")
+        if normalise not in ("mean", "none", "max"):
+            raise ValueError(f"normalise must be 'mean', 'none' or 'max', got {normalise!r}")
         n = len(self.transformers)
         radius = normalized_radius_grid(self.N, device=next(self.parameters()).device)
         if sigmas is not None:
@@ -258,7 +262,11 @@ class cascadeNet(nn.Module):
             else:
                 w = (1.0 - g) if band == "high" else g
             w = w.clamp_min(floor)
-            weights.append(w / w.mean().clamp_min(1e-12))
+            if normalise == "mean":
+                w = w / w.mean().clamp_min(1e-12)
+            elif normalise == "max":
+                w = w / w.max().clamp_min(1e-12)
+            weights.append(w)
         return weights
 
     def _stage_residual(self, i, transformer, x, sampleMask, volume_id=None):

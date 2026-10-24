@@ -84,3 +84,9 @@ EXPERIMENTS = [
     {**_WINDOW_BASE, "name": "random_window4_patch4_radial10x10_l4_d128_bandedring_r4_100ep",
      "loss_mode": "intermediate_banded", "banded_loss_band": "ring"},
 ]
+
+# exp 3  ring, unnormalised: the raw ring bands form a partition of unity (they sum to 1 at every cell), so the stage
+#        terms are an unbiased split of the plain loss across the cascade - no spectral re-weighting, pure
+#        "who is responsible for what". Compare with exp 2 (mean-1: equal vote per stage, high band emphasised).
+EXPERIMENTS.append({**_WINDOW_BASE, "name": "random_window4_patch4_radial10x10_l4_d128_bandedring_pou_r4_100ep",
+                    "loss_mode": "intermediate_banded", "banded_loss_band": "ring", "banded_loss_normalise": "none"})

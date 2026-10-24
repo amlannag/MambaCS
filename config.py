@@ -338,6 +338,10 @@ class Config:
     loss_mode: str = "final_only"
     banded_loss_band: str = "low"
     banded_loss_floor: float = 0.0
+    # How each stage's band weight is normalised: "mean" (mean 1 over the grid: equal vote per stage, the curriculum
+    # re-weights the spectrum), "none" (raw; ring bands form a partition of unity, so the stage terms are an unbiased
+    # split of the plain loss) or "max" (peak 1).
+    banded_loss_normalise: str = "mean"
     banded_loss_sigmas: Optional[List[float]] = None
     banded_loss_sigma_start: Optional[float] = None
     banded_loss_sigma_end: Optional[float] = None
