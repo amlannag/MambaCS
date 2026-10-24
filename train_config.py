@@ -41,10 +41,9 @@ _AXIAL_RADIAL_BASE = {
 }
 
 # ---------------------------------------------------------------------------
-# Pure window-attention cascade (no axial expert, no gates): in the band-split runs the learnable gate sigmas collapsed
-# to the lower bound, i.e. the window expert wrote all of k-space except a ~16 px disc inside the ACS region, so the
-# axial expert (>90% of the parameters and compute) contributed nothing. These three runs make that model explicit and
-# ablate the loss curriculum on it.
+# Shared window-expert settings (NOT submitted on their own). In the band-split runs the learnable gate sigmas collapsed
+# to the lower bound, i.e. the window expert wrote all of k-space except a ~16 px disc inside the ACS region; these are
+# the strong-window settings that came out of that.
 #   stage 1-4 window_axial   isotropic 4x4 k-space patch tokens (80x80 grid), d_model 128 / 8 heads, 4 encoder layers,
 #                            10x10-patch base windows (40x40 k-space) growing to 20x20 patches beyond r = 0.6,
 #                            Swin half-window shift on odd layers; one FFN shared across the window stages
@@ -76,21 +75,6 @@ _WINDOW_BASE = {
     "banded_loss_floor": 0.0,
 }
 
-EXPERIMENTS = [
-    {**_WINDOW_BASE, "name": "random_window4_patch4_radial10x10_l4_d128_l2final_r4_100ep",
-     "loss_mode": "final_only"},
-    {**_WINDOW_BASE, "name": "random_window4_patch4_radial10x10_l4_d128_bandedlow_r4_100ep",
-     "loss_mode": "intermediate_banded", "banded_loss_band": "low"},
-    {**_WINDOW_BASE, "name": "random_window4_patch4_radial10x10_l4_d128_bandedring_r4_100ep",
-     "loss_mode": "intermediate_banded", "banded_loss_band": "ring"},
-]
-
-# exp 3  ring, unnormalised: the raw ring bands form a partition of unity (they sum to 1 at every cell), so the stage
-#        terms are an unbiased split of the plain loss across the cascade - no spectral re-weighting, pure
-#        "who is responsible for what". Compare with exp 2 (mean-1: equal vote per stage, high band emphasised).
-EXPERIMENTS.append({**_WINDOW_BASE, "name": "random_window4_patch4_radial10x10_l4_d128_bandedring_pou_r4_100ep",
-                    "loss_mode": "intermediate_banded", "banded_loss_band": "ring", "banded_loss_normalise": "none"})
-
 # ---------------------------------------------------------------------------
 # REFINE / CONSOLIDATE cascade: 3 window refinement blocks alternating with 3 band-split consolidation blocks, bands
 # s1 = 0.30, s2 = 0.67 (the 3-stage 0.3 -> 1.5 geometric schedule), low -> high:
@@ -104,8 +88,8 @@ EXPERIMENTS.append({**_WINDOW_BASE, "name": "random_window4_patch4_radial10x10_l
 # Refinement write gates are FIXED (max 1) so where a stage writes always matches where it is scored; the consolidation
 # stages are unrestricted and their band-split gates stay learnable (init reversed 1.0 -> 0.15 over the 3 split stages).
 # The two runs differ only in how the per-stage loss weights are normalised:
-#   exp 4  max 1   -> a stage's term scales with its band's area (thin shells count little, the outside counts most)
-#   exp 5  mean 1  -> area under the weight = const: every stage gets an equal vote regardless of band size
+#   exp 0  max 1   -> a stage's term scales with its band's area (thin shells count little, the outside counts most)
+#   exp 1  mean 1  -> area under the weight = const: every stage gets an equal vote regardless of band size
 # ---------------------------------------------------------------------------
 _S1, _S2 = 0.30, 0.67
 _REFINE_CONSOL_BASE = {
@@ -125,7 +109,7 @@ _REFINE_CONSOL_BASE = {
     "banded_loss_bands": [("disc", _S1), ("disc", _S1), ("ring", _S1, _S2), ("disc", _S2), ("ring", _S2, None), ("all",)],
     "banded_loss_floor": 0.0,
 }
-EXPERIMENTS += [
+EXPERIMENTS = [
     {**_REFINE_CONSOL_BASE, "name": "random_refine3consol3_win_d128_split_sigmarev_bandedmax_r4_100ep", "banded_loss_normalise": "max"},
     {**_REFINE_CONSOL_BASE, "name": "random_refine3consol3_win_d128_split_sigmarev_bandedmean_r4_100ep", "banded_loss_normalise": "mean"},
 ]
