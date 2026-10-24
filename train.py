@@ -352,9 +352,11 @@ def _band_weights_for(cfg, model):
     base = _unwrap_distributed(model)
     if not hasattr(base, "stage_band_weights"):
         raise ValueError("loss_mode='intermediate_banded' needs a cascadeNet")
+    bands = getattr(cfg, "banded_loss_bands", None)
     weights = base.stage_band_weights(band=cfg.banded_loss_band, floor=cfg.banded_loss_floor,
-                                      sigmas=_banded_loss_sigmas(cfg, len(base.transformers)),
-                                      normalise=getattr(cfg, "banded_loss_normalise", "mean"))
+                                      sigmas=None if bands is not None else _banded_loss_sigmas(cfg, len(base.transformers)),
+                                      normalise=getattr(cfg, "banded_loss_normalise", "mean"),
+                                      bands=[tuple(b) if b is not None else None for b in bands] if bands is not None else None)
     if all(w is None for w in weights):
         raise ValueError("loss_mode='intermediate_banded' needs banded_loss_sigma_start/end (or banded_loss_sigmas), "
                          "or at least one freq_split stage whose gate defines the band")

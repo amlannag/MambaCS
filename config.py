@@ -342,6 +342,13 @@ class Config:
     # re-weights the spectrum), "none" (raw; ring bands form a partition of unity, so the stage terms are an unbiased
     # split of the plain loss) or "max" (peak 1).
     banded_loss_normalise: str = "mean"
+    # General form: one band spec per stage, ("disc", s) / ("ring", a, b) with b=None meaning everything outside a /
+    # ("all",) / None (plain loss). Overrides banded_loss_band + the sigma schedule when set.
+    banded_loss_bands: Optional[List[Optional[Tuple]]] = None
+    # Fixed WRITE gates per stage (same spec form, normalised to max 1, None = unrestricted): a refinement stage's
+    # residual is multiplied by its band before DC, so it can only change k-space inside that band. The band is fixed,
+    # not learnt, so that where a stage writes always matches where its banded loss holds it accountable.
+    stage_write_bands: Optional[List[Optional[Tuple]]] = None
     banded_loss_sigmas: Optional[List[float]] = None
     banded_loss_sigma_start: Optional[float] = None
     banded_loss_sigma_end: Optional[float] = None

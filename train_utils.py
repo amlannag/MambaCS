@@ -492,6 +492,8 @@ def _build_model_impl(cfg):
         freq_split_sigma_init=freq_split_sigmas(cfg) if split_pairs else None,
         freq_split_sigma_learned=getattr(cfg, "freq_split_sigma_learned", True),
         freq_split_sigma_bounds=tuple(getattr(cfg, "freq_split_sigma_bounds", (0.05, 2 ** 0.5))),
+        stage_write_bands=[tuple(b) if b is not None else None for b in cfg.stage_write_bands]
+        if getattr(cfg, "stage_write_bands", None) is not None else None,
     )
 
 

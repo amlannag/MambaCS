@@ -90,3 +90,42 @@ EXPERIMENTS = [
 #        "who is responsible for what". Compare with exp 2 (mean-1: equal vote per stage, high band emphasised).
 EXPERIMENTS.append({**_WINDOW_BASE, "name": "random_window4_patch4_radial10x10_l4_d128_bandedring_pou_r4_100ep",
                     "loss_mode": "intermediate_banded", "banded_loss_band": "ring", "banded_loss_normalise": "none"})
+
+# ---------------------------------------------------------------------------
+# REFINE / CONSOLIDATE cascade: 3 window refinement blocks alternating with 3 band-split consolidation blocks, bands
+# s1 = 0.30, s2 = 0.67 (the 3-stage 0.3 -> 1.5 geometric schedule), low -> high:
+#   1 REFINE   window, writes only the centre disc          loss: disc  G(0.30)
+#   2 CONSOL.  freq_split (axial | window, learnable sigma)  loss: disc  G(0.30)
+#   3 REFINE   window, writes only the shell 0.30..0.67      loss: ring  G(0.67) - G(0.30)
+#   4 CONSOL.  freq_split                                    loss: disc  G(0.67)
+#   5 REFINE   window, writes only outside 0.67              loss: ring  1 - G(0.67)
+#   6 CONSOL.  freq_split                                    loss: uniform
+#   final output: plain complex L2.
+# Refinement write gates are FIXED (max 1) so where a stage writes always matches where it is scored; the consolidation
+# stages are unrestricted and their band-split gates stay learnable (init reversed 1.0 -> 0.15 over the 3 split stages).
+# The two runs differ only in how the per-stage loss weights are normalised:
+#   exp 4  max 1   -> a stage's term scales with its band's area (thin shells count little, the outside counts most)
+#   exp 5  mean 1  -> area under the weight = const: every stage gets an equal vote regardless of band size
+# ---------------------------------------------------------------------------
+_S1, _S2 = 0.30, 0.67
+_REFINE_CONSOL_BASE = {
+    **_WINDOW_BASE,
+    "encoders": ["window_axial", "freq_split"] * 3,
+    "axial_d_model": 320,
+    "axial_token_axis": "both",
+    "axial_col_segments": 1,
+    "freq_split_encoders": ("axial", "window_axial"),
+    "freq_split_sigma_learned": True,
+    "freq_split_sigma_schedule": "geometric",
+    "freq_split_sigma_start": 1.0,
+    "freq_split_sigma_end": 0.15,
+
+    "stage_write_bands": [("disc", _S1), None, ("ring", _S1, _S2), None, ("ring", _S2, None), None],
+    "loss_mode": "intermediate_banded",
+    "banded_loss_bands": [("disc", _S1), ("disc", _S1), ("ring", _S1, _S2), ("disc", _S2), ("ring", _S2, None), ("all",)],
+    "banded_loss_floor": 0.0,
+}
+EXPERIMENTS += [
+    {**_REFINE_CONSOL_BASE, "name": "random_refine3consol3_win_d128_split_sigmarev_bandedmax_r4_100ep", "banded_loss_normalise": "max"},
+    {**_REFINE_CONSOL_BASE, "name": "random_refine3consol3_win_d128_split_sigmarev_bandedmean_r4_100ep", "banded_loss_normalise": "mean"},
+]

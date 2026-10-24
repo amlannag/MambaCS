@@ -108,6 +108,28 @@ def _apply_ffn_sharing_flat(N, encList, encArgs, ffn_sharing):
             for cls, args, share in zip(encList, encArgs, shared)]
 
 
+def band_map(radius, spec):
+    """
+    Radial band on the normalised-radius grid `radius` from a spec tuple:
+      ("disc", s)        G(r; s) = exp(-(r/s)^2/2)                 (centre disc)
+      ("ring", a, b)     G(r; b) - G(r; a)                          (shell a..b; b=None -> everything outside a: 1 - G(r; a))
+      ("all",)           ones                                      (uniform)
+    Returns a [1, 1, H, W] tensor with values in [0, 1] (unnormalised), or None for spec None.
+    """
+    if spec is None:
+        return None
+    kind = spec[0]
+    if kind == "all":
+        return torch.ones_like(radius).unsqueeze(0).unsqueeze(0)
+    if kind == "disc":
+        return gaussian_partition(radius, float(spec[1])).unsqueeze(0).unsqueeze(0)
+    if kind == "ring":
+        inner = gaussian_partition(radius, float(spec[1]))
+        outer = torch.ones_like(radius) if (len(spec) < 3 or spec[2] is None) else gaussian_partition(radius, float(spec[2]))
+        return (outer - inner).clamp_min(0.0).unsqueeze(0).unsqueeze(0)
+    raise ValueError(f"unknown band spec {spec!r}; use ('disc', s), ('ring', a, b|None) or ('all',)")
+
+
 class cascadeNet(nn.Module):
     """
     Cascaded denoising network with data consistency after each stage.
@@ -139,9 +161,21 @@ class cascadeNet(nn.Module):
     """
     def __init__(self, N, encList, encArgs, lamb=True, learning="k_space", ffn_sharing="none", real_channels=False,
                  dc_type="scalar", dc_lambda_init=0.5, freq_split_sigma_init=None, freq_split_sigma_learned=True,
-                 freq_split_sigma_bounds=(0.05, math.sqrt(2.0))):
+                 freq_split_sigma_bounds=(0.05, math.sqrt(2.0)), stage_write_bands=None):
         super().__init__()
         self.real_channels = bool(real_channels)
+        # Fixed write gates (refinement stages): stage i's residual is multiplied by band_map(spec_i) normalised to
+        # max 1 before data consistency, so the stage can only change k-space inside its band (None = unrestricted).
+        self.stage_write_bands = list(stage_write_bands) if stage_write_bands is not None else None
+        if self.stage_write_bands is not None:
+            if len(self.stage_write_bands) != len(encList):
+                raise ValueError(f"stage_write_bands needs one entry per stage ({len(encList)}), got {len(self.stage_write_bands)}")
+            radius = normalized_radius_grid(N)
+            for i, spec in enumerate(self.stage_write_bands):
+                gate = band_map(radius, spec)
+                if gate is not None:
+                    gate = gate / gate.max().clamp_min(1e-12)
+                    self.register_buffer(f"write_gate_{i}", gate, persistent=False)
         self.split_stage_index = {i: n for n, i in enumerate(i for i, cls in enumerate(encList) if cls is BandSplitVIT)}
         self.freq_split_sigmas = None
         if self.split_stage_index:
@@ -216,7 +250,7 @@ class cascadeNet(nn.Module):
         values = self.freq_split_sigmas.values()
         return {stage: values[n] for stage, n in self.split_stage_index.items()}
 
-    def stage_band_weights(self, band="low", floor=0.0, sigmas=None, normalise="mean"):
+    def stage_band_weights(self, band="low", floor=0.0, sigmas=None, normalise="mean", bands=None):
         """
         Per-stage radial loss weights for loss_mode='intermediate_banded': one [1, 1, H, W] map per stage.
 
@@ -237,6 +271,23 @@ class cascadeNet(nn.Module):
             raise ValueError(f"normalise must be 'mean', 'none' or 'max', got {normalise!r}")
         n = len(self.transformers)
         radius = normalized_radius_grid(self.N, device=next(self.parameters()).device)
+        if bands is not None:
+            # explicit per-stage specs (('disc', s) / ('ring', a, b) / ('all',) / None): the general form
+            if len(bands) != n:
+                raise ValueError(f"banded loss needs one band spec per stage ({n}), got {len(bands)}")
+            weights = []
+            for spec in bands:
+                w = band_map(radius, spec)
+                if w is None:
+                    weights.append(None)
+                    continue
+                w = w.clamp_min(floor)
+                if normalise == "mean":
+                    w = w / w.mean().clamp_min(1e-12)
+                elif normalise == "max":
+                    w = w / w.max().clamp_min(1e-12)
+                weights.append(w)
+            return weights
         if sigmas is not None:
             if len(sigmas) != n:
                 raise ValueError(f"banded loss needs one sigma per stage ({n}), got {len(sigmas)}")
@@ -271,10 +322,15 @@ class cascadeNet(nn.Module):
 
     def _stage_residual(self, i, transformer, x, sampleMask, volume_id=None):
         if isinstance(transformer, PCAVIT):
-            return transformer(x, col_mask=sampleMask, volume_id=volume_id)
-        if isinstance(transformer, BandSplitVIT):
-            return transformer(x, col_mask=sampleMask, sigma=self.freq_split_sigmas()[self.split_stage_index[i]])
-        return transformer(x, col_mask=sampleMask)
+            residual = transformer(x, col_mask=sampleMask, volume_id=volume_id)
+        elif isinstance(transformer, BandSplitVIT):
+            residual = transformer(x, col_mask=sampleMask, sigma=self.freq_split_sigmas()[self.split_stage_index[i]])
+        else:
+            residual = transformer(x, col_mask=sampleMask)
+        gate = getattr(self, f"write_gate_{i}", None)
+        if gate is not None:
+            residual = residual * gate.to(residual.real.dtype if residual.is_complex() else residual.dtype)
+        return residual
 
     def forward(self, xPrev, y, sampleMask, return_intermediates=False, stats=None, volume_id=None):
         """
