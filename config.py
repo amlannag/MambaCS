@@ -354,6 +354,12 @@ class Config:
     # residual is multiplied by its band before DC, so it can only change k-space inside that band. The band is fixed,
     # not learnt, so that where a stage writes always matches where its banded loss holds it accountable.
     stage_write_bands: Optional[List[Optional[Tuple]]] = None
+    # Learned per-stage per-pixel WRITE weights, alternative to stage_write_bands (mutually exclusive per stage):
+    # one entry per stage; None = the stage keeps the full residual (like an unrestricted band), a value in [0, 1] =
+    # the initial value of a per-pixel sigmoid weight. candidate = previous_output + sigmoid(w) * residual, so the
+    # model learns per k-space pixel how much of the stage's refine to mix with the previous stage output
+    # (0 = keep the previous output, 1 = full refine).
+    stage_mix_weights: Optional[List[Optional[float]]] = None
     banded_loss_sigmas: Optional[List[float]] = None
     banded_loss_sigma_start: Optional[float] = None
     banded_loss_sigma_end: Optional[float] = None

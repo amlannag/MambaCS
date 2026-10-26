@@ -120,6 +120,7 @@ def config_to_dict(cfg):
         "image_conv", "image_conv_channels", "image_conv_layers", "image_conv_kernel",
         "rope_theta", "rope_mixed_rotate", "mask_vertical_attn", "ffn_sharing", "flattening_order",
         "apt_layout", "apt_embed_dim", "apt_rope_ref_grid", "apt_use_abs_pos_emb",
+        "stage_write_bands", "stage_mix_weights",
     }
     return {
         "data": {key: value for key, value in flat.items() if key in data_keys},
@@ -1775,6 +1776,12 @@ def main():
                 metrics[f'lambda_{i}'] = round(lv.item(), 6)
         elif lamb_sched is not None:
             metrics['lambda_scheduled'] = round(base_model.scheduled_lamb, 6)
+        if getattr(base_model, "stage_mix_raw", None) is not None:
+            for i in base_model.stage_mix_index:
+                mix = base_model.stage_mix_map(i).detach()
+                metrics[f'mix_{i}_mean'] = round(mix.mean().item(), 6)
+                metrics[f'mix_{i}_min'] = round(mix.min().item(), 6)
+                metrics[f'mix_{i}_max'] = round(mix.max().item(), 6)
         if cfg.perpendicular_mag_weighting:
             metrics['perpendicular_mag_weight_m'] = round(current_perp_m, 6)
         for i, sigma in freq_split_sigmas.items():

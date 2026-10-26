@@ -158,10 +158,16 @@ class cascadeNet(nn.Module):
                                 sigma of every BandSplitVIT stage in cascade order (DcTNN/band_split.py): the
                                 Gaussian partition boundaries, non-decreasing along the cascade, learned or fixed.
                                 A BandSplitVIT stage's args hold its experts as args["low"] / args["high"] = (cls, args).
+        stage_mix_weights (list|None)
+                                One entry per stage: None = the stage keeps the full residual; a value in [0, 1] =
+                                initial value of a learned per-pixel sigmoid write weight ([H, W] map). The stage's
+                                residual is multiplied by it before DC (candidate = previous_output + sigmoid(w) *
+                                residual), so the model learns per k-space pixel how much of the refine to mix in.
+                                Mutually exclusive with stage_write_bands per stage.
     """
     def __init__(self, N, encList, encArgs, lamb=True, learning="k_space", ffn_sharing="none", real_channels=False,
                  dc_type="scalar", dc_lambda_init=0.5, freq_split_sigma_init=None, freq_split_sigma_learned=True,
-                 freq_split_sigma_bounds=(0.05, math.sqrt(2.0)), stage_write_bands=None):
+                 freq_split_sigma_bounds=(0.05, math.sqrt(2.0)), stage_write_bands=None, stage_mix_weights=None):
         super().__init__()
         self.real_channels = bool(real_channels)
         # Fixed write gates (refinement stages): stage i's residual is multiplied by band_map(spec_i) normalised to
@@ -176,6 +182,29 @@ class cascadeNet(nn.Module):
                 if gate is not None:
                     gate = gate / gate.max().clamp_min(1e-12)
                     self.register_buffer(f"write_gate_{i}", gate, persistent=False)
+        # Learned per-stage per-pixel write weights, alternative to stage_write_bands (mutually exclusive per stage):
+        # candidate = previous_output + sigmoid(w_i) * residual with w_i a [H, W] map per weighted stage, raw values
+        # initialised so sigmoid(raw) = the per-stage init in [0, 1] (0.5 = mix the refine halfway in at start).
+        self.stage_mix_weights_spec = list(stage_mix_weights) if stage_mix_weights is not None else None
+        self.stage_mix_raw = None
+        self.stage_mix_index = {}
+        if self.stage_mix_weights_spec is not None:
+            if len(self.stage_mix_weights_spec) != len(encList):
+                raise ValueError(f"stage_mix_weights needs one entry per stage ({len(encList)}), got {len(self.stage_mix_weights_spec)}")
+            height, width = N if isinstance(N, (tuple, list)) else (N, N)
+            rows = []
+            for i, init in enumerate(self.stage_mix_weights_spec):
+                if init is None:
+                    continue
+                if self.stage_write_bands is not None and self.stage_write_bands[i] is not None:
+                    raise ValueError(
+                        f"stage {i}: stage_mix_weights and stage_write_bands cannot both be set for the same stage"
+                    )
+                init = min(max(float(init), 1e-4), 1.0 - 1e-4)
+                self.stage_mix_index[i] = len(rows)
+                rows.append(torch.full((height, width), math.log(init / (1.0 - init))))
+            if rows:
+                self.stage_mix_raw = nn.Parameter(torch.stack(rows))
         self.split_stage_index = {i: n for n, i in enumerate(i for i, cls in enumerate(encList) if cls is BandSplitVIT)}
         self.freq_split_sigmas = None
         if self.split_stage_index:
@@ -320,6 +349,21 @@ class cascadeNet(nn.Module):
             weights.append(w)
         return weights
 
+    def _stage_mix(self, i):
+        """Per-pixel [H, W] sigmoid mix weight of stage i, or None when the stage keeps the full residual."""
+        n = self.stage_mix_index.get(i)
+        if n is None or self.stage_mix_raw is None:
+            return None
+        return torch.sigmoid(self.stage_mix_raw[n])
+
+    def stage_mix_map(self, i):
+        """[H, W] mix map of stage i (ones when the stage has no learned weight), for inspection."""
+        mix = self._stage_mix(i)
+        if mix is None:
+            height, width = self.N if isinstance(self.N, (tuple, list)) else (self.N, self.N)
+            return torch.ones(height, width, dtype=torch.float32)
+        return mix
+
     def _stage_residual(self, i, transformer, x, sampleMask, volume_id=None):
         if isinstance(transformer, PCAVIT):
             residual = transformer(x, col_mask=sampleMask, volume_id=volume_id)
@@ -330,6 +374,9 @@ class cascadeNet(nn.Module):
         gate = getattr(self, f"write_gate_{i}", None)
         if gate is not None:
             residual = residual * gate.to(residual.real.dtype if residual.is_complex() else residual.dtype)
+        mix = self._stage_mix(i)
+        if mix is not None:
+            residual = residual * mix.to(residual.real.dtype if residual.is_complex() else residual.dtype)
         return residual
 
     def forward(self, xPrev, y, sampleMask, return_intermediates=False, stats=None, volume_id=None):
@@ -444,7 +491,11 @@ class cascadeNet(nn.Module):
         intermediates = []
         for i, transformer in enumerate(self.transformers):
             lamb_i = self._lamb_for_stage(i)
-            candidate = x + transformer(x, col_mask=sampleMask)
+            residual = transformer(x, col_mask=sampleMask)
+            mix = self._stage_mix(i)
+            if mix is not None:
+                residual = residual * mix.to(residual.dtype)
+            candidate = x + residual
             if lamb_i is None:
                 x = (1 - sampleMask) * candidate + sampleMask * y_pair
             else:

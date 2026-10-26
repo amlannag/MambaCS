@@ -494,6 +494,8 @@ def _build_model_impl(cfg):
         freq_split_sigma_bounds=tuple(getattr(cfg, "freq_split_sigma_bounds", (0.05, 2 ** 0.5))),
         stage_write_bands=[tuple(b) if b is not None else None for b in cfg.stage_write_bands]
         if getattr(cfg, "stage_write_bands", None) is not None else None,
+        stage_mix_weights=[float(v) if v is not None else None for v in cfg.stage_mix_weights]
+        if getattr(cfg, "stage_mix_weights", None) is not None else None,
     )
 
 

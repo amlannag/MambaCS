@@ -48,6 +48,7 @@ _MODEL_KEYS = {
     "freq_split_encoders", "freq_split_pairs", "freq_split_sigma_learned", "freq_split_sigma_schedule",
     "freq_split_sigma_start", "freq_split_sigma_end", "freq_split_sigma_init", "freq_split_sigma_bounds",
     "window_col_segments", "window_height", "window_width", "window_shift", "window_d_model", "window_nhead",
+    "stage_write_bands", "stage_mix_weights",
 }
 
 
