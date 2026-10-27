@@ -117,7 +117,7 @@ class Config:
     # "both" (row then column pass), "vertical" (columns only) or "both+radial": a third pass over half-spoke tokens
     # (lines from DC at radial_num_spokes angles, radial_spacing px per sample, out to the inscribed circle), added as a
     # residual to the column pass output. A k-space streak at any orientation lies inside one spoke token.
-    axial_token_axis: str = "both"
+    axial_token_axis: str = "both+radial"
     radial_num_spokes: int = 320
     radial_spacing: float = 1.0
     # Cut every half-spoke into this many radial segments, each its own token (spokes x segments grid, 2-D RoPE at the

@@ -132,7 +132,7 @@ _ENCODER_ARGS = {
             attn_type=cfg.attn_type,
             row_stride=cfg.axial_row_stride,
             mask_vertical_attn=cfg.mask_vertical_attn,
-            token_axis=getattr(cfg, "axial_token_axis", "both"),
+            token_axis=getattr(cfg, "axial_token_axis", "both+radial"),
             col_segments=getattr(cfg, "axial_col_segments", 1),
             radial_num_spokes=getattr(cfg, "radial_num_spokes", 320),
             radial_spacing=getattr(cfg, "radial_spacing", 1.0),
@@ -628,7 +628,7 @@ def build_model_from_config_dict(cfg_dict):
     cfg.learning = model_cfg.get("learning", "k_space")
     cfg.kspace_real_channels = model_cfg.get("kspace_real_channels", False)
     cfg.lambda_schedule = model_cfg.get("lambda_schedule", "none")
-    cfg.pos_emb_type = model_cfg.get("pos_emb_type", "APE")
+    cfg.pos_emb_type = model_cfg.get("pos_emb_type", "Rope-Axial")
     cfg.attn_type = model_cfg.get("attn_type", "standard")
     cfg.attn_scales = tuple(model_cfg.get("attn_scales", (1, 3)))
     cfg.fnet_share_ffn = model_cfg.get("fnet_share_ffn", False)
@@ -644,7 +644,7 @@ def build_model_from_config_dict(cfg_dict):
     cfg.rope_theta = model_cfg.get("rope_theta", 100.0)
     cfg.rope_mixed_rotate = model_cfg.get("rope_mixed_rotate", True)
     cfg.axial_row_stride = model_cfg.get("axial_row_stride", 1)
-    cfg.axial_token_axis = model_cfg.get("axial_token_axis", "both")
+    cfg.axial_token_axis = model_cfg.get("axial_token_axis", "both+radial")
     cfg.mask_vertical_attn = model_cfg.get("mask_vertical_attn", "none")
     cfg.ffn_sharing = model_cfg.get("ffn_sharing", "none")
     cfg.flattening_order = model_cfg.get("flattening_order", "row_major")
