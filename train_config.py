@@ -25,7 +25,8 @@ FASTMRI_FNET_CROSS_REFINE3_MIXW_PIXDC_RADIAL = {
     "norm": "fastmri_magnitude",
 
     # warm start — fnet + cross_axial openers from the trained fixed-band freqsplit run
-    "init_stages_from": "../Experiments/FASTMRI/freqsplit/fastmri_random_fnet_cross_refine3consol3_win_d128_split_sigmarev_bandedmean_r4_100ep/best_model.pth",
+    # (experiments are saved flat as ../Experiments/<prefix>_<name>/ on HPC)
+    "init_stages_from": "../Experiments/fastmri_random_fnet_cross_refine3consol3_win_d128_split_sigmarev_bandedmean_r4_100ep/best_model.pth",
     "init_stages": [0, 1],
 
     # cascade
