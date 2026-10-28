@@ -83,7 +83,7 @@ BRAIN_FNET_CROSS_REFINE3_MIXW_PIXDC_RADIAL_400EP = {
 
     # training
     "epochs": 400,
-    "num_gpus": 4,
+    "num_gpus": 3,
     "batch_size_search_start": 96,
     "lr": 1e-4,
 }
