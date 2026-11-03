@@ -586,7 +586,17 @@ def _is_oom_error(error):
         if isinstance(error_type, type)
     )
     message = str(error).lower()
-    return isinstance(error, oom_types) or "out of memory" in message or "cudnn_status_alloc_failed" in message
+    return (
+        isinstance(error, oom_types)
+        or "out of memory" in message
+        or "cudnn_status_alloc_failed" in message
+        # ROCm/MIOpen: an HIP allocation failure inside MIOpen surfaces as its generic
+        # "miopenStatusUnknownError" (or miopenStatusAllocFailed) instead of torch's OOM
+        # error, so the batch-size search would otherwise crash instead of backing off.
+        or "miopenstatusunknownerror" in message
+        or "miopenstatusalloc" in message
+        or "hip_check_error" in message
+    )
 
 
 def _clear_cuda_memory():
