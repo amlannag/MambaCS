@@ -576,36 +576,13 @@ def _clip_gradients(model, max_norm):
         nn.utils.clip_grad_norm_(unique_model_parameters(model), max_norm=max_norm)
 
 
-def _is_oom_error(error):
-    oom_types = tuple(
-        error_type
-        for error_type in (
-            getattr(torch, "OutOfMemoryError", None),
-            getattr(torch.cuda, "OutOfMemoryError", None),
-        )
-        if isinstance(error_type, type)
-    )
-    message = str(error).lower()
-    return (
-        isinstance(error, oom_types)
-        or "out of memory" in message
-        or "cudnn_status_alloc_failed" in message
-        # ROCm/MIOpen: an HIP allocation failure inside MIOpen surfaces as its generic
-        # "miopenStatusUnknownError" (or miopenStatusAllocFailed) instead of torch's OOM
-        # error, so the batch-size search would otherwise crash instead of backing off.
-        or "miopenstatusunknownerror" in message
-        or "miopenstatusalloc" in message
-        or "hip_check_error" in message
-    )
-
-
 def _clear_cuda_memory():
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
 
-BATCH_SIZE_BACKOFF = 0.8   # multiply the batch size by this after every OOM (always shrinks by at least 1)
+BATCH_SIZE_BACKOFF = 0.8   # multiply the batch size by this after every failed probe (always shrinks by at least 1)
 
 
 class BatchMemoryHeadroomExceeded(RuntimeError):
@@ -624,15 +601,17 @@ def _find_executable_batch_size(starting_batch_size, probe, backoff=BATCH_SIZE_B
         try:
             probe(batch_size)
         except RuntimeError as error:
-            if not (_is_oom_error(error) or isinstance(error, BatchMemoryHeadroomExceeded)):
-                raise
+            # Any probe failure backs the batch size off and retries: on ROCm a GPU OOM can
+            # surface as many different runtime errors (MIOpen status codes, HIP errors, ...),
+            # and each candidate rebuilds the model anyway. A genuine (non-memory) bug still
+            # surfaces at batch size 1 below with the original error chained.
             message = str(error)
             error.__traceback__ = None
             _clear_cuda_memory()
             if batch_size == 1:
-                raise RuntimeError("Model cannot fit a batch size of 1") from error
+                raise RuntimeError(f"Batch size 1 failed: {message.splitlines()[0]}") from error
             next_batch_size = max(1, min(batch_size - 1, int(batch_size * backoff)))
-            phase(f"OOM at batch size {batch_size}: {message.splitlines()[0]}")
+            phase(f"Probe failed at batch size {batch_size}: {message.splitlines()[0]}")
             phase(f"Retrying with batch size {next_batch_size}.")
             batch_size = next_batch_size
         else:

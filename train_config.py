@@ -84,7 +84,7 @@ BRAIN_FNET_CROSS_REFINE3_MIXW_PIXDC_RADIAL_400EP = {
     # training
     "epochs": 400,
     "num_gpus": 2,
-    "batch_size_search_start": 96,
+    "batch_size_search_start": 64,   # 32/GPU — the size that fit on 3 GPUs; avoids OOM probe restarts
     "lr": 1e-4,
 }
 
