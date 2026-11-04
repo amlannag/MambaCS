@@ -1,30 +1,26 @@
 # ---------------------------------------------------------------------------
-# fastMRI brain multicoil, equispaced R=4 (8% ACS), 8 virtual coils (SVD coil compression), 4 GPUs x 400 epochs.
-# Continuation of the 100-epoch run brain_equi_fnet_nbr_percoil_refine3consol3_mixw_pixdc_radial_bandedmean_r4_100ep_fnetnbrinit:
-# ALL 9 cascade stages are warm-started from that run's best_model.pth (the network weights only; the learned
-# per-pixel DC lambdas, per-pixel mix filters and freq_split sigmas re-initialise at their defaults) and stay
-# trainable. A fresh 400-epoch cosine LR schedule runs from lr=1e-4.
-# Same learned-filter recipe: radial pass on the freq_split low expert, pixel-wise DC (dc_type='pixelwise'),
-# learned per-pixel sigmoid write filters on the refine stages.
-# Batch search starts at 96 global (24/GPU on 4 GPUs; 8 coils = 8x the tokens of the knee runs).
+# fastMRI brain multicoil, equispaced R=4 (8% ACS), 16 virtual coils (SVD coil compression), 400 epochs.
+# coil_compress keeps the top-16 PCA virtual coils in energy order: 16-coil volumes keep all 16 (full rank, a lossless
+# change of basis), 20-coil volumes keep the top 16 of 20 (volumes with < 16 coils are zero-padded to 16 channels).
+# Same recipe as the 8-coil 400-epoch run (brain_..._400ep_fnetnbrinit): radial pass on the freq_split low expert,
+# pixel-wise DC (dc_type='pixelwise'), learned per-pixel sigmoid write filters on the refine stages.
+# Trained from scratch: every stage has coil-count-dependent weights (embeddings 8*320 -> 16*320 wide, coil
+# embeddings 8 -> 16), so the 8-coil checkpoints cannot be loaded. Fresh 400-epoch cosine LR schedule from lr=1e-4.
+# 16 coils = 2x the tokens of the 8-coil run, so the batch search starts at half its size.
 # ---------------------------------------------------------------------------
-BRAIN_FNET_CROSS_REFINE3_MIXW_PIXDC_RADIAL_400EP = {
+BRAIN_FNET_CROSS_REFINE3_MIXW_PIXDC_RADIAL_16VC_400EP = {
     "prefix": "brain",
-    "name": "equi_fnet_nbr_percoil_refine3consol3_mixw_pixdc_radial_bandedmean_r4_400ep_fnetnbrinit",
+    "name": "equi_fnet_nbr_percoil_refine3consol3_mixw_pixdc_radial_bandedmean_r4_400ep_16vc",
 
     # data
     "dataset": "fastmri_brain",
-    "num_channels": 8,
+    "num_channels": 16,
     "image_size": (320, 320),
     "mask_type": "equispaced",
     "acceleration_factors": [4],
     "center_fractions": [0.08],
     "learning": "k_space",
     "norm": "fastmri_magnitude",
-
-    # warm start — ALL stages from the trained 100-epoch brain run
-    "init_stages_from": "../Experiments/brain_equi_fnet_nbr_percoil_refine3consol3_mixw_pixdc_radial_bandedmean_r4_100ep_fnetnbrinit/best_model.pth",
-    "init_stages": [0, 1, 2, 3, 4, 5, 6, 7, 8],
 
     # cascade
     "encoders": ["fnet", "neighbourhood", "cross_axial_per_coil", "window_axial", "freq_split", "window_axial", "freq_split", "window_axial", "freq_split"],
@@ -84,10 +80,10 @@ BRAIN_FNET_CROSS_REFINE3_MIXW_PIXDC_RADIAL_400EP = {
     # training
     "epochs": 400,
     "num_gpus": 2,
-    "batch_size_search_start": 64,   # 32/GPU — the size that fit on 3 GPUs; avoids OOM probe restarts
+    "batch_size_search_start": 32,   # half the 8-coil run's 64: 16 coils = 2x the tokens
     "lr": 1e-4,
 }
 
 EXPERIMENTS = [
-    BRAIN_FNET_CROSS_REFINE3_MIXW_PIXDC_RADIAL_400EP,
+    BRAIN_FNET_CROSS_REFINE3_MIXW_PIXDC_RADIAL_16VC_400EP,
 ]
